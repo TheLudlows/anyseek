@@ -8,8 +8,7 @@ pub mod api_types;
 pub async fn query_records(
     partition: &crate::record::RecordPartition,
     query: crate::record::RecordQuery,
-    relations: Option<crate::record::RelationFusion>,
     fields: Vec<String>,
 ) -> Result<crate::record::RecordSearch, crate::record::RecordError> {
-    partition.query_output(query, relations, Some(fields)).await
+    partition.query_output(query, Some(fields)).await
 }

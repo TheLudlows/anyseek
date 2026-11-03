@@ -68,26 +68,10 @@ pub(super) fn prepare_at(state:&State, config:&RecordConfig, current_snapshot_by
     // record body, which may have grown since that operation was committed.
     let prior_bytes=state.records.get(&request.record_id).map(checkpoint_codec::json_length).transpose()?.unwrap_or(0) as u64;
     let _prior_plan=crate::storage::build_budget::reserve_memory(prior_bytes.checked_mul(32).ok_or_else(||storage("planner prior estimate overflow"))?).map_err(storage)?;
-    if state.evidence_quarantined
-        && (request.system.is_some()
-            || request.temporal.as_ref().is_some_and(|t| t.expire_at_ms.is_some())
-            || state
-                .records
-                .get(&request.record_id)
-                .is_some_and(temporal::protected))
-    {
-        return Err(RecordError::Rejected(
-            "restored evidence quarantined; deletion-history reconciliation not yet supported"
-                .into(),
-        ));
-    }
     if request.vector_patch.is_some() {
-        enrichment::validate(state, config, &request)?;
-    } else {
-        evidence::validate(&state.records, &request)?;
+        enrichment::validate(state, config, &request, evaluation_time_ms)?;
     }
     let temporal = temporal::retained(state.records.get(&request.record_id), &request, evaluation_time_ms)?;
-    if state.independent_snapshot && temporal.expire_at_ms.is_some() { return Err(RecordError::Rejected("TTL requires a certified live owner".into())); }
     let next_document = enrichment::document(state.records.get(&request.record_id), &request)?;
     if let Some(document) = &next_document {
         validate_document_depth(document)?;
@@ -96,28 +80,14 @@ pub(super) fn prepare_at(state:&State, config:&RecordConfig, current_snapshot_by
             return Err(RecordError::Rejected("enriched record byte budget exceeded".into()));
         }
     }
-    // One fixed bounded delete command/receipt per live typed identity. This
-    // reserve is retained even when an ancestor already hides that identity.
-    let deleting_typed = next_document.is_none()
-        && state
-            .records
-            .get(&request.record_id)
-            .is_some_and(|r| r.system.is_some());
-    let creating_typed =
-        request.system.is_some() && !state.records.contains_key(&request.record_id);
-    let reserved_slots = state.records.live_typed_count() + usize::from(creating_typed) - usize::from(deleting_typed);
-    // 8 KiB covers JSON escaping of bounded IDs/nonce, envelope, receipt, and
-    // journal frame overhead. No evidence edges are copied into delete requests.
     let previous_ttl=state.records.get(&request.record_id).is_some_and(temporal::live_ttl);
     let next_ttl=next_document.is_some() && temporal.expire_at_ms.is_some();
-    let reserve_bytes = reserved_slots * 8192
-        + temporal::reserve_bytes(state) + usize::from(next_ttl)*8192 - usize::from(previous_ttl)*8192;
+    let reserve_bytes = temporal::reserve_bytes(state) + usize::from(next_ttl)*8192 - usize::from(previous_ttl)*8192;
     if serde_json::to_vec(&request).map_err(storage)?.len() > config.max_record_bytes
         || state
             .operations
             .len()
             .saturating_add(1)
-            .saturating_add(reserved_slots)
             > config.max_operations
     {
         return Err(RecordError::Rejected(
@@ -125,18 +95,9 @@ pub(super) fn prepare_at(state:&State, config:&RecordConfig, current_snapshot_by
         ));
     }
     let previous = state.records.get(&request.record_id);
-    let live_sources = state.records.retained_source_count();
-    let adding_history = request.vector_patch.is_none() && previous.is_some_and(evidence::retained_revision);
-    let new_source = previous.is_none() && request.system.as_ref().is_some_and(|s| s.kind == EvidenceKind::Source);
-    let deleting_source = adding_history && next_document.is_none();
-    if state.source_revisions.len() + usize::from(adding_history) + live_sources
-        + usize::from(new_source) - usize::from(deleting_source) > config.max_records {
-        return Err(RecordError::Rejected("source revision budget reserves final deletion slots".into()));
-    }
-
     let matches = match request.expected {
         ExpectedVersion::Any => true,
-        ExpectedVersion::Absent => previous.is_none_or(|r| r.document.is_none()),
+        ExpectedVersion::Absent => previous.is_none_or(|r| !temporal::visible(r,evaluation_time_ms)),
         ExpectedVersion::Match(v) => previous.is_some_and(|r| r.version == v),
     };
     if !matches {
@@ -197,23 +158,15 @@ pub(super) fn projected_record(state: &State, applied: &Applied, document: Optio
         version: applied.receipt.version,
         document,
         temporal, ingested_at_ms: if applied.request.document.is_none() { previous.map_or(applied.observed_time_ms, |r| r.ingested_at_ms) } else { applied.observed_time_ms }, expired_at_ms: None,
-        system: applied
-            .request
-            .system
-            .clone()
-            .or_else(|| previous.and_then(|p| p.system.clone())),
     }
 }
 
 pub(super) fn snapshot_after(state: &State, before: usize, applied: &Applied, next: &Record) -> Result<usize, RecordError> {
     let old = state.records.get(&next.record_id);
     let old_bytes = old.map(checkpoint_codec::json_length).transpose()?.unwrap_or(0);
-    let history = if applied.request.vector_patch.is_none() && old.is_some_and(evidence::retained_revision) {
-        old_bytes.checked_add(usize::from(!state.source_revisions.is_empty())).ok_or_else(||storage("snapshot history size overflow"))?
-    } else { 0 };
     let key = if old.is_none() { checkpoint_codec::json_length(&next.record_id)?.checked_add(1+usize::from(!state.records.is_empty())).ok_or_else(||storage("snapshot key size overflow"))? } else { 0 };
     let delta = |new:u64, old:u64| new.to_string().len().checked_sub(old.to_string().len()).ok_or_else(||storage("snapshot scalar regressed"));
-    let additions = [history,key,checkpoint_codec::json_length(next)?,checkpoint_codec::json_length(applied)?,usize::from(!state.operations.is_empty()),
+    let additions = [key,checkpoint_codec::json_length(next)?,checkpoint_codec::json_length(applied)?,usize::from(!state.operations.is_empty()),
         delta(applied.receipt.seq,state.seq)?,delta(applied.observed_epoch.max(state.epoch_watermark),state.epoch_watermark)?,delta(applied.observed_time_ms.max(state.time_watermark_ms),state.time_watermark_ms)?];
     additions.into_iter().try_fold(before.checked_sub(old_bytes).ok_or_else(||storage("snapshot size underflow"))?, |sum,n|sum.checked_add(n).ok_or_else(||storage("snapshot size overflow")))
 }
@@ -251,14 +204,13 @@ mod replay_size_tests {
 
     use super::*;
     #[test]
-    fn durable_size_matches_full_wire_with_history_tombstones_and_digit_boundaries() {
+    fn durable_size_matches_full_wire_with_tombstones_and_digit_boundaries() {
         let mut config=super::super::tests::config();config.max_records=512;config.max_operations=512;config.max_record_bytes=1024*1024;config.max_journal_bytes=16*1024*1024;
         let mut state=State::default();let mut before=checkpoint_codec::length(&config,&state).unwrap();
         for i in 0..104 {
             let id=if i<100{format!("id-\"{i}繁")}else{"id-\"0繁".into()};
             let mut request=super::super::tests::write(&format!("op-{i}"),&id,"alpha",ExpectedVersion::Any);
             request.operation_id.epoch=9+i/10;
-            request.system=Some(EvidenceMetadata{kind:EvidenceKind::Source,relation:None,evidence_refs:vec![]});
             if i==0 {request.document.as_mut().unwrap().insert("opaque".into(),serde_json::json!("large\n繁體".repeat(8192)));}
             if i==102 {request.document=None;}
             let previous=state.records.get(&id);
@@ -268,8 +220,7 @@ mod replay_size_tests {
             let wire=encode_entry(&Entry::Checkpoint{config:config.clone(),state:state.clone()}).unwrap();
             assert_eq!(bytes,wire.len(),"operation {i}");before=bytes;
         }
-        assert_eq!(state.operations.len(),104);assert_eq!(state.source_revisions.len(),3);
-        assert_eq!(state.source_revisions[0].document.as_ref().unwrap()["opaque"].as_str().unwrap().len(),"large\n繁體".repeat(8192).len());
+        assert_eq!(state.operations.len(),104);
     }
     #[test]
     fn malformed_replay_sequence_and_size_fail_closed() {
@@ -280,7 +231,7 @@ mod replay_size_tests {
     }
 }
 
-/// Reserve durable typed deletion and TTL decisions.
+/// Reserve durable TTL reclamation decisions.
 pub(super) fn reserve_bytes(state: &State) -> usize {
-    state.records.live_typed_count() * 8192 + temporal::reserve_bytes(state)
+    temporal::reserve_bytes(state)
 }

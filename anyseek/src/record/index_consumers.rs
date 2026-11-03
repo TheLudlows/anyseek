@@ -145,7 +145,7 @@ impl Engine {
                     .unwrap()
                     .join(".test-vector-consumer-fail-after-append")
                     .exists();
-                #[cfg(test)]
+                #[cfg(any(test, feature = "fault-injection"))]
                 let panic_after = Path::new(&index.read().await.index_path_string)
                     .parent()
                     .unwrap()
@@ -179,7 +179,7 @@ impl Engine {
                     }
                     shard.active.as_mut().unwrap().append_identity(input.identity.id, input.identity.version, input.identity.revision, input.fingerprint.ok_or_else(|| storage("vector fingerprint missing"))?);
                     shard.append(input.document).await.map_err(storage)?;
-                    #[cfg(test)]
+                    #[cfg(any(test, feature = "fault-injection"))]
                     if panic_after {
                         panic!("injected vector panic after append");
                     }
@@ -235,7 +235,7 @@ struct Batch {
 struct Queue {
     batches: VecDeque<Batch>,
     running: bool,
-    worker: Option<tokio::task::JoinHandle<()>>,
+    worker: Option<crate::resources::Task<()>>,
 }
 #[derive(Clone)]
 pub(super) struct Consumer {
@@ -399,6 +399,19 @@ impl Consumer {
     /// Administrative/synchronous paths join owned work before sealing a tail
     /// or relying on immediate visibility. Normal committed execution never joins this task.
     pub async fn drain(&self) -> Result<(), RecordError> {
+        self.join_worker().await?;
+        if self.cursors.error().is_some() {
+            Err(RecordError::RecoveryRequired)
+        } else {
+            if let Engine::Lexical(native) = &self.engine {
+                native.finish_consumption();
+            }
+            Ok(())
+        }
+    }
+    // Shutdown needs actual task completion even when indexing failed. It must
+    // not require healthy index cursors to release files for later recovery.
+    pub(super) async fn join_worker(&self) -> Result<(), RecordError> {
         let worker = self
             .queue
             .lock()
@@ -408,14 +421,7 @@ impl Consumer {
         if let Some(worker) = worker {
             worker.await.map_err(storage)?;
         }
-        if self.cursors.error().is_some() {
-            Err(RecordError::RecoveryRequired)
-        } else {
-            if let Engine::Lexical(native) = &self.engine {
-                native.finish_consumption();
-            }
-            Ok(())
-        }
+        Ok(())
     }
 }
 

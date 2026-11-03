@@ -12,7 +12,6 @@ pub(super) fn visit(state: &mut Value, mut body: impl FnMut(&mut Value)->Result<
     }
 
     if let Some(records)=state.get_mut("records").and_then(Value::as_object_mut){for value in records.values_mut(){record(value,&mut body)?;}}
-    if let Some(history)=state.get_mut("source_revisions").and_then(Value::as_array_mut){for value in history{record(value,&mut body)?;}}
     if let Some(operations)=state.get_mut("operations").and_then(Value::as_array_mut){for op in operations{
         let request=op.get_mut("request").ok_or_else(||storage("missing prepared request"))?;
         record(request,&mut body)?;
@@ -36,11 +35,11 @@ fn encoded_length(value:&Value,limit:u64)->Result<u64,RecordError> {
     let mut counter=Counter{bytes:0,limit};
     serde_json::to_writer(&mut counter,value).map_err(storage)?;Ok(counter.bytes)
 }
-// A full State has at most max_records current bodies and max_records source
-// revisions. Each retained operation has either a document or a vector patch.
+// A full State has at most max_records current bodies. Each retained
+// operation has either a document or a vector patch.
 #[cfg(test)]
 fn payload_limit(config:&RecordConfig)->Result<usize,RecordError>{
-    config.max_records.checked_mul(2).and_then(|n|n.checked_add(config.max_operations)).ok_or_else(||storage("payload budget overflow"))
+    config.max_records.checked_add(config.max_operations).ok_or_else(||storage("payload budget overflow"))
 }
 #[cfg(test)]
 fn hydrate(config:RecordConfig,mut wire:Value,max_bytes:u64,mut read:impl FnMut(&Value)->Result<Vec<u8>,RecordError>)->Result<(RecordConfig,State),RecordError>{
@@ -99,12 +98,11 @@ mod tests {
     use crate::storage::payload_pool::{Budget, Closure, PoolBuilder, PoolReader};
 
     #[test]
-    fn full_state_payload_bound_counts_sources_and_vector_patches() {
+    fn full_state_payload_bound_counts_records_and_vector_patches() {
         let mut config=super::super::tests::config();
         config.max_records=2;config.max_operations=2;
         let mut state=serde_json::json!({
             "records":{"a":{"document":{}},"b":{"document":{"body":"current"}}},
-            "source_revisions":[{"document":{"body":"old1"}},{"document":{"body":"old2"}}],
             "operations":[{"request":{"document":{"body":"write"}}},
                 {"request":{"document":null,"vector_patch":{"vector":[1,2]}}}]
         });
@@ -125,13 +123,13 @@ mod tests {
         (prepared,reader,closure,directory.join(format!("payload-{id}")))
     }
     #[tokio::test]
-    async fn successive_record_anchors_share_prior_request_and_source_payloads(){
+    async fn successive_record_anchors_share_prior_request_and_record_payloads(){
         use crate::storage::payload_pool::{Budget,Closure,PoolBuilder,PoolReader};
         let root=super::super::tests::path();let config=super::super::tests::config();
         let partition=RecordPartition::create(&root,config.clone()).await.unwrap();
         let objects=root.join("objects");std::fs::create_dir(&objects).unwrap();
         let budget=Budget{bytes:config.max_journal_bytes,objects:4,payloads:100,body_bytes:config.max_record_bytes};
-        partition.write(super::super::tests::source_write("initial","source",&[])).await.unwrap();
+        partition.write(super::super::tests::write("initial","r","plain original",ExpectedVersion::Absent)).await.unwrap();
         let mut pool=PoolBuilder::begin(&objects,Closure::default(),budget,format!("{:032x}",1)).unwrap();
         let first={let inner=partition.inner.lock().await;ReferencedState::write(&inner.config,&inner.state,&mut pool).unwrap()};
         let closure=pool.finish().unwrap();assert_eq!(closure.objects.values().map(|d|d.payloads.len()).sum::<usize>(),1);
@@ -140,7 +138,7 @@ mod tests {
         let narrow=ReferencedState{config:RecordConfig{max_record_bytes:1,..config.clone()},state:first.state.clone()};
         assert!(narrow.read(&reader,config.max_journal_bytes).unwrap_err().to_string().contains("payload read budget exceeded"));
         first.read(&reader,config.max_journal_bytes).unwrap();drop(reader);
-        let mut update=super::super::tests::source_write("revision","source",&[]);update.expected=ExpectedVersion::Match(1);
+        let mut update=super::super::tests::write("revision","r","plain original",ExpectedVersion::Absent);update.expected=ExpectedVersion::Match(1);
         update.document.as_mut().unwrap().insert("body".into(),serde_json::json!("revised alpha"));
         partition.write(update).await.unwrap();
         let mut pool=PoolBuilder::begin(&objects,closure,budget,format!("{:032x}",2)).unwrap();
@@ -180,14 +178,14 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
     #[tokio::test]
-    async fn referenced_state_keeps_history_and_same_version_vector_patch() {
-        use super::super::tests::{path,config,source_write,write};
+    async fn referenced_state_keeps_retry_requests_and_same_version_vector_patch() {
+        use super::super::tests::{path,config,write};
         let root=path(); let settings=config();
         let partition=RecordPartition::create(&root,settings.clone()).await.unwrap();
-        let mut source=source_write("source","s",&[]);
-        source.document.as_mut().unwrap().shift_remove("vector");
-        let original=source.document.clone();
-        partition.write(source.clone()).await.unwrap();
+        let mut initial=write("initial","s","plain original",ExpectedVersion::Absent);
+        initial.document.as_mut().unwrap().shift_remove("vector");
+        let original=initial.document.clone();
+        partition.write(initial.clone()).await.unwrap();
         let mut patch=write("patch","s","ignored",ExpectedVersion::Match(1));
         patch.document=None;
         patch.vector_patch=Some(serde_json::from_value(serde_json::json!({"vector":[7.0,0.0]})).unwrap());
@@ -196,7 +194,6 @@ mod tests {
         revision.document.as_mut().unwrap().shift_remove("vector");
         partition.write(revision).await.unwrap();
         let inner=partition.inner.lock().await;
-        assert_eq!(inner.state.source_revisions.len(),1);
         let expected=serde_json::to_vec(&inner.state).unwrap();
         let (prepared,pool,closure,_)=prepare(&root,&settings,&inner.state);
         let mut references=0; let mut wire=prepared.state.clone();
@@ -205,7 +202,7 @@ mod tests {
         let (_,state)=prepared.read(&pool,settings.max_journal_bytes).unwrap();
         assert_eq!(serde_json::to_vec(&state).unwrap(),expected);
         assert_eq!(state.operations[0].request.document,original);
-        assert_eq!(state.source_revisions[0].document.as_ref().unwrap()["vector"],serde_json::json!([7.0,0.0]));
+        assert_eq!(state.operations[1].request.vector_patch.as_ref().unwrap()["vector"],serde_json::json!([7.0,0.0]));
         assert_eq!(state.records["s"].version,2);
         drop(pool);drop(inner);drop(partition);std::fs::remove_dir_all(root).unwrap();
     }

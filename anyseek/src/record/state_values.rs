@@ -129,23 +129,11 @@ impl<'de, T: Serialize + Deserialize<'de>> Deserialize<'de> for Values<T> {
 // Derived admission statistics are never serialized or trusted from a checkpoint.
 // Every replacement (including edit and recovery inserts) passes insert_shared.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-struct AdmissionCounts {
-    ttl: usize,
-    sources: usize,
-    typed: usize,
-}
+struct AdmissionCounts { ttl: usize }
 impl AdmissionCounts {
-    fn of(record: &Record) -> Self {
-        Self { ttl: usize::from(temporal::live_ttl(record)),
-            sources: usize::from(evidence::retained_revision(record)),
-            typed: usize::from(record.system.is_some() && record.document.is_some()) }
-    }
+    fn of(record: &Record) -> Self { Self { ttl: usize::from(temporal::live_ttl(record)) } }
     fn replacing(self, old: Self, next: Self) -> Result<Self, RecordError> {
-        let update = |value: usize, before: usize, after: usize| value.checked_sub(before)
-            .and_then(|n| n.checked_add(after)).ok_or_else(|| storage("record admission count overflow"));
-        Ok(Self { ttl: update(self.ttl,old.ttl,next.ttl)?,
-            sources: update(self.sources,old.sources,next.sources)?,
-            typed: update(self.typed,old.typed,next.typed)? })
+        Ok(Self { ttl: self.ttl.checked_sub(old.ttl).and_then(|n|n.checked_add(next.ttl)).ok_or_else(|| storage("record admission count overflow"))? })
     }
 }
 #[derive(Debug, Clone, Default)]
@@ -174,8 +162,6 @@ impl Records {
         true
     }
     pub(super) fn live_ttl_count(&self) -> usize { self.counts.ttl }
-    pub(super) fn retained_source_count(&self) -> usize { self.counts.sources }
-    pub(super) fn live_typed_count(&self) -> usize { self.counts.typed }
     pub(super) fn validate_counts(&self) -> Result<(), RecordError> {
         let mut counts = AdmissionCounts::default();
         let mut earliest = None;
@@ -339,8 +325,6 @@ mod admission_count_tests {
     fn check(records: &Records) {
         records.validate_counts().unwrap();
         assert_eq!(records.live_ttl_count(), records.values().filter(|r| temporal::live_ttl(r)).count());
-        assert_eq!(records.retained_source_count(), records.values().filter(|r| evidence::retained_revision(r)).count());
-        assert_eq!(records.live_typed_count(), records.values().filter(|r| r.system.is_some() && r.document.is_some()).count());
     }
 
     #[test]
@@ -348,7 +332,6 @@ mod admission_count_tests {
         let mut state = State::default();
         for i in 0..12 {
             let mut request = super::super::tests::write(&format!("counts-{i}"), &format!("id-{}", i % 4), "alpha", ExpectedVersion::Any);
-            if i % 2 == 0 { request.system = Some(EvidenceMetadata { kind: EvidenceKind::Source, relation: None, evidence_refs: vec![] }); }
             if i < 4 { request.temporal = Some(TemporalMetadata { expire_at_ms: Some(1000), ..Default::default() }); }
             if i >= 8 { request.document = None; }
             let version = state.records.get(&request.record_id).map_or(1, |r| r.version + 1);

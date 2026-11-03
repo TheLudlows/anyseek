@@ -44,7 +44,6 @@ struct Candidate {
     index: view::RetrievalView,
     ordinals: Vec<String>,
     locations: BTreeMap<String, usize>,
-    graph: graph::Cache,
     snapshot_bytes: usize,
 }
 impl Candidate {
@@ -53,14 +52,13 @@ impl Candidate {
         std::mem::swap(&mut self.index, &mut inner.index);
         std::mem::swap(&mut self.ordinals, &mut inner.ordinals);
         std::mem::swap(&mut self.locations, &mut inner.locations);
-        std::mem::swap(&mut self.graph, &mut inner.graph_cache);
         std::mem::swap(&mut self.snapshot_bytes, &mut inner.snapshot_bytes);
     }
 }
 /// An accepted cancellation-safe maintenance job. Dropping this handle leaves
 /// its bounded owned worker running; `finish` waits for the indexed cut.
 pub struct IndexJob {
-    pub(super) handle: tokio::task::JoinHandle<Result<u64,RecordError>>,
+    pub(super) handle: crate::resources::Task<Result<u64,RecordError>>,
 }
 impl IndexJob {
     /// Wait for publication. Output still requires the service authorization permit.
@@ -135,7 +133,26 @@ impl RecordPartition {
                 if !inner.healthy { return Err(RecordError::RecoveryRequired); }
                 if inner.background.is_some() { return Err(RecordError::Busy); }
                 inner.index.drain_indexes().await?;
-                if mode==JobMode::VectorIndex {inner.advance_time().await?;}
+                if automatic {
+                    let evaluation=inner.observe_time()?;
+                    match inner.trim_history(evaluation).await {
+                        Ok(())=>{},
+                        Err(RecordError::Busy) if inner.maintenance_trim.is_some()=>{},
+                        Err(error)=>return Err(error),
+                    }
+                    if inner.maintenance_trim.is_none() {
+                        match inner.expire_due().await {
+                            Ok(())=>{},
+                            // A full WAL/remote tail needs this checkpoint before
+                            // it can admit an expiry command. Only a healthy,
+                            // pre-persistence Busy can defer expiry to the next sweep.
+                            Err(RecordError::Busy) if inner.healthy=>{},
+                            Err(error)=>return Err(error),
+                        }
+                    }
+                }
+
+                if mode==JobMode::VectorIndex {inner.observe_time()?;}
                 inner.reclaim_anchor_objects().await?;
                 let estimate = (inner.snapshot_bytes as u64).checked_mul(4)
                     .ok_or_else(||storage("index snapshot estimate overflow"))?;
@@ -246,7 +263,6 @@ impl RecordPartition {
                         .and_then(|n|n.checked_mul(64)).ok_or_else(||storage("index address budget overflow"))?,
                 }).await?;
                 let mut candidate = Candidate {
-                    graph:graph::Cache::rebuild(&loaded.state)?,
                     snapshot_bytes:checkpoint_codec::length(&config, &loaded.state)?,
                     state:loaded.state,index,ordinals,locations,
                 };
@@ -264,7 +280,7 @@ impl RecordPartition {
                 // without the foreground lock. A versioned recheck closes the gap.
                 let mut consumed=0usize;
                 let mut rounds=0usize;
-                let (_writer,mut inner)=loop {
+                let (writer_guard,mut inner)=loop {
                     rounds+=1;
                     if rounds>8 || started.elapsed()>=timeout {return Err(RecordError::Busy);}
                     let (raw,mut expected,revision,entry_count,entry_bytes,_raw,_decoded)={
@@ -286,7 +302,7 @@ impl RecordPartition {
                         let _phase=maintenance::Phase::new("background_replay_and_proof",expected.seq);
                         let mut context=replay::Context {root:&root,config:&config,state:&mut candidate.state,
                             index:&mut candidate.index,ordinals:&mut candidate.ordinals,locations:&mut candidate.locations,
-                            snapshot_bytes:&mut candidate.snapshot_bytes,graph_cache:&mut candidate.graph,
+                            snapshot_bytes:&mut candidate.snapshot_bytes,
                             #[cfg(test)] fail_publication_stage:0};
                         for bytes in raw {context.replay(serde_json::from_slice(&bytes).map_err(storage)?).await?;}
                         intent.apply(&mut expected,&config)?;
@@ -296,8 +312,8 @@ impl RecordPartition {
                     consumed=entry_count;
                     #[cfg(test)]
                     pause_catchup(&root,timeout).await;
-                    let writer_guard=writer.lock().await;
-                    let inner=owner.lock().await;
+                    let writer_guard=writer.clone().lock_owned().await;
+                    let inner=owner.clone().lock_owned().await;
                     let _check_phase=maintenance::Phase::new("candidate_recheck_locked",inner.state.seq);
                     if !inner.healthy {return Err(RecordError::RecoveryRequired);}
                     if started.elapsed()>=timeout || serde_json::to_vec(&inner.anchor).map_err(storage)?!=base {return Err(RecordError::Busy);}
@@ -332,22 +348,38 @@ impl RecordPartition {
                 crash_boundary("authority");
                 // Borrow fields separately: the complete suffix is durably staged
                 // before the new local generation acquires its certificate.
-                let journal_result = {
-                    let _phase=maintenance::Phase::new("background_journal_install_locked",inner.state.seq);
-                    #[cfg(test)] pause_journal_install(&root).await;
-                    let permit = match crate::resources::Scope::current() {
-                        Some(scope) => scope.journal_io().await.map(Some)
-                            .map_err(|error| CreateError::NotPublished(std::io::Error::other(error))),
-                        None => Ok(None),
-                    };
-                    let Inner{journal,background,..} = &mut *inner;
-                    let mut install = || journal.checkpoint_with_tail(&certificate,&background.as_ref().unwrap().entries);
-                    match permit {
-                        Ok(Some(permit)) => permit.run(install),
-                        Ok(None) => install(),
-                        Err(error) => Err(error),
-                    }
+                #[cfg(test)] pause_journal_install(&root).await;
+                let context = crate::resources::Scope::current();
+                let permit = match &context {
+                    Some(scope) => scope.journal_io().await.map(Some)
+                        .map_err(|error| CreateError::NotPublished(std::io::Error::other(error))),
+                    None => Ok(None),
                 };
+                // The existing two-job admission bounds these workers. Move the
+                // journal owner and writer guard together; caller cancellation
+                // cannot release either while a filesystem transaction runs.
+                #[cfg(test)] let journal_root = root.clone();
+                let (returned_inner, _writer, journal_result) = crate::resources::spawn_blocking(move || {
+                    let mut install = || {
+                        let _phase = maintenance::Phase::new("background_journal_install_locked", inner.state.seq);
+                        let Inner { journal, background, .. } = &mut *inner;
+                        let mut install = || {
+                            #[cfg(test)] blocking_journal_pause(&journal_root);
+                            journal.checkpoint_with_tail(&certificate, &background.as_ref().unwrap().entries)
+                        };
+                        match permit {
+                            Ok(Some(permit)) => permit.run(install),
+                            Ok(None) => install(),
+                            Err(error) => Err(error),
+                        }
+                    };
+                    let result = match context {
+                        Some(context) => context.run_sync(install),
+                        None => install(),
+                    };
+                    (inner, writer_guard, result)
+                }).await.map_err(|error| RecordError::OutcomeUnknown(error.to_string()))?;
+                let mut inner = returned_inner;
                 #[cfg(test)]
                 let journal_result=if mode==JobMode::Compact && root.join(".test-checkpoint-before-certificate").exists() {
                     journal_result.map_err(|error|match error {
@@ -518,7 +550,7 @@ pub(super) async fn pause_journal_install(root: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use super::super::tests::{config,path,write,source_write,query};
+    use super::super::tests::{config,path,write,query};
     #[tokio::test(flavor = "current_thread")]
     async fn compact_native_probe_releases_io_before_waiting_for_shard_statistics() {
         use std::{future::Future, io::Write, task::Poll};
@@ -667,6 +699,9 @@ mod tests {
         {let inner=p.inner.lock().await;assert_eq!(inner.state.time_watermark_ms,1_000);assert_eq!(inner.state.history.floor,0);}
         let request=write("second","b","beta",ExpectedVersion::Absent);
         let receipt=tokio::time::timeout(Duration::from_secs(2),p.write(request.clone())).await.unwrap().unwrap();
+        // Foreground writes no longer trim history. Explicitly perform the
+        // authenticated same-sequence maintenance transition during the build.
+        {let _writer=p.writer.lock().await;let mut inner=p.inner.lock().await;let at=inner.observe_time().unwrap();inner.trim_history(at).await.unwrap();}
         {let inner=p.inner.lock().await;assert_eq!(inner.state.history.floor,1);assert_eq!(inner.background.as_ref().unwrap().revision,2);}
         let completion=job.handle.abort_handle();drop(job);drop(p);
         assert!(RecordPartition::open(&root,config().max_journal_bytes).await.is_err());
@@ -722,7 +757,7 @@ mod tests {
         let request=write("second","b","beta",ExpectedVersion::Absent);
         let receipt=tokio::time::timeout(Duration::from_secs(2),p.write(request.clone())).await.unwrap().unwrap();
         p.inner.lock().await.clock=Arc::new(Fixed(1_001+settings.history.retention_ms));
-        p.advance_time().await.unwrap();
+        {let _writer=p.writer.lock().await;let mut inner=p.inner.lock().await;let at=inner.observe_time().unwrap();inner.trim_history(at).await.unwrap();}
         {let inner=p.inner.lock().await;assert_eq!(inner.state.seq,2);assert_eq!(inner.state.history.floor,2);assert_eq!(inner.background.as_ref().unwrap().revision,2);}
         let completion=job.handle.abort_handle();drop(job);drop(p);
         assert!(RecordPartition::open(&root,settings.max_journal_bytes).await.is_err());
@@ -769,7 +804,7 @@ mod tests {
         }).await.unwrap();
         let seq=p.inner.lock().await.state.seq;
         p.inner.lock().await.clock=Arc::new(Fixed(1_001+config().history.retention_ms));
-        p.advance_time().await.unwrap();
+        {let _writer=p.writer.lock().await;let mut inner=p.inner.lock().await;let at=inner.observe_time().unwrap();inner.trim_history(at).await.unwrap();}
         {let inner=p.inner.lock().await;assert_eq!(inner.state.seq,seq);assert_eq!(inner.state.history.floor,seq);assert_eq!(inner.background.as_ref().unwrap().revision,1);}
         std::fs::remove_file(root.join(".test-indexer-catchup-pause")).unwrap();
         assert_eq!(job.finish().await.unwrap(),seq);
@@ -781,8 +816,8 @@ mod tests {
     #[tokio::test]
     async fn background_index_cut_keeps_concurrent_writes_deletes_receipts_and_output_barrier() {
         let root=path();let p=RecordPartition::create(&root,config()).await.unwrap();
-        p.write(source_write("source","s",&[])).await.unwrap();
-        p.write(source_write("derived","d",&[("s",1)])).await.unwrap();
+        p.write(write("initial","s","plain original",ExpectedVersion::Absent)).await.unwrap();
+        p.write(write("peer","d","plain original",ExpectedVersion::Absent)).await.unwrap();
         p.write(write("first","a","alpha",ExpectedVersion::Absent)).await.unwrap();
         let output=p.output_permit().unwrap();
         std::fs::write(root.join(".test-indexer-pause"),b"pause").unwrap();
@@ -791,10 +826,10 @@ mod tests {
         assert!(matches!(p.index_committed(Duration::from_secs(1)).await,Err(RecordError::Busy)));
         let update=write("second","a","alpha revised",ExpectedVersion::Match(1));
         let receipt=p.write(update.clone()).await.unwrap();
-        let mut delete=write("delete-source","s","",ExpectedVersion::Match(1));delete.document=None;
+        let mut delete=write("delete-target","s","",ExpectedVersion::Match(1));delete.document=None;
         p.write(delete).await.unwrap();
-        assert!(p.get("d").await.unwrap().is_none());
-        assert!(output.deliver(||()).is_err());
+        assert!(p.get("d").await.unwrap().is_some());
+        assert!(output.deliver(||()).is_ok());
         p.write(write("third","b","alpha beta",ExpectedVersion::Absent)).await.unwrap();
         let before=query(&p,SearchMode::Lexical).await;
         std::fs::remove_file(root.join(".test-indexer-pause")).unwrap();
@@ -803,11 +838,11 @@ mod tests {
         assert_eq!(before.visible_seq,after.visible_seq);
         assert_eq!(before.count_total,after.count_total);
         assert_eq!(p.write(update.clone()).await.unwrap(),receipt);
-        assert!(p.get("d").await.unwrap().is_none());
+        assert!(p.get("d").await.unwrap().is_some());
         drop(p);let p=RecordPartition::open(&root,config().max_journal_bytes).await.unwrap();
         assert_eq!(p.write(update).await.unwrap(),receipt);
         assert_eq!(query(&p,SearchMode::Lexical).await.count_total,after.count_total);
-        assert!(p.get("d").await.unwrap().is_none());
+        assert!(p.get("d").await.unwrap().is_some());
         // Following incremental foreground flush must match the installed view.
         p.compact_journal().await.unwrap();drop(p);std::fs::remove_dir_all(root).unwrap();
     }
@@ -897,4 +932,44 @@ mod tests {
         drop(p);std::fs::remove_dir_all(root).unwrap();
     }
 
+}
+
+#[cfg(test)]
+fn blocking_journal_pause(root: &Path) {
+    let marker = root.join(".test-blocking-journal-pause");
+    if !marker.exists() { return; }
+    std::fs::write(marker.with_extension("started"), b"ready").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while marker.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
+#[cfg(test)]
+#[tokio::test(flavor = "current_thread")]
+async fn cancelled_checkpoint_retains_writer_and_io_until_blocking_transaction_finishes() {
+    use super::tests::{config, write};
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().join("records");
+    let p = RecordPartition::create(&root, config()).await.unwrap();
+    p.write(write("checkpoint", "row", "alpha", ExpectedVersion::Absent)).await.unwrap();
+    let scope = Arc::new(crate::resources::Governor::default())
+        .admit("checkpoint-blocking".into(), crate::resources::Lane::Background, 0).unwrap();
+    let marker = root.join(".test-blocking-journal-pause");
+    std::fs::write(&marker, b"pause").unwrap();
+    let caller = { let p = p.clone(); let scope = scope.clone();
+        tokio::spawn(async move { scope.run(p.compact_journal()).await }) };
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !marker.with_extension("started").exists() { tokio::task::yield_now().await; }
+    }).await.unwrap();
+    caller.abort();
+    assert!(caller.await.unwrap_err().is_cancelled());
+    assert!(p.writer.try_lock().is_err());
+    assert!(p.inner.try_lock().is_err());
+    assert!(scope.io().is_err());
+    std::fs::remove_file(marker).unwrap();
+    let writer = tokio::time::timeout(Duration::from_secs(5), p.writer.lock()).await.unwrap();
+    assert!(scope.io().is_ok());
+    drop(writer);
+    assert_eq!(p.write(write("checkpoint", "row", "alpha", ExpectedVersion::Absent)).await.unwrap().seq, 1);
 }

@@ -16,6 +16,8 @@ lto = true
 opt-level = 3
 debug = false
 debug-assertions = false
+# Production panics terminate the process; recovery replays durable authority.
+# catch_unwind is defensive for unwind builds, not production task isolation.
 panic = "abort"
 overflow-checks = false
 strip = "debuginfo"

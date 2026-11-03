@@ -4,8 +4,8 @@ use super::*;
 
 pub(super) fn document(previous: Option<&Record>, request: &RecordWrite) -> Result<Option<Document>, RecordError> {
     let Some(patch) = &request.vector_patch else { return Ok(request.document.clone()); };
-    if request.document.is_some() || request.system.is_some() || patch.is_empty() {
-        return Err(RecordError::Rejected("vector patch requires nonempty fields and no document/system".into()));
+    if request.document.is_some() || patch.is_empty() {
+        return Err(RecordError::Rejected("vector patch requires nonempty fields and no document".into()));
     }
     let previous = previous.ok_or_else(|| RecordError::Conflict("vector target absent".into()))?;
     if !matches!(request.expected, ExpectedVersion::Match(v) if v == previous.version) {
@@ -19,9 +19,9 @@ pub(super) fn document(previous: Option<&Record>, request: &RecordWrite) -> Resu
     Ok(Some(document))
 }
 
-pub(super) fn validate(state: &State, config: &RecordConfig, request: &RecordWrite) -> Result<(), RecordError> {
+pub(super) fn validate(state: &State, config: &RecordConfig, request: &RecordWrite, evaluation:u64) -> Result<(), RecordError> {
     let Some(patch) = &request.vector_patch else { return Ok(()); };
-    if !matches!(evidence::status(&state.records, &request.record_id)?, EvidenceVisibility::Visible) {
+    if !state.records.get(&request.record_id).is_some_and(|r|temporal::visible(r,evaluation)) {
         return Err(RecordError::Conflict("vector target not visible".into()));
     }
     for field in patch.keys() {

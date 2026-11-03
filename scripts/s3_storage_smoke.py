@@ -91,7 +91,7 @@ def main():
             log.seek(0);raise AssertionError('S3 service startup timed out: '+log.read()[-8192:])
         def stop():
             if process and process.poll() is None:process.kill();process.wait(timeout=30)
-        def call(method,path,body=None,status=200,key=default_key):
+        def call(method,path,body=None,status=200,key=default_key,timeout=60):
             if key is default_key:
                 management=(path=='/api/v1/tenants' or path in ['/api/v1/service-backups','/api/v1/service-restores'] or path.startswith('/api/v1/catalog/') or (path=='/api/v1/apikey' and method in ['POST','DELETE']) or path.startswith('/api/v1/backups'))
                 key=master if management else tenant_key
@@ -99,10 +99,26 @@ def main():
             req=urllib.request.Request(base+path,data=None if body is None else json.dumps(body).encode(),
                 headers={'apikey':key,'Content-Type':'application/json'},method=method)
             try:
-                with urllib.request.urlopen(req,timeout=60) as response:code=response.status;raw=response.read()
+                with urllib.request.urlopen(req,timeout=timeout) as response:code=response.status;raw=response.read()
             except urllib.error.HTTPError as error:code=error.code;raw=error.read()
             assert code in (status if isinstance(status,tuple) else (status,)),(method,path,code,status,raw)
             return json.loads(raw)
+        def checkpoint():
+            # Automatic reclamation may hold the existing maintenance admission.
+            # Retry only explicit Busy; unknown/fenced/transport failures still
+            # fail this acceptance test. PATCH carries no application mutation.
+            deadline=time.monotonic()+60
+            while True:
+                remaining=deadline-time.monotonic()
+                assert remaining>0,'checkpoint retry deadline'
+                result=call('PATCH','/api/v1/index/main',status=(200,429),timeout=remaining)
+                assert time.monotonic()<deadline,'checkpoint retry deadline'
+                if 'code' not in result:
+                    assert 'visible_seq' in result and 'indexed_seq' in result,result
+                    return result
+                assert result.get('code')=='busy',result
+                print('RETRY checkpoint explicit Busy: '+json.dumps(result),flush=True)
+                time.sleep(min(.1,max(0,deadline-time.monotonic())))
         def control(method,path,body):
             deadline=time.monotonic()+300
             while True:
@@ -169,7 +185,7 @@ def main():
             call('POST','/api/v1/index',{'operation_id':operation(),'collection_id':'main','embedding_space_id':'fixture','config':config})
             original=write('first','a','alpha old');receipt=write_one(call, '/api/v1/index/main', original)['receipt']
             write_one(call, '/api/v1/index/main', write('b','b','alpha beta'))
-            call('PATCH','/api/v1/index/main')
+            checkpoint()
             write_one(call, '/api/v1/index/main', write('update','a','alpha updated',{'Match':1}))
             deletion=write('delete','b','',{'Match':1});deletion['document']=None
             write_one(call, '/api/v1/index/main', deletion)
@@ -247,7 +263,7 @@ def main():
                     else:raise AssertionError('expected backup process exit')
                     assert process.wait(timeout=30)==92;start()
                     write_one(call, '/api/v1/index/main', write(stage,'later-'+stage,'alpha later'))
-                    call('PATCH','/api/v1/index/main')
+                    checkpoint()
                 archive=call('POST','/api/v1/index/main/backup',request)
                 assert archive['visible_seq']==before
                 assert call('POST','/api/v1/index/main/backup',request)==archive
@@ -263,7 +279,7 @@ def main():
                 assert write_one(call, f'/api/v1/index/{target}', original)['receipt']==receipt
                 retired=call('DELETE','/api/v1/backups/'+archive['backup_id'],{'operation_id':operation()})
                 assert not retired['cleanup_pending'],retired
-                call('PATCH','/api/v1/index/main');cold_restart()
+                checkpoint();cold_restart()
                 assert call('GET',f'/api/v1/index/{target}/doc/a')['version']==2
             print('PASS joint backup retry, interrupted restore, generation isolation, retirement and cold restart',flush=True)
             # Keep a collection backup in the complete-service archive.

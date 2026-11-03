@@ -161,8 +161,9 @@ impl RecordPartition {
         mut query: RecordQuery,
         output_fields: Option<&[String]>,
     ) -> Result<RecordSearch, RecordError> {
-        let (handle, evaluation, barrier, root) = {
-            let inner = self.lock_current_time().await?;
+        let (handle, evaluation, has_ttl, barrier, root) = {
+            let mut inner = self.inner.lock().await;
+            inner.observe_time()?;
             if !inner.healthy || self.indexes.error().is_some()
             {
                 return Err(RecordError::RecoveryRequired);
@@ -172,6 +173,7 @@ impl RecordPartition {
             (
                 handle,
                 inner.evaluation_time_ms,
+                inner.state.records.live_ttl_count()>0,
                 self.output_permit()?,
                 inner.journal.root().to_owned(),
             )
@@ -179,6 +181,7 @@ impl RecordPartition {
         #[cfg(test)]
         pause(&root, ".test-query-scoring-pause").await?;
         let _ = root;
+        if has_ttl {query.filters.push(temporal::expiry_filter(evaluation));}
         if let Some(temporal) = query.temporal.take() {
             query.filters.extend(temporal::filters(temporal)?);
         }
@@ -199,30 +202,52 @@ impl RecordPartition {
             "score"
         };
         let offset = query.offset;
-        let mut result = lexical::runtime_query::search(
-            &handle.index,
-            query.text,
-            query.vector,
-            query.mode,
-            query.query_type,
-            query.offset,
-            query.length,
-            query.result_type,
-            query.fields,
-            query.filters,
-            query.sort,
-            lexical::Cut {
-                sequence: u64::MAX,
-                evaluation_time_ms: evaluation,
-            },
-        )
-        .await?;
+        // query_output already owns partition admission and the service resource
+        // scope. Keep that admission until this one blocking worker joins; do
+        // not impose a second process-wide limit across unrelated collections.
+        let context = crate::resources::Scope::current();
+        let runtime = tokio::runtime::Handle::current();
+        let owner = self.clone();
+        #[cfg(test)] let scoring_root = root.clone();
+        let (handle, result) = crate::resources::spawn_blocking(move || {
+            let _owner = owner;
+            #[cfg(test)]
+            blocking_scoring_pause(&scoring_root);
+            let work = async move {
+                let result = lexical::runtime_query::search(
+                    &handle.index,
+                    query.text,
+                    query.vector,
+                    query.mode,
+                    query.query_type,
+                    query.offset,
+                    query.length,
+                    query.result_type,
+                    query.fields,
+                    query.filters,
+                    query.sort,
+                    lexical::Cut {
+                        sequence: u64::MAX,
+                        evaluation_time_ms: evaluation,
+                    },
+                ).await;
+                (handle, result)
+            };
+            runtime.block_on(async move {
+                match context {
+                    Some(context) => context.run(work).await,
+                    None => work.await,
+                }
+            })
+        }).await.map_err(storage)?;
+        let mut result = result?;
         let candidates = handle
             .candidates(std::mem::take(&mut result.results))
             .await?;
         #[cfg(test)]
         pause(&root, ".test-query-candidates-pause").await?;
-        let inner = self.lock_current_time().await?;
+        let mut inner = self.inner.lock().await;
+        inner.observe_time()?;
         if !inner.healthy || self.indexes.error().is_some() {
             return Err(RecordError::RecoveryRequired);
         }
@@ -238,7 +263,7 @@ impl RecordPartition {
             {
                 continue;
             }
-            let Some(record) = inner.state.records.get(&candidate.identity.id) else {
+            let Some(record) = inner.state.records.get(&candidate.identity.id).filter(|r|temporal::visible(r,inner.evaluation_time_ms)) else {
                 continue;
             };
             let channels = if let Some(channel) = channel {
@@ -267,7 +292,6 @@ impl RecordPartition {
         }
         barrier.deliver(|| ())?;
         Ok(RecordSearch {
-            fusion: None,
             evaluation_time_ms: inner.evaluation_time_ms,
             count_total: result.result_count_total,
             query_terms: result.query_terms,
@@ -301,7 +325,7 @@ fn validate(query: &RecordQuery, config: &RecordConfig) -> Result<(), RecordErro
     Ok(())
 }
 #[cfg(test)]
-async fn pause(root: &Path, name: &str) -> Result<(), RecordError> {
+pub(super) async fn pause(root: &Path, name: &str) -> Result<(), RecordError> {
     let gate = root.join(name);
     if gate.exists() {
         std::fs::write(root.join(format!("{name}-entered")), b"ready").map_err(storage)?;
@@ -318,7 +342,7 @@ async fn pause(root: &Path, name: &str) -> Result<(), RecordError> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::tests::{config, source_write, write};
+    use super::super::tests::{config, write};
     use super::*;
     use std::collections::BTreeSet;
     async fn entered(root: &Path, name: &str) {
@@ -410,7 +434,7 @@ mod tests {
         let query = || RecordQuery { temporal:None, text:"alpha".into(), vector:None,
             mode:SearchMode::Lexical, query_type:QueryType::Union, offset:0, length:10,
             result_type:ResultType::TopkCount, fields:vec![], filters:vec![], sort:vec![] };
-        let projected = scope.clone().run(p.query_output(query(), None, Some(vec!["body".into()]))).await.unwrap();
+        let projected = scope.clone().run(p.query_output(query(), Some(vec!["body".into()]))).await.unwrap();
         assert_eq!(projected.count_total, 1);
         assert_eq!(projected.hits[0].record.document.as_ref().unwrap().len(), 1);
         assert_eq!(projected.hits[0].record.document.as_ref().unwrap()["body"], "alpha");
@@ -453,6 +477,37 @@ mod tests {
         let identities = handle.candidates(result.results).await.unwrap().into_iter()
             .map(|candidate| candidate.identity.id).collect::<BTreeSet<_>>();
         assert_eq!(identities, BTreeSet::from(["a".into(), "b".into()]));
+    }
+
+    #[tokio::test]
+    async fn candidate_deadline_is_rechecked_after_scoring_without_persistence() {
+        struct Clock(std::sync::atomic::AtomicU64);
+        impl temporal::Clock for Clock {fn now_ms(&self)->Result<u64,RecordError>{Ok(self.0.load(std::sync::atomic::Ordering::SeqCst))}}
+        let temporary=tempfile::tempdir().unwrap();let root=temporary.path().join("records");
+        let p=RecordPartition::create(&root,config()).await.unwrap();
+        let clock=Arc::new(Clock(std::sync::atomic::AtomicU64::new(1000)));
+        p.inner.lock().await.clock=clock.clone();
+        let mut request=write("a","a","alpha",ExpectedVersion::Absent);
+        request.temporal=Some(TemporalMetadata{expire_at_ms:Some(1100),..Default::default()});
+        p.write(request).await.unwrap();
+        let gate=".test-query-candidates-pause";std::fs::write(root.join(gate),b"pause").unwrap();
+        let pending={let p=p.clone();tokio::spawn(async move {p.search("alpha".into(),None,SearchMode::Lexical,vec![],10).await})};
+        entered(&root,gate).await;
+        // Model encoding/upload: writer is held, but Inner remains available.
+        let writer = p.writer.lock().await;
+        clock.0.store(1100,std::sync::atomic::Ordering::SeqCst);
+        std::fs::remove_file(root.join(gate)).unwrap();
+        let result=tokio::time::timeout(std::time::Duration::from_secs(3),pending)
+            .await.expect("final TTL revalidation must not wait for writer").unwrap().unwrap();
+        assert!(result.hits.is_empty());
+        assert_eq!(result.statistics.active_records,0);
+        let inner = p.inner.lock().await;
+        assert_eq!(inner.state.seq,1,"deadline revalidation is read-only");
+        assert_eq!(inner.state.time_watermark_ms,1000);
+        assert!(inner.state.records["a"].document.is_some());
+        assert!(inner.state.records["a"].expired_at_ms.is_none());
+        drop(inner);
+        drop(writer);
     }
 
     #[tokio::test]
@@ -598,33 +653,72 @@ mod tests {
         );
         assert_eq!(result.visible_seq, 4);
     }
-    #[tokio::test]
-    async fn source_deletion_still_fences_a_query_scored_outside_the_record_guard() {
-        let temporary = tempfile::tempdir().unwrap();
-        let root = temporary.path().join("records");
-        let p = RecordPartition::create(&root, config()).await.unwrap();
-        p.write(source_write("s", "s", &[])).await.unwrap();
-        p.write(source_write("d", "d", &[("s", 1)])).await.unwrap();
-        let gate = ".test-query-candidates-pause";
-        std::fs::write(root.join(gate), b"pause").unwrap();
-        let pending = {
-            let p = p.clone();
-            tokio::spawn(async move {
-                p.search("evidence".into(), None, SearchMode::Lexical, vec![], 10)
-                    .await
-            })
-        };
-        entered(&root, gate).await;
-        let mut delete = write("delete", "s", "", ExpectedVersion::Match(1));
-        delete.document = None;
-        tokio::time::timeout(std::time::Duration::from_secs(3), p.write(delete))
-            .await
-            .unwrap()
-            .unwrap();
-        std::fs::remove_file(root.join(gate)).unwrap();
-        assert!(matches!(
-            pending.await.unwrap(),
-            Err(RecordError::RecoveryRequired)
-        ));
+
+}
+
+#[cfg(test)]
+fn blocking_scoring_pause(root: &Path) {
+    let marker = root.join(".test-blocking-scoring-pause");
+    if !marker.exists() { return; }
+    std::fs::write(marker.with_extension("started"), b"ready").unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while marker.exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(2));
     }
+}
+
+#[cfg(test)]
+#[tokio::test(flavor = "current_thread")]
+async fn blocking_scoring_keeps_single_thread_timer_and_small_task_responsive() {
+    use super::tests::{config, write};
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().join("records");
+    let p = RecordPartition::create(&root, config()).await.unwrap();
+    p.write(write("timer", "row", "alpha", ExpectedVersion::Absent)).await.unwrap();
+    let marker = root.join(".test-blocking-scoring-pause");
+    std::fs::write(&marker, b"pause").unwrap();
+    let task = { let p = p.clone(); tokio::spawn(async move {
+        p.query_independent(RecordQuery {
+            text: "alpha".into(), vector: None, query_type: QueryType::Intersection,
+            mode: SearchMode::Lexical, offset: 0, length: 10, result_type: ResultType::TopkCount,
+            fields: vec![], filters: vec![], sort: vec![], temporal: None,
+        }, None).await
+    }) };
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while !marker.with_extension("started").exists() { tokio::task::yield_now().await; }
+        let start = std::time::Instant::now();
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        assert!(start.elapsed() < std::time::Duration::from_secs(1));
+        assert_eq!(tokio::spawn(async { 42 }).await.unwrap(), 42);
+        assert!(!task.is_finished());
+    }).await.unwrap();
+    std::fs::remove_file(marker).unwrap();
+    assert_eq!(task.await.unwrap().unwrap().hits.len(), 1);
+}
+
+#[cfg(test)]
+#[tokio::test(flavor = "current_thread")]
+async fn cancelled_scoring_retains_request_slot_until_worker_finishes() {
+    use super::tests::{config, write};
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().join("records");
+    let p = RecordPartition::create(&root, config()).await.unwrap();
+    p.write(write("cancel", "row", "alpha", ExpectedVersion::Absent)).await.unwrap();
+    let available = p.admission.available_permits();
+    let marker = root.join(".test-blocking-scoring-pause");
+    std::fs::write(&marker, b"pause").unwrap();
+    let caller = { let p = p.clone(); tokio::spawn(async move {
+        p.search("alpha".into(), None, SearchMode::Lexical, vec![], 10).await
+    }) };
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while !marker.with_extension("started").exists() { tokio::task::yield_now().await; }
+    }).await.unwrap();
+    caller.abort();
+    assert!(caller.await.unwrap_err().is_cancelled());
+    assert_eq!(p.admission.available_permits(), available - 1);
+    std::fs::remove_file(marker).unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while p.admission.available_permits() != available { tokio::task::yield_now().await; }
+    }).await.unwrap();
+    assert_eq!(p.search("alpha".into(), None, SearchMode::Lexical, vec![], 10).await.unwrap().hits.len(), 1);
 }

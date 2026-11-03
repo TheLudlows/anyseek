@@ -1,5 +1,5 @@
-//! Trusted evaluation time and durable, irreversible TTL transitions. Expiration
-//! is an owned partition command, never a read-time filter with stale statistics.
+//! Fixed evaluation time, retrieval deadlines and background expiry reclamation.
+//! TTL is not irreversible erasure; bodies may remain in logs and backups.
 use super::*;
 use std::collections::BTreeSet;
 
@@ -13,7 +13,7 @@ pub struct TemporalMetadata {
     pub valid_from_ms: Option<i64>,
     /// Exclusive business-valid end.
     pub valid_to_ms: Option<i64>,
-    /// Irreversible expiration at evaluation_time >= this deadline.
+    /// Excluded from retrieval at evaluation_time >= this deadline; reclaimed later.
     pub expire_at_ms: Option<u64>,
 }
 const MAX_TIME: u64 = 253_402_300_799_999;
@@ -97,11 +97,6 @@ pub(super) fn retained(
     request: &RecordWrite,
     evaluation: u64,
 ) -> Result<TemporalMetadata, RecordError> {
-    if previous.is_some_and(|r| r.expired_at_ms.is_some()) {
-        return Err(RecordError::Conflict(
-            "expired identity cannot be revived; use a new identity".into(),
-        ));
-    }
     if request.temporal.is_some()
         && (request.document.is_none()
             || request.vector_patch.is_some())
@@ -113,7 +108,7 @@ pub(super) fn retained(
     let value = request
         .temporal
         .clone()
-        .or_else(|| previous.map(|r| r.temporal.clone()))
+        .or_else(|| previous.filter(|r| visible(r,evaluation)).map(|r| r.temporal.clone()))
         .unwrap_or_default();
     if value.expire_at_ms.is_some()
         && request.record_id.len() > 256
@@ -127,10 +122,8 @@ pub(super) fn retained(
     }
     Ok(value)
 }
-pub(super) fn protected(record: &Record) -> bool {
-    record.system.is_some()
-        || record.temporal.expire_at_ms.is_some()
-        || record.expired_at_ms.is_some()
+pub(super) fn visible(record: &Record, evaluation: u64) -> bool {
+    record.document.is_some() && record.temporal.expire_at_ms.is_none_or(|deadline| deadline > evaluation)
 }
 pub(super) fn live_ttl(record: &Record) -> bool {
     record.document.is_some() && record.temporal.expire_at_ms.is_some()
@@ -171,9 +164,6 @@ pub(super) fn apply(state: &mut State, event: &Expiration) -> Result<(), RecordE
         {
             return Err(storage("inconsistent expiration target"));
         }
-        if evidence::retained_revision(record) {
-            state.source_revisions.push_shared(state.records.shared(&target.record_id).ok_or_else(||storage("missing source owner"))?)?;
-        }
         state.records.edit(&target.record_id,128,|record| {
             record.version=record.version.checked_add(1).ok_or_else(||storage("version exhausted"))?;
             record.document=None;record.expired_at_ms=Some(event.evaluation_time_ms);Ok(())
@@ -189,12 +179,6 @@ impl Inner {
         if !self.healthy {
             return Err(RecordError::RecoveryRequired);
         }
-        // A same-sequence maintenance intent pins its time/floor transition.
-        // Do not advance another time event ahead of its authoritative install.
-        if self.maintenance_requested.is_some()
-            && self.maintenance_trim.is_some() {
-            return Err(RecordError::Busy);
-        }
         let now = self.clock.now_ms()?;
         if now > MAX_TIME || now.saturating_add(CLOCK_TOLERANCE) < self.state.time_watermark_ms {
             return Err(RecordError::ClockUncertain);
@@ -202,33 +186,15 @@ impl Inner {
         Ok(now.max(self.evaluation_time_ms).max(self.state.time_watermark_ms))
     }
 
-    fn try_advance_time_without_maintenance(&mut self) -> bool {
-        // Do not pass a pending maintenance intent, even during off-lock I/O.
-        if self.maintenance_requested.is_some() || self.maintenance_trim.is_some() {
-            return false;
-        }
-        let Ok(evaluation) = self.trusted_evaluation_time() else { return false; };
-        if !self.state.independent_snapshot
-            && (self.state.records.may_have_due_ttl(evaluation)
-                || history::committed_floor(&self.state, evaluation, self.config.history.retention_ms).is_some())
-        {
-            return false;
-        }
-        // Only the transient view time changes. No State, WAL, index, output
-        // barrier or prepared write is changed while another writer owns them.
-        self.evaluation_time_ms = evaluation;
-        true
+    /// Observation is transient and never edits canonical State, WAL or indexes.
+    pub(super) fn observe_time(&mut self) -> Result<u64, RecordError> {
+        let evaluation=self.trusted_evaluation_time()?;
+        self.evaluation_time_ms=evaluation;
+        Ok(evaluation)
     }
-
-    pub(super) async fn advance_time(&mut self) -> Result<(), RecordError> {
-        let evaluation = self.trusted_evaluation_time()?;
-        // Archived authority is immutable. Protected bodies remain quarantined;
-        // only a live owner created from independent authority may expire them.
-        if self.state.independent_snapshot {
-            self.evaluation_time_ms = evaluation;
-            return Ok(());
-        }
-        self.trim_history(evaluation).await?;
+    /// Called only by an admitted maintenance worker holding writer then Inner.
+    pub(super) async fn expire_due(&mut self) -> Result<(), RecordError> {
+        let evaluation=self.observe_time()?;
         let mut targets = Vec::new();
         self.state.records.visit_due_ttl(evaluation, |r| targets.push(ExpiredTarget {
             record_id: r.record_id.clone(),
@@ -282,7 +248,7 @@ impl Inner {
         if self.fail_after_durable {
             return Err(RecordError::DurablePending(event.seq));
         }
-        let visible = evidence::visibility(&candidate.records)
+        let visible = visibility::visible_records(&candidate.records)
             .map_err(|_| RecordError::DurablePending(event.seq))?;
         let retired: Vec<_> = self
             .locations
@@ -311,53 +277,15 @@ impl Inner {
     }
 }
 impl RecordPartition {
-    /// Select a current view without letting read-triggered durable transitions
-    /// bypass writer ownership. Call only from an owned executor: cancellation
-    /// must not interrupt a transition after its durable append has started.
-    /// The returned guard closes the time-check/capture gap. Never wait for the
-    /// writer while holding Inner; callers already owning writer use Inner's
-    /// advance_time directly instead.
-    pub(super) async fn lock_current_time(&self) -> Result<tokio::sync::MutexGuard<'_, Inner>, RecordError> {
-        let mut inner = self.inner.lock().await;
-        if inner.try_advance_time_without_maintenance() {
-            return Ok(inner);
-        }
-        #[cfg(test)]
-        if inner.journal.root().join(".test-time-observe-wait").exists() {
-            std::fs::write(inner.journal.root().join(".test-time-writer-waiting"), b"waiting")
-                .map_err(storage)?;
-        }
-        drop(inner);
-        let _writer = self.writer.lock().await;
-        let mut inner = self.inner.lock().await;
-        inner.advance_time().await?;
-        // Release writer on return, but keep Inner through the caller's capture
-        // or final revalidation. No other State transition can enter that gap.
-        Ok(inner)
+    /// Observe this process's calibrated time. Does not persist expiry or history.
+    /// After restart the persisted write/maintenance watermark is the lower bound;
+    /// an uncollected body can become visible again after a clock rollback.
+    pub async fn advance_time(&self) -> Result<(), RecordError> {
+        let _permit=self.admission.clone().try_acquire_owned().map_err(|_|RecordError::Busy)?;
+        self.inner.lock().await.observe_time()?;
+        Ok(())
     }
 
-    /// Drain due expirations durably before issuing a new data view. Cancellation
-    /// leaves the owned executor running. Existing fixed-time views may finish.
-    /// With trusted time and no maintenance due, only the inner guard is needed;
-    /// reads need not queue behind a writer performing off-lock I/O.
-    pub async fn advance_time(&self) -> Result<(), RecordError> {
-        let admission = self
-            .admission
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| RecordError::Busy)?;
-        let partition=self.clone();
-        crate::resources::spawn(async move {
-                let result = {
-                    let _permit = admission;
-                    partition.lock_current_time().await.map(drop)
-                };
-                partition.kick_maintenance().await;
-                result
-            })
-            .await
-            .map_err(storage)?
-    }
 }
 
 /// A half-open UTC millisecond range. Missing endpoints are unbounded.
@@ -381,11 +309,12 @@ pub struct TemporalFilter {
     pub valid_at_ms: Option<i64>,
 }
 const PREFIX: &str = "__seekpower_time_";
-const FIELDS: [&str; 4] = [
+const FIELDS: [&str; 5] = [
     "__seekpower_time_event",
     "__seekpower_time_ingested",
     "__seekpower_time_from",
     "__seekpower_time_to",
+    "__seekpower_time_expire",
 ];
 pub(super) fn reserved(name: &str) -> bool {
     name.starts_with(PREFIX)
@@ -404,10 +333,15 @@ pub(super) fn indexed(document: &Document, metadata: &TemporalMetadata, ingested
         ingested as i64,
         metadata.valid_from_ms.unwrap_or(MIN_TIME),
         metadata.valid_to_ms.unwrap_or(MAX_TIME as i64 + 1),
+        metadata.expire_at_ms.map_or(MAX_TIME as i64 + 1,|at| at as i64),
     ]) {
         document.insert(field.into(), value.into());
     }
     document
+}
+/// Applied before channel Top-K/counting, including count-only and browse.
+pub(super) fn expiry_filter(evaluation:u64)->FacetFilter {
+    FacetFilter::Int {field:FIELDS[4].into(),filter:(evaluation as i64+1)..(MAX_TIME as i64+2)}
 }
 pub(super) fn filters(filter: TemporalFilter) -> Result<Vec<FacetFilter>, RecordError> {
     let mut filters = Vec::new();
@@ -445,7 +379,7 @@ pub(super) fn filters(filter: TemporalFilter) -> Result<Vec<FacetFilter>, Record
 }
 
 /// Authenticated checkpoint summary of a fully validated committed-time prefix.
-/// Business expiry evidence remains separately retained and checked.
+/// Expiration commands remain separately retained and checked.
 #[derive(Clone,Debug,Serialize,Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct RetiredPrefix {pub seq:u64,pub time_ms:u64}
@@ -455,7 +389,7 @@ pub(super) fn validate_state(state: &State) -> Result<(), RecordError> {
         .any(|(a,b)|a.receipt.seq>=b.receipt.seq) {
         return Err(storage("unordered retained committed history"));
     }
-    // Legacy images retain every command/cause. A GC checkpoint may summarize a
+    // Images without a retired prefix retain every command/cause. A GC checkpoint may summarize a
     // verified prefix; its remaining suffix still accounts for every sequence
     // exactly once, including internal TTL writes.
     let mut commits = BTreeMap::new();
@@ -497,7 +431,7 @@ pub(super) fn validate_state(state: &State) -> Result<(), RecordError> {
     if state.time_watermark_ms > MAX_TIME {
         return Err(storage("invalid persisted time watermark"));
     }
-    let mut expired = BTreeSet::new();
+    let mut expired = BTreeMap::new();
     let mut last_seq = 0;
     let mut last_time = 0;
     for event in &state.expirations {
@@ -516,22 +450,19 @@ pub(super) fn validate_state(state: &State) -> Result<(), RecordError> {
                 .records
                 .get(&target.record_id)
                 .ok_or_else(|| storage("orphan expiration history"))?;
-            if !expired.insert(&target.record_id)
-                || record.document.is_some()
-                || record.expired_at_ms != Some(event.evaluation_time_ms)
-                || target.previous_version.checked_add(1) != Some(record.version)
-                || record
-                    .temporal
-                    .expire_at_ms
-                    .is_none_or(|t| t > event.evaluation_time_ms)
-            {
-                return Err(storage(
-                    "expiration history does not match terminal tombstone",
-                ));
+            let version=target.previous_version.checked_add(1).ok_or_else(||storage("expiration version overflow"))?;
+            if record.version < version || expired.get(&target.record_id).is_some_and(|previous| *previous>=version) {
+                return Err(storage("expiration history version regression"));
+            }
+            expired.insert(&target.record_id,version);
+            if record.version==version && (record.document.is_some()
+                || record.expired_at_ms!=Some(event.evaluation_time_ms)
+                || record.temporal.expire_at_ms.is_none_or(|t| t>event.evaluation_time_ms)) {
+                return Err(storage("expiration tombstone differs from its current revision"));
             }
         }
     }
-    for record in state.records.values().chain(state.source_revisions.iter()) {
+    for record in state.records.values() {
         validate(&record.temporal, 0).map_err(storage)?;
         if record.ingested_at_ms > state.time_watermark_ms
             || record
@@ -542,8 +473,8 @@ pub(super) fn validate_state(state: &State) -> Result<(), RecordError> {
         }
     }
     for record in state.records.values() {
-        if record.expired_at_ms.is_some() != expired.contains(&record.record_id) {
-            return Err(storage("missing terminal expiration history"));
+        if record.expired_at_ms.is_some() != expired.get(&record.record_id).is_some_and(|version|*version==record.version) {
+            return Err(storage("missing current expiration history"));
         }
         if record.temporal.expire_at_ms.is_some()
             && record.record_id.len() > 256

@@ -11,16 +11,15 @@ impl Serialize for Metadata<'_> {
         // obligation here. Exactly the three serde-skipped fields are excluded.
         let State {residency:_,lineage,history,
             independent_snapshot,seq,epoch_watermark,time_watermark_ms,retired_operation_prefix,expirations,
-            evidence_quarantined,
-            records:_,source_revisions:_,operations:_,
+                        records:_,operations:_,
             operation_lookup:_,lookup_bytes:_}=self.0;
-        let mut s=serializer.serialize_struct("State",11+usize::from(retired_operation_prefix.is_some()))?;
+        let mut s=serializer.serialize_struct("State",9+usize::from(retired_operation_prefix.is_some()))?;
         macro_rules! field {($name:ident)=>{s.serialize_field(stringify!($name),$name)?};}
         field!(lineage);s.serialize_field("history",history)?;
         field!(independent_snapshot);field!(seq);field!(epoch_watermark);field!(time_watermark_ms);
         if retired_operation_prefix.is_some() {field!(retired_operation_prefix);}
-        field!(expirations);field!(evidence_quarantined);
-        s.serialize_field("records",&())?;s.serialize_field("source_revisions",&())?;
+        field!(expirations);
+        s.serialize_field("records",&())?;
         s.serialize_field("operations",&())?;s.end()
     }
 }
@@ -29,11 +28,9 @@ impl Serialize for Metadata<'_> {
 /// Shared value lengths were measured before admission and cannot mutate.
 pub(super) fn length(state:&State)->Result<usize,RecordError> {
     let records=state.records.wire_length()?;
-    let revisions=state.source_revisions.wire_length()?;
     let operations=state.operations.wire_length()?;
-    checkpoint_codec::json_length(&Metadata(state))?.checked_sub(12)
+    checkpoint_codec::json_length(&Metadata(state))?.checked_sub(8)
         .and_then(|n|n.checked_add(records))
-        .and_then(|n|n.checked_add(revisions))
         .and_then(|n|n.checked_add(operations))
         .ok_or_else(||storage("State proof length overflow"))
 }
@@ -43,7 +40,6 @@ pub(super) fn verify(config:&RecordConfig,expected:&State,replayed:&State)->Resu
     if length(expected)?!=length(replayed)?
         || checkpoint_codec::json_digest(&Metadata(expected))?!=checkpoint_codec::json_digest(&Metadata(replayed))?
         || !expected.records.same_values(&replayed.records)?
-        || !expected.source_revisions.same_values(&replayed.source_revisions)?
         || !expected.operations.same_values(&replayed.operations)? {
         return Err(storage("replayed State differs from live State"));
     }
@@ -74,7 +70,7 @@ mod tests {
         let inner=p.inner.lock().await;let state=&inner.state;
         assert_eq!(length(state).unwrap(),checkpoint_codec::json_length(state).unwrap());
         let mut metadata_oracle=serde_json::to_value(state).unwrap();
-        for name in ["records","source_revisions","operations"] {metadata_oracle[name]=serde_json::Value::Null;}
+        for name in ["records","operations"] {metadata_oracle[name]=serde_json::Value::Null;}
         assert_eq!(serde_json::to_value(Metadata(state)).unwrap(),metadata_oracle,"metadata projection must follow every State serde attribute");
         let shared=state.try_clone().unwrap();verify(&settings,state,&shared).unwrap();
         let bytes=serde_json::to_vec(state).unwrap();
@@ -99,15 +95,6 @@ mod tests {
         let mut other=state.try_clone().unwrap();let mut reversed=state_values::Values::default();
         for op in state.operations.iter().rev(){reversed.push(op.clone()).unwrap();}
         other.operations=reversed;assert!(verify(&settings,state,&other).is_err());
-        // Length/ordered-value proof is independent of source-domain validity;
-        // use a retained Record value without publishing fabricated source history.
-        let mut history=state.try_clone().unwrap();history.source_revisions.push(state.records["a"].clone()).unwrap();
-        assert_eq!(length(&history).unwrap(),checkpoint_codec::json_length(&history).unwrap());
-        let mut changed=history.try_clone().unwrap();
-        changed.source_revisions.edit(0,0,|r|{r.document.as_mut().unwrap().insert("body".into(),serde_json::json!("omega"));Ok(())}).unwrap();
-        assert_eq!(length(&changed).unwrap(),checkpoint_codec::json_length(&changed).unwrap());
-        assert_eq!(length(&history).unwrap(),length(&changed).unwrap());
-        assert!(!history.source_revisions.same_values(&changed.source_revisions).unwrap());
         let empty=State::default();assert_eq!(length(&empty).unwrap(),checkpoint_codec::json_length(&empty).unwrap());
     }
 }

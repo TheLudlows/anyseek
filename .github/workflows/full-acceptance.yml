@@ -63,6 +63,14 @@ jobs:
       - name: Existing module and service tests
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: cargo test --workspace --all-targets
+      - name: Build release panic probe
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: cargo build -p anyseek --locked --release --features fault-injection --example runtime_panic_probe
+      - name: Release panic and recovery subprocesses
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: |
+          ulimit -c 0
+          python3 scripts/release_panic_smoke.py --probe target/release/examples/runtime_panic_probe
       - name: Generate API reference
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: |

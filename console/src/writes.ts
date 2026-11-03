@@ -49,6 +49,8 @@ export function prepareDocumentRequests(source: string, envelopeMode = false) {
   return documentJsonSlices(text, parsed).map((raw, i) => {
     if (envelopeMode) {
       const doc = docs[i];
+      if (Object.hasOwn(doc, "system"))
+        throw new Error(t("来源与分块信息应作为 document 普通字段保存。"));
       if (
         (!Object.hasOwn(doc, "document") &&
           !Object.hasOwn(doc, "vector_patch")) ||

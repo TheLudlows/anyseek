@@ -4,7 +4,6 @@ import {
   ArrowDownToLine,
   ArrowLeft,
   ArrowRight,
-  Braces,
   FileJson2,
   Plus,
   RefreshCw,
@@ -29,7 +28,6 @@ import { loadEmbeddingConfig } from "./embeddings.ts";
 import { generatePendingEmbeddings, prepareEmbeddedWrites } from "./embedding-writes.ts";
 import { SchemaTable } from "./SchemaTable.tsx";
 import { MarkdownImport } from "./MarkdownImport.tsx";
-import { Tools } from "./Tools.tsx";
 import type { Collection, Json, Page, RecordData } from "./types.ts";
 
 export function Data({
@@ -49,8 +47,7 @@ export function Data({
   const [busy, setBusy] = useState(false),
     [error, setError] = useState(""),
     [selected, setSelected] = useState<RecordData | null>(null);
-  const [tab, setTab] = useState<"browse" | "tools">("browse"),
-    [importing, setImporting] = useState(false),
+  const [importing, setImporting] = useState(false),
     [revision, setRevision] = useState(0);
   useEffect(() => {
     const controller = new AbortController();
@@ -93,23 +90,6 @@ export function Data({
           <Plus size={16} />
           {t("导入数据")}</button>
       </div>
-      <div className="page-tabs">
-        <button
-          className={tab === "browse" ? "active" : ""}
-          onClick={() => setTab("browse")}
-        >
-          <FileJson2 size={15} />
-          {t("记录浏览")}</button>
-        <button
-          className={tab === "tools" ? "active" : ""}
-          onClick={() => setTab("tools")}
-        >
-          <Braces size={15} />
-          {t("高级检查")}</button>
-      </div>
-      {tab === "tools" ? (
-        <Tools collection={collection} apiKey={apiKey} />
-      ) : (
         <div className={"split-content " + (selected ? "has-preview" : "")}>
           <section className="panel records-panel">
             <div className="panel-toolbar">
@@ -254,7 +234,6 @@ export function Data({
             <RecordPreview record={selected} close={() => setSelected(null)} />
           )}
         </div>
-      )}
       {importing && (
         <ImportData
           collection={collection}

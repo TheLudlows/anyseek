@@ -6,7 +6,7 @@ use std::io::{self, Write};
 
 #[derive(Serialize)]
 enum BorrowedEntry<'a, S: ?Sized> {
-    #[serde(rename = "RecordCheckpointV18")]
+    #[serde(rename = "RecordCheckpointV19")]
     Checkpoint {
         config: &'a RecordConfig,
         state: &'a S,
@@ -22,6 +22,13 @@ pub(super) fn length(config: &RecordConfig, state: &State) -> Result<usize, Reco
         .checked_sub(4)
         .and_then(|n| n.checked_add(state_length))
         .ok_or_else(|| storage("checkpoint length overflow"))
+}
+
+/// Independent test oracle: walk every value, without cached wire lengths or
+/// a cloned/deserialized State merely to count bytes. Production uses length().
+#[cfg(test)]
+pub(super) fn full_length(config:&RecordConfig,state:&State)->Result<usize,RecordError> {
+    json_length(&BorrowedEntry::Checkpoint {config,state})
 }
 
 /// Attempt-local encoding evidence. The borrow prevents changing this State
@@ -229,6 +236,7 @@ mod tests {
             "wire format and insertion order must not change"
         );
         assert_eq!(length(&config, &state).unwrap(), owned.len());
+        assert_eq!(full_length(&config, &state).unwrap(), owned.len());
         assert_eq!(
             digest(&config, &state).unwrap(),
             <[u8; 32]>::from(Sha256::digest(&owned))

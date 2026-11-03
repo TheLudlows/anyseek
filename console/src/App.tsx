@@ -23,7 +23,7 @@ import { Search } from "./Search.tsx";
 import { Initialize } from "./Initialize.tsx";
 import { EmbeddingSettings } from "./EmbeddingSettings.tsx";
 import { clearEmbeddingKeys } from "./embeddings.ts";
-import { Recovery } from "./Tools.tsx";
+import { Recovery } from "./Recovery.tsx";
 import type { Collection } from "./types.ts";
 
 type Section = "collections" | "data" | "search" | "settings";
@@ -359,7 +359,7 @@ export default function App() {
           )}
           <footer className="main-footer">
             <span>
-              AnySeek<span className="footer-dot">·</span>{t("AI 记忆与知识检索")}</span>
+              AnySeek<span className="footer-dot">·</span>{t("全文与向量检索")}</span>
             <span>
               {selected?.version ? "Engine v" + selected.version : t("检索控制台")}
               <span className="footer-dot">·</span>Console 1.0
@@ -448,9 +448,9 @@ function Welcome(props: {
       <div className="welcome-copy">
 
         <h1>
-          {t("AI 记忆与知识的")}<br />
+          {t("可靠可更新的")}<br />
           {t("检索底座")}</h1>
-        <p>{t("统一管理记录、向量与关系，通过全文、向量和混合检索访问你的数据。")}</p>
+        <p>{t("保存原文、向量与元数据，通过全文、向量和混合检索访问你的数据。")}</p>
         <div className="welcome-features">
           <span>
             <Layers3 size={16} />
@@ -472,7 +472,7 @@ function Welcome(props: {
             <SearchIcon size={22} />
             <span>{t("检索")}</span>
           </div>
-          <span className="art-caption">{t("记录 · 向量 · 关系")}</span>
+          <span className="art-caption">{t("记录 · 向量 · 元数据")}</span>
         </div>
       </div>
       <section className="panel welcome-connect">
