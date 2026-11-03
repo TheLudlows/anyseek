@@ -270,7 +270,6 @@ function ImportData({
     [envelope, setEnvelope] = useState(false);
   const [modelConfig] = useState(() => loadEmbeddingConfig(owner, collection.id));
   const [autoEmbed, setAutoEmbed] = useState(!!modelConfig);
-  const [progressVersion, setProgressVersion] = useState(0);
   const generation = useRef<AbortController | null>(null);
   useEffect(() => () => generation.current?.abort(), []);
   const [pending, setPending] = useState<PendingWrites | null>(() =>
@@ -333,7 +332,6 @@ function ImportData({
       setPending(loadPendingWrites());
       setError(message(e));
     } finally {
-      setProgressVersion(value => value + 1);
       setBusy(false);
     }
   }
@@ -421,7 +419,7 @@ function ImportData({
         )}
         <Notice>{error}</Notice>
         <Notice kind="success">{status}</Notice>
-        <RuntimeStatus collection={collection} apiKey={apiKey} refreshVersion={progressVersion} />
+        {!busy && <RuntimeStatus collection={collection} apiKey={apiKey} />}
         <div className="modal-actions">
           {pending && !foreign && (pending.rejected || (pending.delivery === "ingest" && !pending.unresolved)) && (
             <button

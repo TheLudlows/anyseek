@@ -6,8 +6,8 @@ import { getLocale, t } from "./i18n.ts";
 import { counter, indexState } from "./runtime-status.ts";
 import type { Collection, Json } from "./types.ts";
 
-export function RuntimeStatus({ apiKey, collection, refreshVersion = 0, showStatistics = false }: {
-  apiKey: string; collection: Collection; refreshVersion?: number; showStatistics?: boolean;
+export function RuntimeStatus({ apiKey, collection, showStatistics = false }: {
+  apiKey: string; collection: Collection; showStatistics?: boolean;
 }) {
   const [revision, setRevision] = useState(0);
   const [progress, setProgress] = useState<Json>(null);
@@ -29,7 +29,7 @@ export function RuntimeStatus({ apiKey, collection, refreshVersion = 0, showStat
       : Promise.resolve();
     void Promise.all([status, statistics]).finally(() => { if (!controller.signal.aborted) setBusy(false); });
     return () => controller.abort();
-  }, [apiKey, collection.id, refreshVersion, revision, showStatistics]);
+  }, [apiKey, collection.id, revision, showStatistics]);
   const state = indexState(progress);
   const labels = {
     unknown: t("索引状态未知"), recovery: t("需要恢复"), error: t("索引异常"),

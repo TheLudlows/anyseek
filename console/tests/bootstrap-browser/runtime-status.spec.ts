@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { createHash } from 'node:crypto';
 
 for (const language of ['zh', 'en'] as const) {
   test(`progress, errors, recovery, capacity and failed refresh (${language})`, async ({page}) => {
@@ -44,3 +45,44 @@ for (const language of ['zh', 'en'] as const) {
     await page.screenshot({path:`test-results/runtime-status-${language}.png`,fullPage:true});
   });
 }
+
+test('ingest acknowledgement replaces the old snapshot without claiming new writes are searchable', async ({page}) => {
+  const collection={id:'docs',name:'docs',schema:[],statistics:{active_records:0},limits:{}};
+  const operation={epoch:Math.floor(Date.now()/86400000),nonce:'original-operation'};
+  const original='{"operation_id":'+JSON.stringify(operation)+',"record_id":"original-record","expected":"Absent","document":{"n":9007199254740993}}';
+  let committed=0, posted='';
+  let release!:()=>void;
+  const gate=new Promise<void>(resolve=>{release=resolve;});
+  await page.route('**/api/v1/**',async route=>{
+    const path=new URL(route.request().url()).pathname;
+    if(path.endsWith('/ingest')) {
+      if(route.request().method()==='POST') {
+        posted=route.request().postData()!;
+        await gate;
+        committed=1;
+        return route.fulfill({json:{results:[{code:'committed',operation_id:operation,receipt:{record_id:'original-record',seq:1}}]}});
+      }
+      return route.fulfill({json:{committed_seq:committed,lexical_seq:0,vector_seq:0,index_error:null,recovery_required:false}});
+    }
+    return route.fulfill({json:path.endsWith('/iterator')?{records:[],next:null}:path.endsWith('/apikey')?[collection]:collection});
+  });
+  await page.goto('/');
+  await page.getByLabel('Tenant API Key',{exact:true}).fill('test-key');
+  await page.getByRole('button',{name:'连接服务',exact:true}).click();
+  await page.evaluate(pending=>sessionStorage.setItem('anyseek.pendingWrites',JSON.stringify(pending)),{
+    owner:createHash('sha256').update('test-key').digest('hex'),collection:'docs',delivery:'ingest',
+    completed:0,unresolved:true,requests:[{body:original,outcome:'unknown'}],
+  });
+  await page.getByRole('navigation',{name:'主导航'}).getByRole('button',{name:'数据',exact:true}).click();
+  await page.locator('.page-heading').getByRole('button',{name:'导入数据',exact:true}).click();
+  const dialog=page.getByRole('dialog');
+  await expect(dialog).toContainText('索引已追平此提交快照');
+  await dialog.getByRole('button',{name:'重试原始写入'}).click();
+  await expect.poll(()=>posted).not.toBe('');
+  await expect(dialog.getByRole('region',{name:'运行状态'})).toHaveCount(0);
+  expect(posted).toBe('{"records":['+original+']}');
+  release();
+  await expect(dialog).toContainText('已确认提交 1 条，索引正在异步更新。');
+  await expect(dialog).toContainText('索引尚未追平');
+  await expect(dialog).not.toContainText('索引已追平此提交快照');
+});
