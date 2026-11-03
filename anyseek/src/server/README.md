@@ -2,7 +2,7 @@
 
 `POST /api/v1/index/{id}/ingest` 在业务判定和持久提交后返回非原子的逐项结果。HTTP 200 不代表全部成功，只有 `code=committed` 且带 Record `receipt` 的项成功；明确拒绝后继续处理后续项。429／503 保留已有回执，并区分 `outcome_unknown` 与 `not_attempted`。索引异步，可检查 `committed_seq`、`lexical_seq`、`vector_seq` 和 `index_error`；`/operation/{epoch}/{nonce}` 查询 Record 回执。现有 `/batch` 同步语义保留，独立 Intake 日志已移除。详见下方[异步索引写入](#异步索引写入)。
 
-默认服务通过 `record_service.rs` 使用 SQLite Catalog 和 Record partition，提供全文、向量和混合检索 API；Web 控制台位于独立的 `console/`，不嵌入服务。已实现 P1-A 与 P2 的来源/证据、来源修订、可选向量、TTL、实体/关系融合及逐命中解释。A/P3 本地 Segment、compaction 与安全回收已合入；系统崩溃/断电验收仍未完成。[当前状态](../../../STATUS.md) 与 [Record 契约](../../../docs/record-model.md) 区分实现和验收。
+默认服务通过 `record_service.rs` 使用 SQLite Catalog 和 Record partition，提供全文、向量和混合检索 API；Web 控制台位于独立的 `console/`，不嵌入服务。提供稳定记录、可选向量、时间过滤、全文/向量混合及逐命中解释；[职责收敛状态](../../../docs/engine-scope.md)单独记录尚未完成的内核整理。A/P3 本地 Segment、compaction 与安全回收已合入；系统崩溃/断电验收仍未完成。[当前状态](../../../STATUS.md) 与 [Record 契约](../../../docs/record-model.md) 区分实现和验收。
 
 ## 构建与启动
 
@@ -173,7 +173,6 @@ DELETE `/api/v1/apikey` 使用 `{operation_id,key_id}` 撤销凭据；不会删�
 
 ## 备份与恢复
 
-独立备份恢复只恢复保存的数据，不证明备份之后没有删除：恢复 partition 保持 evidence quarantine，typed 内容不可读且没有强制解禁入口；普通记录也不能把该副本当成可信删除历史来源。当前没有解除 typed evidence 隔离的入口；授权恢复和内容可见性是两道独立条件。
 
 Collection backup 使用 POST `/api/v1/index/{id}/backup` 和 `{operation_id}`；原 ID 重试保留同一快照。本 Tenant 的普通 Key POST `/api/v1/restore`，body 为 `{operation_id,collection_id,backup_id}`，恢复到新身份，归属于当前认证 Tenant；其他 Tenant 的备份 ID 不可访问。master 可 GET `/api/v1/backups`，或 DELETE `/api/v1/backups/{id}`（`{operation_id}`）持久退役备份；未完成 restore 会 pin 来源。`cleanup_pending:true` 表示逻辑退役已完成，物理清理还需重试。
 
@@ -208,7 +207,7 @@ master POST `/api/v1/service-restores`（`{operation_id,backup_id}`）返回**�
 
 30 秒截止时间覆盖认证/身份查找及 handler；准入超时且未启动 handler 时返回 Busy，已接管工作超时仍 outcome_unknown。每个 HTTP 请求保守预留 18 MiB body/输出工作区；构建快照/tail、对象下载和 PUT 副本另计。S3 缓冲及累积解码 tail 额度跟随实际所有者（包括迭代器和已取出的条目），owned task 和已交付传输帧保留原请求准入，取消等待不提前退款。JSON 在增长前检查响应上限；I/O 无额外等待队列。已知未发布的资源拒绝可返回 busy，发布结果未知时继续 outcome_unknown/恢复协议，重试原操作身份。此账目不覆盖所有运行态对象、分配器、mmap/OS 缓存或 SDK 内存，不承诺全进程 RSS、系统 I/O 带宽或完整磁盘硬上限。每 authority 对象缓存为 256 MiB / 4096 块；默认服务各 collection 共用 `metadata.sqlite` 及其旁的对象缓存。物化索引、备份及多 authority 库场景的总占用仍需整体评估。
 
-Service archive/root 清理是明确的离线操作，不提供删除运行根的接口。系统崩溃、文件系统崩溃、断电矩阵尚未验收；原生进程 kill/exit、故障注入与 fsync 调用不能代替。历史回执安全 GC 和已删除集合代次后台回收已有实现；持续运行容量与组合隔离验收、跨主机协调和分布式仍留在后续阶段；来源/evidence 与可选向量已实现。
+Service archive/root 清理是明确的离线操作，不提供删除运行根的接口。系统崩溃、文件系统崩溃、断电矩阵尚未验收；原生进程 kill/exit、故障注入与 fsync 调用不能代替。历史回执安全 GC 和已删除集合代次后台回收已有实现；持续运行容量与组合隔离验收、跨主机协调和分布式仍留在后续阶段；可选向量已实现。
 
 ## 开发验证
 
@@ -225,35 +224,15 @@ python3 scripts/record_service_smoke.py --server target/debug/anyseek_server
 
 `generate_openapi=true` 在可执行文件目录输出 `openapi.json` 和 `openapi.yml`。路由清单见 [FEATURES](../../../FEATURES.md)，公共请求设置在 `api_types.rs`，默认服务实现为 `record_service.rs`。
 
-## 来源与证据
+## 普通来源元数据
 
-当前来源、删除隐藏与独立恢复已合入；历史平台结果与系统断电限制见 [Record 语义](../../../docs/record-model.md)。
+`document_id`、`chunk_index`、章节、`source_id`、`source_version` 等信息可作为普通 `document` 字段保存；按 schema 配置过滤或检索。引擎不解析其业务含义，不自动维护依赖、stale 或级联隐藏。
 
-使用 `POST /api/v1/index/{collection_id}/batch`，将以下 RecordWrite 放入 `writes` 数组；完整 Record 请求可增加 `system`：
+顶层 `system` 写入、`/evidence`、`/entities`、`/neighbors` 和查询的 `relation_fusion` 已撤下。历史字节/页码摘录、来源版本和派生重算由应用负责。全文/向量的通用 `rrf` 混合排序继续保留。
 
-```json
-{
-  "operation_id": {"epoch": 20747, "nonce": "save-source"},
-  "record_id": "source-1",  "expected": "Absent",
-  "document": {"body": "Original source text"},
-  "system": {"kind": "source"}
-}
-```
+## 可选向量与后补
 
-示例 epoch 仅作结构说明，实际按当前 UTC 日生成并随原请求保存。派生记录用自己的稳定 ID 和 `system:{"kind":"derived","evidence_refs":[{"record_id":"source-1","version":1}]}`。来源与派生均要求满足 collection 既有 schema/向量约束；向量字段可以缺失，缺失内容不参加向量召回。
-
-删除仍提交 `operation_id,record_id,expected:{"Match":1},document:null`，省略 system。确认成功后直接和间接派生内容立即从查询、按 ID 读取和统计隐藏；输出时继续复核来源数据有效性。引用只允许当前 collection，未知 collection 字段明确拒绝。Source 更新要求 `expected:{"Match":当前版本}`，可省略 system（继承来源类型）；保留旧修订，新来源可见，依赖旧版的直接/间接派生立即 stale 并默认隐藏。派生重算必须创建新 ID、引用最新版本。derived 更新、删除后重建暂不支持，不能把 business document 中的同名字段当作已实现语义。
-
-Web UI 的显式 Record envelope 选项支持上述内容及删除，自动保存 operation_id 供重试。**独立备份中的 typed 内容恢复后保持 `evidence_quarantined:true`，当前没有解除隔离入口**；原文被保存但不可搜索，避免旧备份复活后来的删除。live WAL/在线 checkpoint 恢复不新增隔离。存活服务的 WAL/在线 checkpoint 恢复与独立备份恢复不同；独立恢复目录不能提升为当前删除权威。
-
-`GET /api/v1/index/{collection_id}/doc/{record_id}/status` 返回 `record_id/version/visibility/visible_seq`，只返回状态，不提供隐藏正文；同样检查 Tenant/集合代次和输出数据有效性。状态包括 visible、stale、deleted、unavailable、quarantined。
-
-当前 Record 权威 journal 使用 RecordCheckpointV18、RecordAppliedV15 和 RecordHistoryTrimV13 等显式标签，拒绝旧格式，不提供升级迁移。私有向量/metadata descriptor 使用格式 3，与权威 journal 标签分别校验。
-
-
-### 可选向量与后补
-
-正文可先写入，不需零向量占位。沿用写入端点提交 `operation_id,record_id,expected:{"Match":当前正文版本},vector_patch:{"vector":[2,0]}`，省略 document/system；仅填充尚未存在的 schema 向量字段。正文版本保持不变，提交序号推进；重复请求必须保留 operation_id。已删除、stale 或隔离 typed 记录不可补写，来源正文版本改变后旧请求冲突。
+正文可先写入，不需零向量占位。沿用写入端点提交 `operation_id,record_id,expected:{"Match":当前正文版本},vector_patch:{"vector":[2,0]}`，省略 document；仅填充尚未存在的 schema 向量字段。正文版本保持不变，提交序号推进；重复请求必须保留 operation_id。已删除记录不可补写，正文版本改变后旧请求冲突。
 
 状态接口返回 `pending_vector_fields`。真实 Web UI 的 envelope 模式支持该请求；可选向量契约见[Record 语义](../../../docs/record-model.md)。
 
@@ -268,91 +247,4 @@ Web UI 的显式 Record envelope 选项支持上述内容及删除，自动保�
 
 `temporal` 是系统元数据，不放入自定义 `document`。业务有效期是半开区间 `[Record 语义](../../../docs/record-model.md)。
 
-
-## 实体与显式一跳关系
-
-通过现有 RecordWrite 创建 `system:{"kind":"entity"}`，或 `system:{"kind":"relation","relation":{"from":{"record_id":"a","version":1},"to":{"record_id":"b","version":1},"relation_type":"knows","weight":0.5}}`。正文仍在 document；weight 可选，仅为调用方声明，不自动改变检索分数。evidence_refs 单独声明证据，端点不自动视为内容证据。
-
-端点必须是同 collection/partition 当前可见的精确非关系版本。关系与双端的来源、TTL 共同控制可见性；端点替换、删除和 ABA 不会把旧边重新绑定。实体/关系正文可以 Match 精确更新，但 system 声明不可变，重算或重绑定使用新 Record ID。
-
-- `POST /api/v1/index/{id}/entities`：`{"cursor":null,"length":100}`，稳定 ID 分页；视图变化拒绝旧 cursor。
-- `POST /api/v1/index/{id}/neighbors`：`{"seeds":[{"record_id":"a","version":1}],"direction":"both","relation_types":[],"per_seed":128,"max_candidates":1000,"allow_partial":false}`。
-
-一跳最多 32 个不同 seeds，类型最多 16 个，每 seed 最多 128 条，候选上限不超过 collection 配置，结果内容预算 4 MiB。排序为 seed 输入顺序再 neighbor ID/edge ID；自环去重。默认超预算拒绝，显式 allow_partial 才返回 complete=false、reason 与 count.relation=window；count 是返回的有效边路径数量，不是唯一邻居数。返回共同 visible_seq/evaluation_time_ms/statistics，数据有效性输出保护与查询相同。Web UI 记录页可提交实体/关系 JSON，并检查实体目录与一跳结果。
-
-关系与全文/向量同视图融合见后文；不提供模型实体消歧或完整图语言。测试状态见[Record 语义](../../../docs/record-model.md)。
-
-## 精确来源摘录
-
-`POST /api/v1/index/{id}/evidence` 接受 `{record_id,version,locator}`。locator 可为 `{"kind":"utf8","field":"body","start":0,"end":5}`（UTF-8 字节半开区间，必须字符边界），或 `{"kind":"page","field":"pages","page":1}`（源字段为字符串数组、一基页码）。仅定位已持久内联 Source，不下载 URL 或解析 PDF；关系 endpoints/seeds 不接受 locator。派生 evidence_refs 可携带该定位。
-
-响应返回选中文本及完整字段/页的 SHA-256、固定 text/plain UTF-8 表示、精确 reference、共同水位与时间。Source 修订后可显式读取保留旧修订，普通 stale 派生仍隐藏；当前 source 已删除/过期/隔离时拒绝摘录，Tenant/集合代次和输出数据有效性检查继续适用。定位写入和恢复均校验范围。UI 记录页可输入精确 reference 查看摘录。分平台结果见实施记录第 20 节。
-
-## 同视图关系融合
-
-`POST /api/v1/index/{id}/query` optionally accepts `relation_fusion`:
-
-```json
-{"query":"alpha","length":10,"relation_fusion":{"neighbors":{"seeds":[{"record_id":"entity-a","version":1}],"direction":"both","per_seed":10,"max_candidates":100,"allow_partial":false},"rrf":{"constant":0.6,"keyword_weight":1,"vector_weight":1,"keyword_candidates":100,"vector_candidates":100},"relation_weight":1}}
-```
-
-Add `query_vector` for the vector channel, with existing `all`/`nprobe`/threshold options. No embedding is computed. At least one enabled text/vector channel is required. `relation_weight` must be finite and positive. Existing `RrfOptions` validation applies; an enabled text/vector channel requires its explicit positive candidate budget. The sum of enabled text/vector budgets and `neighbors.max_candidates` must not exceed the collection candidate limit. Top-level `rrf`, field sorting and count-only/zero-length requests are rejected in this mode. Ordinary queries are unchanged.
-
-All channels share one locked partition view, evaluation time, active corpus and metadata/time filters. Filters apply to neighboring result records before per-seed limiting; seeds and edges must also be current and visible. A hidden/filtered adjacency still consumes the scan budget. Relation ranks follow caller seed order then neighbor/edge stable IDs; deduplicate neighbors before zero-based RRF contribution `weight/(constant+rank)`. Edge metadata `weight` is not a ranking input. Final ties use record ID. This is configurable rank fusion, not a relevance-quality claim.
-
-`fusion.count_relation="candidate_window"` and `fusion.candidates` describe the unique candidate union before pagination. Neither `count_total` nor `relation_complete` implies exact corpus recall. `relation_complete` only covers adjacency traversal; without `allow_partial`, exhaustion rejects the entire request, otherwise `relation_reason` identifies the limit. ANN stays approximate. Output is limited to 4 MiB and uses the same field projection, authorization and deletion barriers as ordinary queries. No persistent format changes are introduced by fusion.
-
-
-## 逐命中检索解释
-
-Every Record query hit contains `channels`, alongside the unchanged final `score` and original `record`. Each entry has `channel` (`lexical`, `vector`, `relation`, or `browse`), zero-based `rank`, `rank_basis`, `raw_score`, and `rrf_contribution`.
-
-Lexical/vector raw scores are the engine's unmodified channel scores before RRF, not calibrated probabilities; the vector metric/representation remains the collection's existing one. In Hybrid and relation fusion, contributions use the actual weights and zero-based constant; absent or disabled channels contribute nothing and have no entry. Relation ranks follow stable adjacency order after deduplicating neighbors; `raw_score` is null because declared edge weights are not similarity scores. Browse likewise has no raw relevance score. Outside fusion, `rrf_contribution` is null.
-
-Hybrid channel ranks are assigned before final fusion sorting/pagination. A pure channel query reports its retrieval-window position (`offset + position`), marked `requested_order` when a field sort is requested; it is not then a relevance rank. Other bases are `score`, `stable_adjacency`, or `browse_order`. No rank implies full ANN recall. Explanation metadata does not change scoring, candidate budgets, visibility or authorization. UI displays this same evidence in a per-hit disclosure and the relation inspector. There is no new persistent state or disk format change in this explanation batch.
-
-
-### 构建与准入预算调整
-
-**默认预算不是 RSS 上限，也不保证小内存部署安全。** 五个 Governor 通道的全局字节额度合计
-6944 MiB（6.78 GiB），另有全进程共享构建账目4096 MiB，算术和11040 MiB（10.78 GiB）。
-两个账目可能重复计算同一对象，但 State、运行时、分配器、mmap及OS缓存等又未全部计入；
-因此这个和既不是内存需求预测，也不是进程RSS硬上限。当前实验环境为16 GiB cgroup、
-4 CPU配额、无swap，只验证所列单集合负载，没有验证全部通道/集合同时满额。
-小内存部署必须按可用内存显式降低预算并验证负载；合法配置也可能超过机器可承受容量。
-
-构建逻辑内存单份默认1 GiB、全进程共享4 GiB；可通过启动环境
-`ANYSEEK_BUILD_MEMORY_BYTES` / `ANYSEEK_BUILD_SHARED_MEMORY_BYTES` 配置，要求
-64 MiB <= 单份 <= 共享 <= 8 GiB。按进程固定，不支持运行中热改。
-Governor各通道的全局字节配置不得超过8 GiB，其他层级/控制余量约束不变。
-这都是保守逻辑预留，并非RSS硬上限；中文分析器、旧视图、候选构建与输出可同时存活，
-部署前应为这些预算和未计入的运行时开销准备足够RAM。小内存部署应显式降低预算，不能把默认值视为任意规模容量承诺。
-
-集合创建请求可显式指定 `capacity_profile: "bounded_100k"`，将记录与操作准入上限提高到 100000；未指定或使用默认 profile 时保持 10000，未知 profile 名称一律拒绝。该 profile 只提高记录与操作的准入上限，其余限额不变：authority 256 MiB、单文档 1 MiB、候选 10000 与现有内存层级照旧。它是准入上界而非容量承诺，不表示任意 10 万条记录可完整驻留内存。
-
-资源不足仍立即拒绝，没有无限等待队列。HTTP/1在读取请求体之前拒绝时明确发送
-`Connection: close`，客户端须为下一请求新建连接，写入重试保持原operation_id；
-HTTP/2不发送该连接级头。错误详情区分Governor全局/集合预算与构建单份/共享预算，
-报告used/requested/limit，不改变Busy/outcome_unknown/durable_pending提交语义。
-### 分词器默认与身份
-
-启用默认 `zh` feature 时，新建集合默认 `JiebaMixedV1`：tantivy-jieba 0.21.0 /
-jieba-rs 0.11.0 的固定词典、精确模式、关闭 HMM 与重叠 search-mode，统一 Unicode
-小写。未启用 `zh` 时默认 `TantivySimpleV1`；英文应用也可显式选择该模式，使用
-Tantivy 0.27 SimpleTokenizer + LowerCaser。二者都不使用默认40字节过滤器，不新增停用词、
-隐式前缀扩展或语言识别。AND/OR仍由请求显式选择。
-
-旧 `UnicodeAlphanumericZH` 不再被接受，不能以旧名称静默替换切词。新的算法、词典版本
-及词典摘要进入 native 包认证配置；不提供旧索引迁移/读取兼容链。原文不变，OpenCC仍由
-独立不可变配置控制。切词变化会改变词频、字段长度、命中和分数，即使评分公式不变。
-仅接受上述两个标准分词器（`JiebaMixedV1` 需要 `zh`）。旧 `AsciiAlphabetic`、
-`UnicodeAlphanumeric`、`UnicodeAlphanumericFolded`、`Whitespace`、`WhitespaceLowercase`
-在 API 和持久化配置反序列化时明确拒绝，不提供兼容别名、静默映射或格式迁移。
-删除的能力包括仅 ASCII 字母切词、旧 Unicode 词边界及 `c++`/`c#`/连字符保留、
-自建重音/全角/连字/德语变音折叠及撇号处理、仅按空白切词和保留大小写。
-标准路径不保证这些语义等价；选择标准配置重新建索引后，命中、词频和排名可能改变。
-OpenCC、查询运算符/短语、停用词、frequent words 与 word N-gram 仍保留。
-
-### Collection 删除后的物理回收
-
-删除响应中的 `physical_reclamation: pending` 表示后台回收已纳入周期处理。有效备份、在途 owner 或固定文件读者仍会保护旧代次；退役相关备份并释放引用后，服务按有界批次释放本地/S3 资源，失败和重启后继续。新完整服务备份排除已经进入回收的旧代次。回收完成及阻塞原因见服务日志，协议见[存储说明](../../../docs/storage.md#已删除集合代次的最终回收)。
+`/doc/{record_id}/status` 保留为技术状态接口，用于当前版本和 pending_vector_fields；专用来源业务状态将在内核阶段移除。

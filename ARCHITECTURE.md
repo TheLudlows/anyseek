@@ -1,5 +1,7 @@
 # 当前架构
 
+职责收敛正在独立分支分阶段实施，当前服务入口变化及仍待移除的旧内核模型见[引擎边界](docs/engine-scope.md)。下文来源/关系内部结构是尚未完成清理的实现记录，不代表仍提供相应 HTTP 入口。
+
 AnySeek 是 Rust 实现的存储和检索服务，通过 HTTP API 和独立 Web 控制台使用。资源模型为 Tenant → Collection → Partition → Segment；每个 collection 一个持久 partition。HTTP 数据请求统一交由内部 RecordPartition 处理；内部向量/元数据组件包含可变 tail 与冻结 Segment，重复逻辑 shard 状态已由 #111 移除。
 
 ## 模块边界

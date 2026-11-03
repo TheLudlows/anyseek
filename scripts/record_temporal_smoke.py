@@ -29,12 +29,12 @@ def exercise(call, restart_with, directory, faults):
     reader=base64.b64encode(os.urandom(32)).decode()
     call('POST','/api/v1/apikey',{'operation_id':operation(),'key_id':'temporal-reader','apikey_base64':reader})
     source = {'operation_id': operation(), 'record_id': 's',  'expected': 'Absent',
-              'document': {'body': 'temporal source'}, 'system': {'kind': 'source'},
+              'document': {'body': 'temporal source'},
               'temporal': {'event_time_ms': 100, 'valid_from_ms': 100, 'valid_to_ms': 200, 'expire_at_ms': now + (100 if faults else 86400000)}}
     receipt = write_one(call, endpoint, source)['receipt']
     for rid, parent in [('d', 's'), ('i', 'd')]:
         write_one(call, endpoint, {'operation_id': operation(), 'record_id': rid,  'expected': 'Absent',
-             'document': {'body': 'temporal derived'}, 'system': {'kind': 'derived', 'evidence_refs': [{'record_id': parent,  'version': 1}]}})
+             'document': {'body': 'temporal peer'}, 'temporal': {'expire_at_ms': source['temporal']['expire_at_ms']}})
     query = {'query': 'temporal', 'temporal': {'event': {'from_ms': 100, 'to_ms': 101}, 'valid_at_ms': 100}}
     result = call('POST', endpoint + '/query', query)
     assert [h['record']['record_id'] for h in result['hits']] == ['s'], result
@@ -50,10 +50,9 @@ def exercise(call, restart_with, directory, faults):
         clock(now + 100)
         for rid in ['s', 'd', 'i']:
             call('GET', endpoint + '/doc/' + rid, status=404)
-            assert call('GET', endpoint + '/doc/' + rid + '/status')['visibility'] == 'expired'
         assert call('POST', endpoint + '/query', {})['statistics']['active_records'] == 0
         assert write_one(call, endpoint, source)['receipt'] == receipt
-        write_one(call, endpoint, {**source, 'operation_id': operation(), 'expected': {'Match': 2}, 'temporal': {'expire_at_ms': now + 10000}}, status=400)
+        write_one(call, endpoint, {**source, 'operation_id': operation(), 'expected': {'Match': 2}, 'temporal': {'expire_at_ms': now + 10000}}, status=409)
         # Restart and clock-uncertainty keep expired records absent; a backward
         # jump cannot restore data, and a larger jump is rejected as uncertain.
         assert call('POST', endpoint + '/query', {})['count_total'] == 0
@@ -63,7 +62,7 @@ def exercise(call, restart_with, directory, faults):
         assert call('POST', endpoint + '/query', {}, status=503)['code'] == 'clock_uncertain'
         clock(now + 101)
         assert call('POST', endpoint + '/query', {})['count_total'] == 0
-        print('PASS temporal HTTP: fixed view, transitive expiry, no revival, original retry and restart')
+        print('PASS temporal HTTP: fixed view, independent expiry, no revival, original retry and restart')
         for stage in ['after_append_unknown', 'after_durable', 'crash_after_durable', 'crash_after_visible']:
             # All commands use the same controlled time; no sleep determines expiry.
             cid = 'ttl-' + stage.replace('_', '-')
@@ -86,7 +85,7 @@ def exercise(call, restart_with, directory, faults):
                 call('GET', endpoint + '/doc/s', status=503)
             restart_with(env)
             assert call('POST', endpoint + '/query', {})['count_total'] == 0
-            assert call('GET', endpoint + '/doc/s/status')['version'] == 2
+            call('GET', endpoint + '/doc/s', status=404)
             assert write_one(call, endpoint, write)['receipt'] == original
             # Keep the trusted clock monotonic across fixtures.
             now += 1000

@@ -232,7 +232,7 @@ test("creation and i64 import survive lost responses and reload with identical r
   ).toBe(2);
 });
 
-test("real lexical/vector/hybrid search, empty state, explanations, advanced tools and screenshots", async ({
+test("real lexical/vector/hybrid search, empty state, explanations and advanced query JSON", async ({
   page,
 }) => {
   await login(page);
@@ -283,46 +283,18 @@ test("real lexical/vector/hybrid search, empty state, explanations, advanced too
     .getByRole("navigation", { name: "主导航" })
     .getByRole("button", { name: "数据", exact: true })
     .click();
-  await page.getByRole("button", { name: "高级检查", exact: true }).click();
-  await page.getByRole("button", { name: "运行检查", exact: true }).click();
-  await expect(page.locator(".json-view pre")).toContainText("records");
-  await page.getByRole("button", { name: "来源证据", exact: true }).click();
-  await expect(page.getByLabel("请求 JSON")).toContainText("locator");
+  await expect(page.getByRole("button", { name: "高级检查", exact: true })).toHaveCount(0);
 });
 
-test("real cursor pagination, relation/evidence tools and administrator backup/restore", async ({
+test("real cursor pagination and administrator backup/restore", async ({
   page,
 }) => {
   const collection = "product_docs";
-  for (const id of ["entity_a", "entity_b"])
+  for (const id of ["doc_a", "doc_b", "doc_c", "doc_d"])
     await call(`index/${collection}/batch`, { writes: [{
-      operation_id: operation(),
-      record_id: id,
-      expected: "Absent",
-      document: { title: id, body: "entity" },
-      system: { kind: "entity" },
+      operation_id: operation(), record_id: id, expected: "Absent",
+      document: { title: id, body: "ordinary record", source_id: "upstream" },
     }] });
-  await call(`index/${collection}/batch`, { writes: [{
-    operation_id: operation(),
-    record_id: "edge",
-    expected: "Absent",
-    document: { title: "Knows", body: "relation" },
-    system: {
-      kind: "relation",
-      relation: {
-        from: { record_id: "entity_a", version: 1 },
-        to: { record_id: "entity_b", version: 1 },
-        relation_type: "knows",
-      },
-    },
-  }] });
-  await call(`index/${collection}/batch`, { writes: [{
-    operation_id: operation(),
-    record_id: "source",
-    expected: "Absent",
-    document: { title: "Source", body: "sourceword" },
-    system: { kind: "source" },
-  }] });
   for (let i = 0; i < 20; i++)
     await call(`index/${collection}/batch`, { writes: [{
       operation_id: operation(),
@@ -343,62 +315,6 @@ test("real cursor pagination, relation/evidence tools and administrator backup/r
   await expect(page.locator("tbody tr")).toHaveCount(4);
   const secondIds = await page.locator(".record-link").allTextContents();
   expect(secondIds.filter((id) => firstIds.includes(id))).toEqual([]);
-  await page.getByRole("button", { name: "高级检查", exact: true }).click();
-  await page.getByRole("button", { name: "实体目录", exact: true }).click();
-  await page.getByRole("button", { name: "运行检查", exact: true }).click();
-  await expect(page.locator(".json-view pre")).toContainText("entity_a");
-  await page.getByRole("button", { name: "一跳关系", exact: true }).click();
-  await page.getByLabel("请求 JSON", { exact: true }).fill(
-    JSON.stringify({
-      seeds: [{ record_id: "entity_a", version: 1 }],
-      direction: "out",
-      relation_types: [],
-      per_seed: 10,
-      max_candidates: 100,
-      allow_partial: false,
-    }),
-  );
-  await page.getByRole("button", { name: "运行检查", exact: true }).click();
-  await expect(page.locator(".json-view pre")).toContainText("entity_b");
-  await page.getByRole("button", { name: "关系融合", exact: true }).click();
-  await page.getByLabel("请求 JSON", { exact: true }).fill(
-    JSON.stringify({
-      query: "relation",
-      length: 10,
-      relation_fusion: {
-        rrf: {
-          constant: 3,
-          keyword_weight: 1,
-          vector_weight: 0,
-          keyword_candidates: 100,
-        },
-        relation_weight: 1,
-        neighbors: {
-          seeds: [{ record_id: "entity_a", version: 1 }],
-          direction: "out",
-          relation_types: [],
-          per_seed: 10,
-          max_candidates: 100,
-          allow_partial: false,
-        },
-      },
-    }),
-  );
-  await page.getByRole("button", { name: "运行检查", exact: true }).click();
-  await expect(page.locator(".json-view pre")).toContainText(
-    "candidate_window",
-  );
-  await page.getByRole("button", { name: "来源证据", exact: true }).click();
-  await page.getByLabel("请求 JSON", { exact: true }).fill(
-    JSON.stringify({
-      record_id: "source",
-      version: 1,
-      locator: { kind: "utf8", field: "body", start: 0, end: 6 },
-    }),
-  );
-  await page.getByRole("button", { name: "运行检查", exact: true }).click();
-  await expect(page.locator(".json-view pre")).toContainText("content_sha256");
-  await expect(page.locator(".json-view pre")).toContainText("source");
   await page.getByRole("button", { name: "连接与管理", exact: true }).click();
   await page
     .getByLabel("Master API Key", { exact: true })

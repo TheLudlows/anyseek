@@ -10,7 +10,7 @@ def operation():
     return {'epoch':int(time.time()//86400),'nonce':uuid.uuid4().hex}
 
 def main():
-    parser=argparse.ArgumentParser();parser.add_argument('--server',required=True);parser.add_argument('--startup-timeout',type=float,default=15.0,help='local service readiness deadline in seconds (cold S3 uses at least 120)');parser.add_argument('--faults',action='store_true');parser.add_argument('--cold-restarts',action='store_true');parser.add_argument('--section',choices=['base','locator','graph','temporal','history','indexer','authorization','ingest']);args=parser.parse_args()
+    parser=argparse.ArgumentParser();parser.add_argument('--server',required=True);parser.add_argument('--startup-timeout',type=float,default=15.0,help='local service readiness deadline in seconds (cold S3 uses at least 120)');parser.add_argument('--faults',action='store_true');parser.add_argument('--cold-restarts',action='store_true');parser.add_argument('--section',choices=['base','temporal','history','indexer','authorization','ingest']);args=parser.parse_args()
     binary=str(pathlib.Path(args.server).resolve())
     with tempfile.TemporaryDirectory(prefix='anyseek-service-', dir=os.environ.get('ANYSEEK_TEST_ROOT')) as tmp:
         root=pathlib.Path(tmp)/'data'
@@ -291,95 +291,20 @@ def main():
             call('POST','/api/v1/restore',{**restore,'operation_id':operation(),'collection_id':'after-source-delete'})
             assert call('GET','/api/v1/index/after-source-delete/doc/r0')['version']==5
             call('POST','/api/v1/restore',{**restore,'backup_id':'../escape'},status=400)
-            # Source revisions preserve bodies while invalidating direct/indirect evidence.
-            call('POST','/api/v1/index',{'operation_id':operation(),'collection_id':'revisions','config':{'index_name':'Revisions','schema':[{'field':'body','field_type':'Text','store':True}]}})
-            src={'operation_id':operation(),'record_id':'s','expected':'Absent','document':{'body':'revisionword old'},'system':{'kind':'source'}}
-            write_one(call, '/api/v1/index/revisions', src)
-            for rid,parent in [('d','s'),('i','d')]:
-                write_one(call, '/api/v1/index/revisions', {**src,'operation_id':operation(),'record_id':rid,'system':{'kind':'derived','evidence_refs':[{'record_id':parent,'version':1}]}})
-            update={**src,'operation_id':operation(),'expected':{'Match':1},'document':{'body':'revisionword new'}}
-            receipt=write_one(call, '/api/v1/index/revisions', update, key=keys['b'])['receipt']
-            assert receipt['version']==2
-            assert write_one(call, '/api/v1/index/revisions', update)['receipt']==receipt
-            write_one(call, '/api/v1/index/revisions', {**update,'operation_id':operation()}, status=409)
-            for rid in ['d','i']:
-                status=call('GET','/api/v1/index/revisions/doc/'+rid+'/status',key=keys['b'])
-                assert status['visibility']=='stale' and 'document' not in status
-                call('GET','/api/v1/index/revisions/doc/'+rid,status=404)
-            assert call('POST','/api/v1/index/revisions/query',{'query':'revisionword'})['count_total']==1
-            call('PATCH','/api/v1/index/revisions');restart()
-            assert call('GET','/api/v1/index/revisions/doc/i/status')['visibility']=='stale'
-            assert write_one(call, '/api/v1/index/revisions', update)['receipt']==receipt
-            write_one(call, '/api/v1/index/revisions', {'operation_id':operation(),'record_id':'s','expected':{'Match':2},'document':None})
-            assert call('GET','/api/v1/index/revisions/doc/i/status')['visibility']=='deleted'
-            assert call('GET','/api/v1/index/revisions/doc/i/status',key=keys['b'])['visibility']=='deleted'
-            call('DELETE','/api/v1/index/revisions',{'operation_id':operation()})
-            print('PASS source revisions HTTP: conditional update/retry, transitive stale, counts, restart, deletion and status authorization')
-            # P2 immutable source/evidence through the same authorized Record API.
-            ec={'operation_id':operation(),'collection_id':'evidence','config':{'index_name':'Evidence','schema':[{'field':'body','field_type':'Text','store':True}]}}
-            call('POST','/api/v1/index',ec)
-            source={'operation_id':operation(),'record_id':'source','expected':'Absent','document':{'body':'evidenceword original'},'system':{'kind':'source'}}
-            direct={**source,'operation_id':operation(),'record_id':'direct','system':{'kind':'derived','evidence_refs':[{'record_id':'source','version':1}]}}
-            indirect={**direct,'operation_id':operation(),'record_id':'indirect','system':{'kind':'derived','evidence_refs':[{'record_id':'direct','version':1}]}}
-            for w in [source,direct,indirect]:write_one(call, '/api/v1/index/evidence', w, key=keys['b'])
-            assert call('POST','/api/v1/index/evidence/query',{'query':'evidenceword'})['count_total']==3
-            early=call('POST','/api/v1/index/evidence/backup',{'operation_id':operation()})
-            delete={'operation_id':operation(),'record_id':'source','expected':{'Match':1},'document':None}
-            receipt=write_one(call, '/api/v1/index/evidence', delete)['receipt']
-            assert write_one(call, '/api/v1/index/evidence', delete, key=keys['b'])['receipt']==receipt
-            for rid in ['source','direct','indirect']:call('GET','/api/v1/index/evidence/doc/'+rid,key=keys['b'],status=404)
-            assert call('POST','/api/v1/index/evidence/query',{'query':'evidenceword'},key=keys['b'])['hits']==[]
-            assert call('POST','/api/v1/index/evidence/iterator',{},key=keys['b'])['statistics']['active_records']==0
-            write_one(call, '/api/v1/index/evidence', {**source,'operation_id':operation()}, status=400)
-            write_one(call, '/api/v1/index/evidence', {**direct,'operation_id':operation(),'record_id':'late'}, status=409)
-            badscope={**direct,'operation_id':operation(),'record_id':'bad','system':{'kind':'derived','evidence_refs':[{'collection_id':'other','record_id':'source','version':1}]}}
-            write_one(call, '/api/v1/index/evidence', badscope, status=400)
-            call('PATCH','/api/v1/index/evidence');restart()
-            assert call('POST','/api/v1/index/evidence/query',{},key=keys['b'])['hits']==[]
-            restored_evidence=call('POST','/api/v1/restore',{'operation_id':operation(),'collection_id':'evidence-old','backup_id':early['backup_id']})
-            assert restored_evidence['evidence_quarantined'] is True
-            call('GET','/api/v1/index/evidence-old/doc/source',status=404)
-            assert call('POST','/api/v1/index/evidence-old/query',{})['hits']==[]
-            print('PASS source HTTP: shared keys, precise transitive evidence, deletion/read/query/iterator, checkpoint restart, old snapshot quarantine')
-            if args.faults:
-                import http.client
-                for stage in ['after_append_unknown','after_durable','crash_after_durable','crash_after_visible']:
-                    sid='source-'+stage;did='derived-'+stage
-                    write_one(call, '/api/v1/index/evidence', {**source,'operation_id':operation(),'record_id':sid})
-                    write_one(call, '/api/v1/index/evidence', {**direct,'operation_id':operation(),'record_id':did,'system':{'kind':'derived','evidence_refs':[{'record_id':sid,'version':1}]}})
-                    deletion={**delete,'operation_id':operation(),'record_id':sid}
-                    process.kill();process.wait(timeout=20)
-                    start({'ANYSEEK_RECORD_FAULT':stage,'ANYSEEK_RECORD_FAULT_NONCE':deletion['operation_id']['nonce']})
-                    if stage.startswith('crash_'):
-                        try:write_one(call, '/api/v1/index/evidence', deletion)
-                        except (OSError,http.client.HTTPException):pass
-                        else:raise AssertionError('expected source delete transport loss')
-                        process.wait(timeout=20);assert process.returncode==86
-                    else:
-                        assert write_one(call, '/api/v1/index/evidence', deletion, status=503)['code'] in ['outcome_unknown','durable_pending']
-                        call('GET','/api/v1/index/evidence/doc/'+did,status=503)
-                    restart();call('GET','/api/v1/index/evidence/doc/'+did,status=404)
-                    assert write_one(call, '/api/v1/index/evidence', deletion)['receipt']['version']==2
-                print('PASS source HTTP faults: unknown/durable pending/process loss recover deletion and retry without derived resurrection')
-                for stage in ['after_append_unknown','after_durable','crash_after_durable','crash_after_visible']:
-                    sid='revision-'+stage;did='revision-derived-'+stage
-                    write_one(call, '/api/v1/index/evidence', {**source,'operation_id':operation(),'record_id':sid})
-                    write_one(call, '/api/v1/index/evidence', {**direct,'operation_id':operation(),'record_id':did,'system':{'kind':'derived','evidence_refs':[{'record_id':sid,'version':1}]}})
-                    revision={**source,'operation_id':operation(),'record_id':sid,'expected':{'Match':1},'document':{'body':'revised content'}}
-                    process.kill();process.wait(timeout=20)
-                    start({'ANYSEEK_RECORD_FAULT':stage,'ANYSEEK_RECORD_FAULT_NONCE':revision['operation_id']['nonce']})
-                    if stage.startswith('crash_'):
-                        try:write_one(call, '/api/v1/index/evidence', revision)
-                        except (OSError,http.client.HTTPException):pass
-                        else:raise AssertionError('expected source update transport loss')
-                        process.wait(timeout=20);assert process.returncode==86
-                    else:
-                        assert write_one(call, '/api/v1/index/evidence', revision, status=503)['code'] in ['outcome_unknown','durable_pending']
-                    restart()
-                    assert write_one(call, '/api/v1/index/evidence', revision)['receipt']['version']==2
-                    assert call('GET','/api/v1/index/evidence/doc/'+did+'/status')['visibility']=='stale'
-                    call('GET','/api/v1/index/evidence/doc/'+did,status=404)
-                print('PASS source revision HTTP faults: unknown/durable pending/process loss preserve stale and exact retry')
+            # Source/chunk identifiers remain ordinary payload through recovery and backup.
+            call('POST','/api/v1/index',{'operation_id':operation(),'collection_id':'plain-metadata','config':{'index_name':'Plain metadata','schema':[{'field':'body','field_type':'Text','store':True}]}})
+            metadata={'operation_id':operation(),'record_id':'chunk','expected':'Absent','document':{'body':'metadataword','document_id':'doc','chunk_index':3,'source_id':'s','source_version':7,'system':{'kind':'source'}}}
+            receipt=write_one(call,'/api/v1/index/plain-metadata',metadata)['receipt']
+            write_one(call,'/api/v1/index/plain-metadata',{**metadata,'operation_id':operation(),'system':{'kind':'source'}},status=400)
+            for route in ['evidence','entities','neighbors']:
+                call('POST','/api/v1/index/plain-metadata/'+route,{},status=404)
+            assert call('GET','/api/v1/index/plain-metadata/doc/chunk/status')['pending_vector_fields']==[]
+            call('POST','/api/v1/index/plain-metadata/query',{'query':'metadataword','relation_fusion':{}},status=400)
+            early=call('POST','/api/v1/index/plain-metadata/backup',{'operation_id':operation()})
+            restart()
+            assert write_one(call,'/api/v1/index/plain-metadata',metadata)['receipt']==receipt
+            assert call('GET','/api/v1/index/plain-metadata/doc/chunk')['document']==metadata['document']
+            print('PASS ordinary source metadata: durable replay and removed business routes')
 
             if args.faults:
                 import http.client
@@ -505,8 +430,7 @@ def main():
                 tenant_key=restored_key
                 call('GET','/api/v1/index/after-source-delete')
                 call('GET','/api/v1/index/shared',status=403)
-                call('GET','/api/v1/index/evidence/doc/direct',status=404)
-                assert call('GET','/api/v1/index/evidence')['evidence_quarantined'] is True
+                assert call('GET','/api/v1/index/plain-metadata/doc/chunk')['document']==metadata['document']
                 call('POST','/api/v1/apikey',add_key,status=409)
                 old=add_key['operation_id'];call('GET',f"/api/v1/catalog/operation/{old['epoch']}/{old['nonce']}",status=409)
                 assert write_one(call, '/api/v1/index/after-source-delete', writes[0])['receipt']['version']==1
@@ -552,10 +476,6 @@ def main():
             if args.section=='base':return
             section('ingest')
             from record_temporal_smoke import exercise as temporal_exercise
-            from record_locator_smoke import exercise as locator_exercise
-            locator_exercise(call,restart_with,args.faults)
-            from record_graph_smoke import exercise as graph_exercise
-            graph_exercise(call,restart_with,args.faults)
             temporal_exercise(call,restart_with,root.parent,args.faults)
             from record_history_smoke import exercise as history_exercise
             history_exercise(call,restart_with,root.parent,args.faults)
