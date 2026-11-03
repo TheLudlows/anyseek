@@ -1,10 +1,19 @@
 # anyseek 当前状态
 
-## 当前本地分支（2026-11-03）
+## 当前主干（2026-11-03）
 
-本次职责收敛基于主干 `024d9d90f569dda90443787d36671b6544378962`，尚未推送或创建 PR。内核、API/控制台、TTL、回执政策及普通写 proof 的变化和本地验证见[实施说明](docs/engine-scope.md)。下列历史 PR/CI 仅保留合入记录，不替代本分支验证。
+核对基线为 `c01e2e172e9a3747da07fb008d2bf02ae6d1dea9`。职责收敛、普通写增量规划、查询锁范围和服务关闭改造均已合入；合入不等于已发布版本或完整性能验收。内核、API/控制台、TTL、回执政策见[实施说明](docs/engine-scope.md)，普通写所有权及规划边界见[写入证明](docs/record-write-proof.md)。
 
 AnySeek 是有界单机记录与检索服务：一层 Record WAL、SQLite 协调元数据、Tenant/Collection 身份、Tantivy 全文和独立向量/元数据组件已经生效。同步 `/batch` 与异步索引 `/ingest` 同时存在，成功含义按入口区分，见[服务指南](anyseek/src/server/README.md#异步索引写入)。
+
+| 最近合入工作 | 当前实现与剩余边界 |
+| --- | --- |
+| [#184](https://github.com/TheLudlows/anyseek/pull/184)：#183 文件库存超限 | 私有批量构建先完成有界小段合并及引用感知 GC，再收集库存；保留 1,024 文件上限。已有原故障数据验证，不再列为尚未实现的修复；更大负载及资源压力仍受预算限制 |
+| [#187](https://github.com/TheLudlows/anyseek/pull/187)：引擎职责与提交校验 | 删除专用来源/关系业务模型；普通写不再复制 full base 或执行全量基准 proof，恢复和维护继续完整校验 |
+| [#188](https://github.com/TheLudlows/anyseek/pull/188)：全文锁范围 | 纯全文 Count、默认及 ID/score 排序在评分前释放组件锁；Hybrid 与字段排序仍保留原路径，性能验收未完成 |
+| [#189](https://github.com/TheLudlows/anyseek/pull/189)：服务关闭 | 停止准入、排空已接收工作并等待资源释放，最后释放根锁；不新增强制 checkpoint 或持久性保证 |
+| [#186](https://github.com/TheLudlows/anyseek/pull/186)：读写交错回归 | 验证编码/上传持有 writer 时查询和 TTL 重验仍能完成，且读取不持久修改写入基准 |
+| [#191](https://github.com/TheLudlows/anyseek/pull/191)：写入规划与 tail 轮换 | PlanningView 替代完整 shadow，只保留本批成功前缀；轮换移动地址字符串并原位更新位置。历史回执检查、切段和索引仍有额外成本，不宣称整个写入为 O(batch) |
 
 | 历史合入工作 | 当时实现与证据 |
 | --- | --- |
@@ -20,7 +29,9 @@ AnySeek 是有界单机记录与检索服务：一层 Record WAL、SQLite 协调
 
 - 历史主干 `f029f08c` 的 [PR feedback](https://github.com/TheLudlows/anyseek/actions/runs/41152427079) 已成功；它不能替代 #114 的依赖更新验证。
 - 历史主干 `761ec134` 的 [PR feedback](https://github.com/TheLudlows/anyseek/actions/runs/41153915721) 单独跟踪。完整矩阵仅手工运行，快速 CI 成功不等于全量验收；准确命令和覆盖范围见 [CI 指南](docs/ci-validation.md)。
-- 本分支本地测试按[实施说明](docs/engine-scope.md)披露分批覆盖、修复和补跑；不将历史 CI 当作当前提交 CI。
+- 职责收敛阶段的测试按[实施说明](docs/engine-scope.md)及 #187 披露分批覆盖、修复和补跑，不将历史 CI 当作当前提交 CI。
+- #183 在上述基线重新构建的 Linux 默认特性测试二进制中复核，8 项现有定向回归全部通过：4,000 条约 8 KiB 正文确实生成超过 1,024 个文件，覆盖有界合并、固定旧读者、GC、完整库存认证及重开，以及合并失败/取消、硬压力后恢复进度、无客户端流量时维护重试、组件数量边界与日志压力下未知结果。原故障库继续写到 5,000 条的证据属于 #184，不能冒充本次重测；本次不是完整服务容量或真实 S3 验收。
+- #178 的全文有界候选已合入；[#190](https://github.com/TheLudlows/anyseek/pull/190) 为待合入验收材料，固定比较 #178 前后版本，不代表当前主干所有后续改动的性能。
 - 真实云 S3 endpoint、系统/文件系统崩溃、硬断电及手工跨 AES 验证仍需实际环境证据。fixture、进程退出和编译通过均不能替代。
 
 ## 使用边界与下一步
