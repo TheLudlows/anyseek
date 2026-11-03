@@ -1,6 +1,6 @@
 import { t } from "./i18n.ts";
 import { useRef, useState } from "react";
-import { ApiError } from "./api.ts";
+import { ApiError, requireSecureContext } from "./api.ts";
 import { Busy, Notice } from "./components.tsx";
 import {
   clearBootstrap,
@@ -60,6 +60,7 @@ export function Initialize({
     setError("");
     let request = pending;
     try {
+      requireSecureContext();
       request ??= loadBootstrap() ?? prepareBootstrap(tenant);
       setPending(request);
       if (request.stage !== "connect") {
@@ -74,7 +75,9 @@ export function Initialize({
     } catch (e) {
       // Server messages may echo credentials, so only show bounded local text.
       setError(
-        e instanceof ApiError && e.status === 401
+        e instanceof ApiError && e.status === 0 && e.code === "insecure_context"
+          ? e.message
+          : e instanceof ApiError && e.status === 401
           ? t("Key 无效或已失效，请检查后重试原请求。")
           : e instanceof ApiError && e.status === 409
             ? t("初始化发生冲突，未将冲突视为成功，也未覆盖已有 Key。已有 Tenant 请返回使用已签发的普通 Key；保留的原请求可继续重试。")
