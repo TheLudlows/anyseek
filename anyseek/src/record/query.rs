@@ -490,6 +490,15 @@ mod tests {
         let mut request=write("a","a","alpha",ExpectedVersion::Absent);
         request.temporal=Some(TemporalMetadata{expire_at_ms:Some(1100),..Default::default()});
         p.write(request).await.unwrap();
+        {
+            let inner = p.inner.lock().await;
+            assert_eq!(inner.state.records.live_ttl_count(), 1);
+            assert!(!inner.state.records.may_have_due_ttl(inner.evaluation_time_ms));
+            assert_eq!(inner.statistics().active_records, 1, "future TTL uses the cheap count");
+        }
+        let before = p.search("alpha".into(), None, SearchMode::Lexical, vec![], 10).await.unwrap();
+        assert_eq!(before.statistics.active_records, 1);
+        assert_eq!(before.hits.len(), 1);
         let gate=".test-query-candidates-pause";std::fs::write(root.join(gate),b"pause").unwrap();
         let pending={let p=p.clone();tokio::spawn(async move {p.search("alpha".into(),None,SearchMode::Lexical,vec![],10).await})};
         entered(&root,gate).await;
