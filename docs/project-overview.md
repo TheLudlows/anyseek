@@ -50,7 +50,7 @@ flowchart TB
 
 默认服务为单机、多 collection；每个 collection 一个持久 partition。公开数据入口统一为 RecordPartition；内部多组件布局不代表分布式分片。
 
-两种持久化模式共用 Record 语义、规范原始 Payload、不可变 Segment 和可变 tail。`/ingest` 持久提交后由全文与向量异步消费；查询固定派生读取拓扑和 evaluation_time，在 guard 外评分，再重验当前版本、删除及来源可见性。各消费者进度不要求一致。
+两种持久化模式共用 Record 语义、规范原始 Payload、不可变 Segment 和可变 tail。`/ingest` 持久提交后由全文与向量异步消费；查询固定派生读取拓扑和 evaluation_time，在 guard 外评分，再重验当前版本、删除及 TTL 可见性。各消费者进度不要求一致。
 
 | 模式 | 提交权威 | 内容存储与检索 | 恢复依据 |
 | --- | --- | --- | --- |

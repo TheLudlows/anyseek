@@ -18,7 +18,7 @@ impl replay::Context<'_> {
         let document = prepared.record.document.as_ref();
         let old_location = self.locations.get(&receipt.record_id).copied();
         if let Some(document) = document {
-            // Admit the full temporal/index input before cloning it. Four
+            // Admit the full temporal/index input before cloning it. Five
             // bounded synthetic time fields add at most 8 KiB at the same 32x
             // logical expansion. Queue projections and analysis own other leases.
             let (_input, _scope) = (|| -> Result<_, RecordError> {
@@ -52,16 +52,10 @@ impl replay::Context<'_> {
         }
         apply_prepared(&mut *self.state, applied, Some(prepared)).map_err(|_| RecordError::DurablePending(receipt.seq))?;
         *self.snapshot_bytes = snapshot_bytes;
+        // Still serialize every Record/operation independently of incremental
+        // snapshot_after arithmetic. Counting needs neither a clone nor decode.
         #[cfg(test)]
-        assert_eq!(
-            snapshot_bytes,
-            encode_entry(&Entry::Checkpoint {
-                config: self.config.clone(),
-                state: self.state.try_clone()?
-            })
-            .unwrap()
-            .len()
-        );
+        assert_eq!(*self.snapshot_bytes,checkpoint_codec::full_length(self.config,self.state)?);
         Ok(())
     }
 }

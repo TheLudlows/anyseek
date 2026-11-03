@@ -9,11 +9,11 @@ HTTP/Web UI 数据请求统一由服务内部的 Record/catalog 处理；旧低�
 | 全文 | BM25F/邻近度、布尔/短语、多字段、中文分词、停用词和 N-gram |
 | 向量 | 外部 JSON/base64、多向量字段、F32/I8、三种距离、量化、IVF ANN；模型推理由调用方提供 |
 | 混合 | 全文/向量共同视图 RRF，支持权重和候选预算、逐命中 rank/原始分数/贡献；候选窗口不当作全库精确并集 |
-| 时间与生命周期 | UTC 毫秒时间过滤、固定 evaluation_time、不可逆 TTL |
+| 时间与生命周期 | UTC 毫秒时间过滤、捕获 evaluation_time 与最终候选重验、TTL 后台回收；重启时钟回退边界见[说明](docs/engine-scope.md) |
 | 过滤和排序 | 共享元数据谓词、字段排序、分页和投影；ANN/Hybrid 候选内重排不保证全库字段 Top-K |
 | 身份和写入 | 稳定 Record ID、版本条件、墓碑、防 ABA、原 operation_id 重试 |
 | 原始数据 | 权威状态保留完整 Document 和原始向量；schema.store 控制查询投影，不控制原始数据持久保存 |
-| 浏览 | 空查询浏览活动记录，包括纯向量 collection；iterator 按稳定 ID 分页，visible_seq 改变使 cursor 失效 |
+| 浏览 | 空查询浏览活动记录，包括纯向量 collection；iterator 按稳定 ID 分页，visible_seq 改变或跨越视图最早 TTL 使 cursor 失效 |
 | 持久化 | 本地 Segment + tail，或 SQLite/S3 对象提交、远端 checkpoint 与 GC；同步写入 durable + visible；异步索引入口返回持久业务结果；真实 S3/系统断电尚待验收 |
 | Tenant 认证 | 普通 Key 绑定 Tenant，同租户 Key 访问范围一致；撤销只影响后续认证，数据生命周期独立 |
 | 备份 | collection 独立快照、备份退役、完整 service/catalog 备份、新未启动根恢复 |
@@ -66,7 +66,7 @@ HTTP/Web UI 数据请求统一由服务内部的 Record/catalog 处理；旧低�
 
 ## 资源与未完成项
 
-默认 Record 身份（含墓碑）、保留操作各最多 10,000，可显式选 `bounded_100k` 将身份/操作准入提高到 100,000；候选仍最多 10,000。单操作 1 MiB；完整 checkpoint 单帧 16 MiB，Record WAL 代 256 MiB；catalog 16 MiB、10,000 操作。Record 历史至少保留七天，过期操作在历史水位、epoch 允许后安全 GC；普通 checkpoint 不清空窗口内回执。请求 body 2 MiB、响应 16 MiB；普通请求全局/每集合 32/16，恢复 2/1，后台 2/1，可信控制 8/2，公共/存活 8/8；partition 内部 16。collection 独立执行，共同快照仍保留全局屏障，Key 撤销不排空已认证工作；分级字节和 I/O 额度见[服务指南](anyseek/src/server/README.md)；请求期限不等于取消已接管的持久任务。
+默认 Record 身份（含墓碑）、保留操作各最多 10,000，可显式选 `bounded_100k` 将身份/操作准入提高到 100,000；候选仍最多 10,000。单操作 1 MiB；完整 checkpoint 单帧 16 MiB，Record WAL 代 256 MiB；catalog 16 MiB、10,000 操作。Record 回执默认/最低两日才具备回收资格，过期操作在认证历史水位、epoch 允许后安全 GC（不是清理时限）；普通 checkpoint 不清空窗口内回执。请求 body 2 MiB、响应 16 MiB；普通请求全局/每集合 32/16，恢复 2/1，后台 2/1，可信控制 8/2，公共/存活 8/8；partition 内部 16。collection 独立执行，共同快照仍保留全局屏障，Key 撤销不排空已认证工作；分级字节和 I/O 额度见[服务指南](anyseek/src/server/README.md)；请求期限不等于取消已接管的持久任务。
 
 collection backups 最多 32 个；service archives 每源根 4 个，生成恢复根每托管父目录 4 个；完整备份权威 payload 预检 1 GiB。达到边界显式拒绝，不静默淘汰。当前不承诺持续无限运行或长期稳定磁盘占用。
 

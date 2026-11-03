@@ -69,13 +69,13 @@ C3-1 已合入。C3-2 已通过 PR #78 合入，提供前台/恢复/后台分级
 
 ## 2. 日志与回执历史保留
 
-完整 checkpoint 包含版本、删除、来源、原始数据引用、操作回执、回执历史 GC 切点及历史恢复 scope，因此 `log_base_seq` 可推进至该 checkpoint cut。新 WAL 链从新 base 开始；旧链的不可变 predecessor 边不修改，仍被备份或其他 pin 保护时不能删除。
+完整 checkpoint 包含当前记录的正文/向量/普通元数据、技术版本与墓碑、TTL/时间水位、近期操作回执、认证 GC 切点及独立恢复 scope；不包含业务来源历史。因此 `log_base_seq` 可推进至该 checkpoint cut。新 WAL 链从新 base 开始；旧链的不可变 predecessor 边不修改，仍被备份或其他 pin 保护时不能删除。
 
-内部历史裁剪通过**同序号完整 checkpoint**认证 GC 切点和时间水位；冷恢复仍得到相同边界，不额外消耗业务序号。回执 GC 同时检查历史保留期、当前/前一 UTC 日重试窗口。当前格式使用 `RecordCheckpointV19`、`RecordAppliedV16`、`RecordAnchorV5`、`history` 和 `RecordHistoryTrimV14`，移除旧通知配额占位字段与旧裁剪算法；旧库、WAL 和备份明确拒绝，不做迁移。外部 bootstrap/changes 同步接口已移除。
+内部历史裁剪通过**同序号完整 checkpoint**认证 GC 切点和时间水位；冷恢复仍得到相同边界，不额外消耗业务序号。回执 GC 同时检查历史保留期（默认/最低两日，可显式更长）和当前/前一 UTC 日重试窗口；两日是最早资格，不是硬性清理期限。SQLite publication receipts 用于精确 tail/索引切点与恢复，不能等同这个 API 窗口直接删除。当前格式使用 `RecordCheckpointV19`、`RecordAppliedV16`、`RecordAnchorV5`、`history` 和 `RecordHistoryTrimV14`，移除旧通知配额占位字段与旧裁剪算法；旧库、WAL 和备份明确拒绝，不做迁移。外部 bootstrap/changes 同步接口已移除。
 
-物理删除不只看 indexed seq：checkpoint 已保存的幂等/来源及历史裁剪状态、当前根、完整依赖图、读者/构建/备份 pin 必须共同满足。当前单机读者和构建受 partition guard 保护；多节点租约/外部 indexer 尚不在本批。
+物理删除不只看 indexed seq：checkpoint 已认证的提交基准、幂等及回执裁剪状态、当前存储根、对象引用闭包、读者/构建/备份 pin 必须共同满足。当前单机读者和构建受 partition guard 保护；多节点租约/外部 indexer 尚不在本批。
 
-## 3. 上传、依赖与 GC
+## 3. 上传、存储引用与 GC
 
 - PUT 前持久登记 key、长度和摘要，响应丢失/进程退出也有可回收的对象身份；上传登记本身不提交记录。
 - 所有远端 checkpoint 成员和 WAL predecessor 均登记依赖，当前 bootstrap 也是 GC root。
@@ -103,7 +103,7 @@ metadata snapshot 和 descriptor 使用不可变对象；备份 ID 按 Tenant、
 
 恢复到新 collection 时，不复制一份能独立 GC 的原对象引用权威。先用不服务、不运行 GC 的临时导入库重放原 cut，再把验证后的规范文件复制到**目标集合新代次的对象 ID**，发布目标独立 checkpoint。原库和恢复目标因此可以独立压缩、退休备份和回收；重复恢复不能回退恢复目标后续写入。
 
-恢复保留 Record 版本、tombstone、原始向量和操作回执。独立快照不自动获得当前删除历史权威：保留 `independent_snapshot`，隔离受保护证据并更换 历史恢复 scope；不包含服务凭据。
+恢复保留 Record 版本、tombstone、原始向量和操作回执。独立快照不自动获得当前删除历史权威：保留 `independent_snapshot`，并更换历史恢复 scope；不包含服务凭据。
 
 完整服务归档复用既有 catalog/本地不可变归档协议，新增对 S3 collection backup 的私有物化输入。该归档包含完整独立数据，不依赖源 bucket 继续保留那些 collection backup pin。恢复服务禁用历史普通 Key，由目标 master 为已有 Tenant 重新签发 Key；在 S3 模式首次启动时，已认证的独立归档被发布到目标独立 bucket。归档中的 collection backup 仍可再次恢复。
 
@@ -115,7 +115,7 @@ metadata snapshot 和 descriptor 使用不可变对象；备份 ID 按 Tenant、
 
 checkpoint 与索引尾段封存仍通过 anchor 发布协议选择权威闭包；S3 模式由 SQLite 选择远端 manifest，旧 owner epoch 和失败后的输出 fencing 继续防止陈旧写者或不可信响应。
 
-独立备份恢复校验源闭包，在目标集合新代次（完整服务恢复使用独立 bucket） 发布完整远端状态后才由 catalog 激活。恢复保留版本和回执、更新 历史恢复 scope，不自动恢复历史普通 Key；typed evidence 保持隔离，不能据旧备份证明后续没有删除。
+独立备份恢复校验源闭包，在目标集合新代次（完整服务恢复使用独立 bucket） 发布完整远端状态后才由 catalog 激活。恢复保留版本和回执、更新历史恢复 scope，不自动恢复历史普通 Key；不能据旧备份证明后续没有删除。
 
 完整服务归档保留 collection 与其备份的恢复输入；普通 restore 的持久意图、备份 pin、私有目录清理和安全对象 GC 仍然有效。
 
@@ -127,7 +127,7 @@ checkpoint 与索引尾段封存仍通过 anchor 发布协议选择权威闭包�
 | flush、compaction、历史裁剪、seal | 完整对象闭包 + SQLite 所选 manifest | 同序号维护也必须远端认证；失败保持 fenced |
 | 冷启动 | 独占权威 owner 锁，认证 bootstrap/manifest/tail | 新建缓存前校验 bootstrap 预算、配置与初始序号；错误不发布缓存目录 |
 | 备份与指针 | SQLite 中原 ID 的 snapshot/pin + 不可变 descriptor | 中断重试维持原 cut；指针第 32 槽仍可修复 |
-| 恢复、服务归档 | 校验源闭包，目标集合新代次（完整服务恢复使用独立 bucket）；typed evidence 保持隔离 | catalog 激活前完成目标远端发布；归档包含 retained 源 |
+| 恢复、服务归档 | 校验源闭包，目标集合新代次（完整服务恢复使用独立 bucket） | catalog 激活前完成目标远端发布；归档包含 retained 源 |
 | GC、备份退休 | SQLite 可达性、pin、单调退休/删除记录及 catalog 退休意图 | 删除失败留待重试；不回滚 head，不复活已退休身份 |
 
 ## 验证入口与边界

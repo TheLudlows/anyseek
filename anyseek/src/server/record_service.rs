@@ -101,8 +101,8 @@ fn not_found() -> Error {
 fn parse<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, Error> {
     serde_json::from_slice(bytes).map_err(bad)
 }
-// Stage-one service boundary; canonical legacy fields are removed in the next
-// kernel slice. Never reinterpret old typed commands as ordinary writes.
+// Never reinterpret retired typed commands as ordinary writes. Source metadata
+// belongs inside document; only the reserved top-level system command is rejected.
 fn reject_business_writes(value: &Value, field: &str) -> Result<(), Error> {
     if value.get(field).and_then(Value::as_array).is_some_and(|rows|
         rows.iter().any(|row| row.as_object().is_some_and(|r| r.contains_key("system")))) {
@@ -1336,13 +1336,13 @@ async fn service_restore(
         service_budget(parent,"restored-service-",&target)?;
         if let Some(receipt)=Catalog::completed_service_restore(&target)? {
             if receipt.identity!=id || receipt.restored_from.as_ref()!=Some(&request.backup_id){return Err(bad("restore request identity reused"));}
-            return response(json!({"snapshot":receipt,"target_root":target,"authorization":"current master only; historical keys disabled; historical control operations rejected","evidence_restore":"quarantined; deletion-history reconciliation not yet supported","started":false}));
+            return response(json!({"snapshot":receipt,"target_root":target,"authorization":"current master only; historical keys disabled; historical control operations rejected","started":false}));
         }
 
         let guard=std::fs::OpenOptions::new().create(true).truncate(false).read(true).write(true).open(parent.join(format!(".seekpower-service-{name}.lock"))).map_err(storage)?;
         guard.try_lock().map_err(storage)?;
         let receipt=Catalog::restore_service(s.root.join(format!("service-backup-{}",request.backup_id)),target.clone(),id,master_verifier()).await?;
-        response(json!({"snapshot":receipt,"target_root":target,"authorization":"current master only; historical keys disabled; historical control operations rejected","evidence_restore":"quarantined; deletion-history reconciliation not yet supported","started":false}))
+        response(json!({"snapshot":receipt,"target_root":target,"authorization":"current master only; historical keys disabled; historical control operations rejected","started":false}))
     }).await
 }
 async fn create_s3_backup_pointer(

@@ -2,13 +2,14 @@
 //! There is no external notification stream or cursor.
 use super::*;
 
-const MIN_RETENTION_MS: u64 = 7 * 86_400_000;
-/// Conservative receipt-history retention policy.
+const MIN_RETENTION_MS: u64 = 2 * 86_400_000;
+/// Receipt-history GC eligibility, in addition to the operation retry epoch.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
 pub struct HistoryRetention {
     /// Minimum authenticated age before history is eligible for receipt GC.
-    /// The operation retry epoch is also checked.
+    /// Defaults to two days; the operation retry epoch is independently checked.
+    /// This is an earliest eligible age, not a maximum cleanup delay.
     pub retention_ms: u64,
 }
 impl Default for HistoryRetention {
@@ -156,6 +157,36 @@ mod retention_tests {
             state,settings,checkpoint_codec::length(settings,state).unwrap(),request,at/86_400_000,at).unwrap()
             else {panic!("new operation")};
         apply(state,&applied).unwrap();
+    }
+
+    #[test]
+    fn two_day_retention_keeps_active_epochs_and_requires_authenticated_floor() {
+        let day=86_400_000;
+        let settings=config();assert_eq!(settings.history.retention_ms,2*day);
+        assert!(validate_config(&HistoryRetention{retention_ms:2*day-1}).is_err());
+        let seven=HistoryRetention{retention_ms:7*day};
+        assert_eq!(serde_json::from_value::<HistoryRetention>(serde_json::to_value(&seven).unwrap()).unwrap(),seven);
+        assert_eq!(serde_json::from_value::<HistoryRetention>(serde_json::json!({})).unwrap().retention_ms,2*day);
+        let mut state=State::default();state.history.scope="0".repeat(32);
+        for (name,epoch) in [("old",4),("previous",5),("current",6)] {
+            apply_at(&mut state,&settings,write(name,name,"alpha",ExpectedVersion::Absent),epoch*day);
+        }
+        assert_eq!(committed_floor(&state,6*day-1,2*day),None);
+        assert_eq!(committed_floor(&state,6*day,2*day),Some(1));
+        maintenance::collect_operations(&mut state,6).unwrap();assert_eq!(state.operations.len(),3,"expired epoch alone is insufficient");
+        // Advancing time may authenticate an older prefix without advancing the
+        // retry epoch. Current/previous IDs must remain even if floor covers them.
+        apply_trim(&mut state,&settings.history,&Trim{previous:0,floor:3,at:8*day}).unwrap();
+        maintenance::collect_operations(&mut state,6).unwrap();
+        assert_eq!(state.operations.iter().map(|op|op.request.operation_id.nonce.as_str()).collect::<Vec<_>>(),["previous","current"]);
+        assert_eq!(state.records.len(),3,"receipt GC does not erase current bodies");
+        let wire=encode_entry(&Entry::Checkpoint{config:settings.clone(),state}).unwrap();
+        let Entry::Checkpoint{mut state,..}=serde_json::from_slice(&wire).unwrap() else{panic!("checkpoint")};
+        restore_operation_lookup(&mut state).unwrap();
+        let mut old=write("old","old","alpha",ExpectedVersion::Absent);old.operation_id.epoch=4;
+        assert!(matches!(mutation::prepare(&state,&settings,wire.len(),old,4),Err(RecordError::OperationExpired)));
+        let mut previous=write("previous","previous","alpha",ExpectedVersion::Absent);previous.operation_id.epoch=5;
+        assert!(matches!(mutation::prepare(&state,&settings,wire.len(),previous,6),Ok(mutation::PreparedWrite::Replay(_))));
     }
 
     #[tokio::test]

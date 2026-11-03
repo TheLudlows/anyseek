@@ -96,7 +96,7 @@ fn storage(error: impl std::fmt::Display) -> RecordError {
 /// Immutable collection configuration, persisted with authoritative state.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RecordConfig {
-    /// Conservative receipt-history retention; legacy wire metadata is preserved.
+    /// Receipt GC eligibility in addition to the retry epoch; omissions use the current default.
     #[serde(default)]
     pub history: HistoryRetention,
     /// Existing retrieval configuration; this partition uses one shard.
@@ -960,8 +960,8 @@ fn apply_prepared(state: &mut State, applied: &Applied, prepared: Option<state_m
     Ok(())
 }
 impl RecordPartition {
-    /// Capture before reading data, then use with the authorization permit at
-    /// output. A concurrent deletion cancels this response rather than mixing views.
+    /// Capture a failure fence before reading data and check it at handoff.
+    /// Normal commits may leave an already validated complete read view usable.
     pub fn output_permit(&self) -> Result<DataOutputPermit, RecordError> {
         let state = self.output.read().map_err(|_| RecordError::RecoveryRequired)?;
         if state.fenced { return Err(RecordError::RecoveryRequired); }
@@ -1302,6 +1302,7 @@ impl RecordPartition {
     }
 
     async fn open_owned(path: &Path, max_journal_bytes: u64) -> Result<Self, RecordError> {
+        #[cfg(test)] let _phase=maintenance::Phase::new("record_open_owned",0);
         let _frames = crate::storage::build_budget::reserve_memory(max_journal_bytes).map_err(storage)?;
         let (mut journal, entries) =
             PartitionJournal::open(path, max_journal_bytes).map_err(storage)?;

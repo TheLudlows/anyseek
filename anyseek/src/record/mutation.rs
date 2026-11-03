@@ -231,7 +231,7 @@ mod replay_size_tests {
     }
 }
 
-/// Reserve durable typed deletion and TTL decisions.
+/// Reserve durable TTL reclamation decisions.
 pub(super) fn reserve_bytes(state: &State) -> usize {
     temporal::reserve_bytes(state)
 }

@@ -2,7 +2,7 @@
 
 `POST /api/v1/index/{id}/ingest` 在业务判定和持久提交后返回非原子的逐项结果。HTTP 200 不代表全部成功，只有 `code=committed` 且带 Record `receipt` 的项成功；明确拒绝后继续处理后续项。429／503 保留已有回执，并区分 `outcome_unknown` 与 `not_attempted`。索引异步，可检查 `committed_seq`、`lexical_seq`、`vector_seq` 和 `index_error`；`/operation/{epoch}/{nonce}` 查询 Record 回执。现有 `/batch` 同步语义保留，独立 Intake 日志已移除。详见下方[异步索引写入](#异步索引写入)。
 
-默认服务通过 `record_service.rs` 使用 SQLite Catalog 和 Record partition，提供全文、向量和混合检索 API；Web 控制台位于独立的 `console/`，不嵌入服务。提供稳定记录、可选向量、时间过滤、全文/向量混合及逐命中解释；[职责收敛状态](../../../docs/engine-scope.md)单独记录尚未完成的内核整理。A/P3 本地 Segment、compaction 与安全回收已合入；系统崩溃/断电验收仍未完成。[当前状态](../../../STATUS.md) 与 [Record 契约](../../../docs/record-model.md) 区分实现和验收。
+默认服务通过 `record_service.rs` 使用 SQLite Catalog 和 Record partition，提供全文、向量和混合检索 API；Web 控制台位于独立的 `console/`，不嵌入服务。提供稳定记录、可选向量、时间过滤、全文/向量混合及逐命中解释；[职责收敛状态](../../../docs/engine-scope.md)记录本地内核整理及验证边界。A/P3 本地 Segment、compaction 与安全回收已合入；系统崩溃/断电验收仍未完成。[当前状态](../../../STATUS.md) 与 [Record 契约](../../../docs/record-model.md) 区分实现和验收。
 
 ## 构建与启动
 
@@ -53,7 +53,7 @@ export ANYSEEK_S3_SECRET_ACCESS_KEY='your-secret-key'
 
 Catalog 与 S3 协调元数据共用服务根目录下的 `metadata.sqlite`；保留该数据库、SQLite WAL、owner 锁文件。不同独立服务必须使用不同 bucket；完整服务恢复启动前应配置目标服务的独立 bucket。对象位于 `anyseek/{tenant_id}/{collection_id}/`，不创建自动 namespace 或 Bucket 归属标记。这些是持久协调状态，不能作为缓存删除或在运行中复制 SQLite 文件作备份。collection 内的本地日志/payload/索引可从权威检查点及 tail 重建。C2 另在每个权威库旁的 `*.object-cache` 保存校验对象块（256 MiB / 4096 块，损坏或丢失回源）；旁边的 `*.object-cache.lock` 仅用于本机缓存操作协调，运行中清空缓存目录时保留该锁文件。缓存不包含凭据，也不决定当前 head 或权限；备份应使用服务 API，以同时固定元数据和对象闭包。
 
-PATCH collection 发布完整远端 checkpoint 后再回收已覆盖且无 pin 的对象。collection backup 的相同请求在中断后继续原 cut；恢复到新 collection，复制到目标集合新代次，不包含服务凭据，受保护证据保持隔离。完整服务备份沿用本地独立归档格式，包含 catalog 和完整数据；在 S3 模式恢复启动时会发布到目标独立 bucket。
+PATCH collection 发布完整远端 checkpoint 后再回收已覆盖且无 pin 的对象。collection backup 的相同请求在中断后继续原 cut；恢复到新 collection，复制到目标集合新代次，不包含服务凭据。完整服务备份沿用本地独立归档格式，包含 catalog 和完整数据；在 S3 模式恢复启动时会发布到目标独立 bucket。
 
 该后端已合入；真实目标服务的条件写/读后可见性认证与其余维护路径审计仍待完成，见[存储协议](../../../docs/storage.md)。SQLite 首版是单主机协调，不提供跨主机 HA。
 
@@ -184,7 +184,7 @@ master POST `/api/v1/service-restores`（`{operation_id,backup_id}`）返回**�
 
 | 边界 | 当前行为 |
 | --- | --- |
-| Record 身份含墓碑、保留操作、候选 | 默认身份/操作各 10,000，可显式选有界 100,000 档；候选仍 10,000。操作历史至少保留七天，满足历史水位、epoch 和保护条件后才安全回收 |
+| Record 身份含墓碑、保留操作、候选 | 默认身份/操作各 10,000，可显式选有界 100,000 档；候选仍 10,000。回执默认最早在两天后进入回收资格，另须超出当前/前一 UTC 日重试窗口并满足认证历史切点及保护条件；维护可延迟，不保证两天内完成清理 |
 | 操作 / HTTP body / 响应 | 1 MiB / 2 MiB / 16 MiB |
 | Record WAL / 完整 checkpoint | 256 MiB 代预算，完整 checkpoint 另受 16 MiB 单帧限制 |
 | Catalog | 16 MiB 元数据、10,000 操作，仅安全回收过期控制回执 |
@@ -252,3 +252,9 @@ python3 scripts/record_service_smoke.py --server target/debug/anyseek_server
 检索在捕获时刻过滤 TTL，并在评分后按最新时间重验候选，期间到期可能短页；count_total 是捕获索引的观测数，不是最终时刻精确总数。后台回收前的过期索引仍可能影响 BM25 语料统计。分页跨越最早 TTL 会使 continuation 冲突，需要重启遍历。
 
 `/doc/{record_id}/status` 保留当前技术版本、visible/deleted/expired 状态和 pending_vector_fields。完整边界与当前验证状态见[职责收敛说明](../../../docs/engine-scope.md)。
+
+### 回执保留边界
+
+Rust RecordConfig.history.retention_ms 默认及最低为 172800000（2×24 小时），Rust 配置可显式保存更长期限；已有显式七日值不被改写。HTTP 创建集合使用引擎默认值，本轮没有新增 HTTP 保留期参数。Rust 配置反序列化省略 retention_ms 时采用当前默认值。API 的幂等/查账支持窗口仍是当前及前一 UTC 日。回收同时要求认证 history floor 覆盖并且 operation epoch 已超窗口；不按墙钟到期直接删除 WAL。
+
+近期幂等仍保留完整语义请求用于冲突判断；已认证 checkpoint 覆盖的旧操作可由现有 GC 摘要替代。SQLite 内部 publication receipts 还用于远端 WAL 计费、索引切点、恢复和快照，不是重复正文，本轮保留；不能仅按两日窗口删这些行。WAL/检查点/备份的安全回收边界独立于 API 查账窗口。

@@ -1889,7 +1889,14 @@ mod tests {
             }
             let permit=p.output_permit().unwrap();
             std::fs::write(root.join(".test-cache-append-failure"),b"fail cache").unwrap();
-            let failed=if expiration {p.statistics().await.map(|_|())} else {p.write(request.clone()).await.map(|_|())};
+            let failed=if expiration {
+                // Reads only filter TTL; reclamation belongs to an owned
+                // maintenance job and must retain the confirmed-remote error.
+                assert_eq!(p.statistics().await.unwrap().visible_seq,1);
+                assert!(p.get("a").await.unwrap().is_none());
+                assert!(permit.deliver(||()).is_ok());
+                p.start_index_job(Duration::from_secs(20),true).unwrap().finish().await.map(|_|())
+            } else {p.write(request.clone()).await.map(|_|())};
             assert_eq!(failed,Err(RecordError::DurablePending(if expiration {2} else {1})));
             assert!(permit.deliver(||()).is_err());
             assert!(p.output_permit().is_err());

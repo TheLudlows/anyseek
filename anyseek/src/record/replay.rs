@@ -23,6 +23,7 @@ impl Inner {
 }
 impl Context<'_> {
     pub(super) async fn stage_stable_tail(&mut self)->Result<(),RecordError> {
+        #[cfg(test)] let _phase=maintenance::Phase::new("replay_stage_tail",self.state.seq);
         let disk_limit=self.config.max_journal_bytes.checked_mul(64).and_then(|n|n.checked_add(32*1024*1024))
             .ok_or_else(||storage("recovery cache disk budget overflow"))?;
         // Catch-up may already own a build scope. Ordinary cold recovery starts
@@ -61,6 +62,7 @@ impl Context<'_> {
     pub(super) async fn replay(&mut self,entry:Entry)->Result<(),RecordError>{
         match entry {
             Entry::Applied(applied)=>{
+                #[cfg(test)] let _phase=(applied.receipt.seq%128==0).then(||maintenance::Phase::new("replay_applied",applied.receipt.seq));
                 let (index_bytes,updates)=build_budget::write_estimate(&*self.state,&self.config,&applied)?;
                 if index_bytes>0 && !self.index.can_admit(index_bytes,updates).await {
                     self.stage_stable_tail().await?;

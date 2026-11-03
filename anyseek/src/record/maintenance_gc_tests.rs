@@ -58,8 +58,8 @@ async fn receipt_gc_background_catchup_keeps_newly_expired_history_receipt() {
     let bootstrap = RecordPartition::create(&temporary.path().join("bootstrap"), settings.clone()).await.unwrap();
     let mut state = bootstrap.inner.lock().await.state.try_clone().unwrap();
     drop(bootstrap);
-    append(&mut state, &settings, "selected", epoch - 2, now - 8 * day);
-    append(&mut state, &settings, "later-floor", epoch - 2, now - 6 * day);
+    append(&mut state, &settings, "selected", epoch - 2, now - settings.history.retention_ms - day);
+    append(&mut state, &settings, "later-floor", epoch - 2, now - settings.history.retention_ms + day);
     append(&mut state, &settings, "current", epoch, now);
     state.history.floor = 1;
     let bytes = encode_entry(&Entry::Checkpoint { config: settings.clone(), state }).unwrap();
@@ -72,7 +72,7 @@ async fn receipt_gc_background_catchup_keeps_newly_expired_history_receipt() {
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         while !path.join(".test-indexer-started").exists() { tokio::task::yield_now().await; }
     }).await.unwrap();
-    clock.0.store(now + 2 * day, std::sync::atomic::Ordering::SeqCst);
+    clock.0.store(now + day, std::sync::atomic::Ordering::SeqCst);
     {let _writer=p.writer.lock().await;let mut inner=p.inner.lock().await;let at=inner.observe_time().unwrap();inner.trim_history(at).await.unwrap();}
     assert_eq!(p.inner.lock().await.state.history.floor, 2);
     std::fs::remove_file(path.join(".test-indexer-pause")).unwrap();

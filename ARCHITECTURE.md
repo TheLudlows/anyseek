@@ -1,6 +1,6 @@
 # 当前架构
 
-职责收敛正在独立分支分阶段实施，当前服务入口变化及仍待移除的旧内核模型见[引擎边界](docs/engine-scope.md)。下文来源/关系内部结构是尚未完成清理的实现记录，不代表仍提供相应 HTTP 入口。
+本文描述职责收敛后的本地分支；尚未发布或合入主干。实现与验证边界见[引擎边界](docs/engine-scope.md)。
 
 AnySeek 是 Rust 实现的存储和检索服务，通过 HTTP API 和独立 Web 控制台使用。资源模型为 Tenant → Collection → Partition → Segment；每个 collection 一个持久 partition。HTTP 数据请求统一交由内部 RecordPartition 处理；内部向量/元数据组件包含可变 tail 与冻结 Segment，重复逻辑 shard 状态已由 #111 移除。
 
@@ -25,27 +25,29 @@ AnySeek 是 Rust 实现的存储和检索服务，通过 HTTP API 和独立 Web 
 
 `commit_writes` 与 HTTP `/ingest` 在业务判定和权威持久提交后逐项返回 committed、rejected、outcome_unknown 或 not_attempted；只有 committed 带业务回执。全文与向量消费者异步推进，持久提交不保证对应索引已可查。`/batch` 提供唯一同步 HTTP 写入入口，内部复用 `RecordPartition::write`。只有一层 Record WAL，不再维护独立 Intake 日志。
 
-查询短暂持有 Record guard 捕获派生拓扑，在 guard 外评分，完成后重验当前记录版本、fingerprint、删除及来源可见性。组件变化不依靠物理 ordinal 充当稳定身份。纯向量 collection 也能按 metadata 浏览；普通查询允许观察不同消费者的进度，提交与各索引水位分别表达。
+查询短暂持有 Record guard 捕获派生拓扑，在 guard 外评分，完成后重验当前记录版本、fingerprint、删除及 TTL 可见性。组件变化不依靠物理 ordinal 充当稳定身份。纯向量 collection 也能按 metadata 浏览；普通查询允许观察不同消费者的进度，提交与各索引水位分别表达。
 
 服务根据文本/向量选择 Lexical、Vector、Hybrid。Hybrid 两路候选通过 RRF 融合，支持权重和各路预算；ANN 可能因簇探测返回不足 K。候选窗口计数和候选内字段重排不等于全库精确结果。查询原始数据经 schema.store 和 fields 投影后输出；直接读取和 iterator 可返回完整权威 Record。
 
-## 来源和派生可见性
+## 技术版本与时间可见性
 
-`record/` 中的 mutation/publication/recovery 复用同一权威提交；evidence、temporal、history、graph 模块分别处理来源依赖、时间逻辑、回执历史保留和显式一跳关系。HTTP/UI 只适配请求，不维护第二套业务权威。
+`record/` 中的 mutation/publication/recovery 复用同一 Record 权威提交。temporal、history、visibility 分别处理时间、有限回执和当前记录可见性；来源版本、证据依赖、定位符和业务关系由应用维护，可保存为普通元数据。
 
-来源以精确版本引用。来源删除、stale 或 TTL 使派生内容隐藏，查询、回表和输出共用可见性屏障。片段通过普通写入逐批持久化，不提供整文原子发布或整代切换；可选向量后补使用条件版本。
+正文替换、删除和向量后补仍受技术版本、fingerprint 及 Absent/Any/Match 条件保护，旧向量不能补到新正文。全文和向量的通用 RRF 保留。
 
-时间过滤固定一次 evaluation_time；不可逆过期通过权威提交形成墓碑。关系双端精确版本及一跳候选受同一来源、TTL 和当前 Tenant 集合边界约束；融合预算耗尽不伪称全量结果。
+TTL 在读取时排除到期正文，最终候选重验使用最新进程评估时间；后台经原持久协议回收，允许 ID 复用并递增版本。读取不持久转换 TTL/history。重启仅保留持久时间下界，未回收正文可能因墙钟回退重新可见，TTL 不承诺隐私删除。分页与计数边界见[引擎说明](docs/engine-scope.md)。
+
+普通写从规划前到持久发布和清理结束持有同一 partition writer；PreparedBatch 绑定实际 writer/Inner 锁身份，避免普通提交复制完整 base 后再全量比较。仍保留完整 shadow、准入/时间/远端权威/失败封锁；恢复和维护完整 proof 继续保留，详见[写入证明](docs/record-write-proof.md)。
 
 ## 认证与生命周期
 
-普通 API Key 认证后确定 Tenant，同一 Tenant 的有效 Key 可访问其全部集合。master 创建/查询 Tenant、签发/撤销 Key 和管理服务备份恢复，不进入集合数据接口。撤销拒绝后续认证，已认证工作和准备好的响应允许完成；不维护 Grant、grant revision 或 Catalog 输出授权许可。DataOutputPermit 在响应和 body frame 交付时检查来源数据有效性。
+普通 API Key 认证后确定 Tenant，同一 Tenant 的有效 Key 可访问其全部集合。master 创建/查询 Tenant、签发/撤销 Key 和管理服务备份恢复，不进入集合数据接口。撤销拒绝后续认证，已认证工作和准备好的响应允许完成；不维护 Grant、grant revision 或 Catalog 输出授权许可。DataOutputPermit 在响应和 body frame 交付时检查数据失败 fence；正常提交可保留已经验证的完整读取视图。
 
 普通工作按全局快照共享屏障 → 集合共享生命周期屏障 → 短持 Catalog 元数据锁的顺序取得当前代次，在元数据锁外执行 Record future。删除/创建等生命周期变更使用对应集合独占屏障；完整服务快照保留全局独占屏障，Key 撤销不排空数据工作。分级资源准入在读 body 前计费，已接收 owned task 和传输缓冲保留额度至实际结束。
 
 创建为持久 Prepare → 初始化 partition → Activate。删除后名称可复用，新建集合分配新内部代次；旧句柄、缓存、回执、上传、后台索引和 GC 绑定旧代次，物理回收后置。本地路径由 `collections/{tenant_id}/{collection_id}/{generation}` 直接派生，对象使用 `anyseek/{tenant_id}/{collection_id}/`，代次编码在对象 ID 中。客户端仅使用名称，删除/重建前须停止旧请求及重试。
 
-集合恢复只占用空闲名称并分配新代次。完整服务恢复发布到新未启动根，使用独立 bucket，禁用历史普通 Key，由目标 master 为已有 Tenant 重新签发。独立备份不能证明后续没有删除，因此 typed evidence 保持隔离；无解除隔离或跨服务自动灾备入口。
+集合恢复只占用空闲名称并分配新代次。完整服务恢复发布到新未启动根，使用独立 bucket，禁用历史普通 Key，由目标 master 为已有 Tenant 重新签发。独立备份保留独立恢复 scope，不能证明备份之后没有删除；不提供跨服务自动灾备入口。
 
 ## 权威与派生文件
 
@@ -57,7 +59,7 @@ Linux 同步文件和父目录；Windows 以同卷无覆盖目录移动完成发
 
 ## 当前边界
 
-这是有界单机实现：Record 累计账本默认 10,000 项、checkpoint/状态容量等限制见 [FEATURES](FEATURES.md)。history trim 按保留期限回收操作历史，checkpoint/对象 GC 负责各自闭包；已删除集合代次的最终物理回收也已由 #109 合入，仍受在途任务、读者和备份保护约束。P2 的 source/evidence、TTL、显式关系和同视图融合已实现。不可变段、compaction、SQLite/S3 checkpoint、安全回收、维护修复、后台 Indexer、校验缓存和分级资源准入已合入。真实 S3、系统断电、整体磁盘/缓存容量和组合资源隔离验收仍未完成；分布式未实现。原生进程故障测试不能替代主机掉电验收。整体能力与优先级建议见[项目全貌](docs/project-overview.md)，全文与认证包边界见[下节契约](#全文与认证包契约)。
+这是有界单机实现：Record 累计账本默认 10,000 项、checkpoint/状态容量等限制见 [FEATURES](FEATURES.md)。history trim 按保留期限回收操作历史，checkpoint/对象 GC 负责各自闭包；已删除集合代次的最终物理回收也已由 #109 合入，仍受在途任务、读者和备份保护约束。本地分支已移除专用 source/evidence、来源历史和业务关系模型，TTL 使用读取过滤与后台回收；通用全文/向量融合保留。不可变段、compaction、SQLite/S3 checkpoint、安全回收、维护修复、后台 Indexer、校验缓存和分级资源准入已合入。真实 S3、系统断电、整体磁盘/缓存容量和组合资源隔离验收仍未完成；分布式未实现。原生进程故障测试不能替代主机掉电验收。整体能力与优先级建议见[项目全貌](docs/project-overview.md)，全文与认证包边界见[下节契约](#全文与认证包契约)。
 
 [Record 语义](docs/record-model.md) · [存储协议](docs/storage.md) · [服务契约](anyseek/src/server/README.md) · [许可](LICENSE)
 
@@ -67,7 +69,7 @@ Linux 同步文件和父目录；Windows 以同卷无覆盖目录移动完成发
 
 | 归属 | 保存内容 | 生命周期 |
 | --- | --- | --- |
-| RecordPartition | 规范数据、版本/删除/来源可见性、操作回执、当前 ordinal 到稳定记录身份的映射 | 权威提交与恢复 |
+| RecordPartition | 规范数据、版本/删除/TTL 可见性、操作回执、当前 ordinal 到稳定记录身份的映射 | 权威提交与恢复 |
 | VectorIndex / RetrievalView | 查询拓扑、全局候选预算与 Top-K、伴随 Tantivy runtime 的读取 pin | 捕获读取视图，旋转/合并时替换拓扑 |
 | VectorSegment | 自己的向量/metadata 文件与 mmap、ANN 聚类/量化、物理行身份和活动 mask、构建内存租约 | 单组件构建、冻结、合并及最终释放 |
 | Tantivy runtime | 全文 postings、固定 Searcher、原生统计及文件引用 | 全文消费与固定读者 |
@@ -82,8 +84,8 @@ Linux 同步文件和父目录；Windows 以同卷无覆盖目录移动完成发
 
 Tantivy 使用原生词典、postings、位置和固定 Searcher，不另存完整正文，也不决定业务 head。Payload 唯一保存规范原文和原始向量；伴随向量/元数据组件只保存派生文件。S3 对象先完整物化并校验再检索，当前没有直接远端随机读 Directory。
 
-分析身份保留 `xxh64-utf8-v1` helper；全文包记录精确 Tantivy 版本、schema 和分析契约。RecordCheckpointV18、检索 package manifest 3 与私有向量/metadata descriptor 3 是不同结构标签，不是多个提交权威。认证包选择验证完整不可变文件闭包；固定 Searcher、构建、备份和查询 pin 保护仍在使用的文件。
+分析身份保留 `xxh64-utf8-v1` helper；全文包记录精确 Tantivy 版本、schema 和分析契约。RecordCheckpointV19、检索 package manifest 3 与私有向量/metadata descriptor 3 是不同结构标签，不是多个提交权威。认证包选择验证完整不可变文件闭包；固定 Searcher、构建、备份和查询 pin 保护仍在使用的文件。
 
-同步写入等待必要派生应用；异步索引写入单独报告 committed/lexical/vector 水位。查询固定派生拓扑与 evaluation_time，再重验当前 Record 身份、fingerprint 和来源可见性，不要求各异步消费者同时推进。保留 BM25F/邻近度、中文与 N-gram 适配及全局通道排名后的单次 RRF；ANN 和有界候选不保证全库精确召回。
+同步写入等待必要派生应用；异步索引写入单独报告 committed/lexical/vector 水位。查询固定派生拓扑与 evaluation_time，再重验当前 Record 身份、fingerprint 和 TTL 可见性，不要求各异步消费者同时推进。保留 BM25F/邻近度、中文与 N-gram 适配及全局通道排名后的单次 RRF；ANN 和有界候选不保证全库精确召回。
 
 只支持新库，无旧倒排格式读取、双写或迁移。跨 AES 手工 fixture、Windows、真实 S3 和断电证据分别以实际执行为准；重新构建派生缓存不等于修改权威格式，也不能据此推断性能提升。

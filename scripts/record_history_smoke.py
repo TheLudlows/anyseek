@@ -39,9 +39,9 @@ def exercise(call, restart_with, directory, faults):
         call('POST','/api/v1/index',{'operation_id':operation(),'collection_id':cid,'config':config})
         request={**ordinary,'operation_id':operation()}
         receipt=write_one(call, target, request)['receipt']
-        clock(now+7*86400000-1)
+        clock(now+2*86400000-1)
         assert call('GET',target+'/doc/normal')['document']==ordinary['document']
-        clock(now+7*86400000)
+        clock(now+2*86400000)
         restart_with({**env,'ANYSEEK_HISTORY_TRIM_FAULT':stage})
         # Load the partition, then wait for the bounded service sweep. Reads do
         # not trim history or receive the background worker's result envelope.
@@ -60,4 +60,4 @@ def exercise(call, restart_with, directory, faults):
         assert write_one(call, target, request)['receipt']==receipt
         assert call('GET',target+'/doc/normal')['document']==ordinary['document']
     boundary='background fence/process exit'
-    print('PASS history trim faults: seven-day boundary, '+boundary+' recovery, retained retry receipt and current record')
+    print('PASS history trim faults: two-day default boundary, '+boundary+' recovery, retained retry receipt and current record')
