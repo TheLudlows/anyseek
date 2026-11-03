@@ -118,6 +118,9 @@ pub(super) fn write_estimate(
     config: &RecordConfig,
     applied: &Applied,
 ) -> Result<(u64, usize), RecordError> {
+    write_estimate_for(state.records.get(&applied.request.record_id), config, applied)
+}
+pub(super) fn write_estimate_for(previous: Option<&Record>, config: &RecordConfig, applied: &Applied) -> Result<(u64, usize), RecordError> {
     let estimate = |doc: &Document, id: &str| {
         document_estimate(doc, &config.schema)?
             .checked_add(65536)
@@ -125,7 +128,7 @@ pub(super) fn write_estimate(
             .ok_or_else(|| storage("write estimate overflow"))
     };
     match enrichment::document(
-            state.records.get(&applied.request.record_id), &applied.request,
+            previous, &applied.request,
         )? {
             Some(document) => Ok((estimate(&document,&applied.request.record_id)?,1)),
             None => Ok((0,0)),

@@ -1,6 +1,6 @@
 # 普通写入的提交基准
 
-本文描述职责收敛后本地实现的约束，不宣称已测得性能收益。恢复、重建、维护和诊断继续使用完整 State/SourceProof 校验；普通写不缓存“已验证”标志，也不根据 seq 相等推断状态未变。
+本文描述普通写入的所有权和增量规划约束；性能收益需由对应版本的生产路径测量验证。恢复、重建、维护和诊断继续使用完整 State/SourceProof 校验；普通写不缓存“已验证”标志，也不根据 seq 相等推断状态未变。
 
 ## 排他范围
 
@@ -35,12 +35,30 @@ query/get/page/statistics 的 observe_time 仅修改 transient evaluation_time�
 锁只证明捕获基准未变。其合法性另由以下归纳链保持，而非每次普通写重复扫描全部记录和回执：
 
 1. create/open 在公开实例前校验配置、数值向量、身份/lookup、容量、TTL/提交时间、history 和恢复来源；不可信 WAL、anchor 和 payload 仍完整验证。
-2. mutation::prepare_at 对本次记录和最终 vector patch 文档验证字段、大小、向量数值、局部条件、时间、操作窗口、版本溢出及完整 checkpoint 字节预算。近期重试仍比较完整语义请求，不产生新决定。
-3. state_memory::Prepared 在分配前取得独立值与容器租约。生产 Shared 值不可变；提交复用已规划的 Record/Applied，不重新生成另一套决定。
+2. mutation::prepare_input 对本次记录和最终 vector patch 文档验证字段、大小、向量数值、局部条件、时间、操作窗口、版本溢出及完整 checkpoint 字节预算。近期重试仍比较完整语义请求，不产生新决定。
+3. state_memory::Prepared 在分配前取得独立值租约；PlanningView 为本批 map、调用方为 canonical 容器高水位分别预留租约。生产 Shared 值不可变；提交复用已规划的 Record/Applied，不重新生成另一套决定。
 4. apply_prepared 检查连续 seq、非倒退提交时间、operation ID 唯一性及正文版本（向量后补保持正文版本）。记录 key 来自同一个 record_id；lookup 指向新追加 operation 的精确位置，lookup_bytes 用 checked_add 更新。
 5. Records::insert_shared 增量维护值字节、TTL 数量和保守期限下界；operation 追加增量维护字节。snapshot_after 的精确长度增量算法及 reserve/admit 检查保留。它们不是未经验证的外部缓存。
 6. history trim / expiry / GC / candidate install 继续在维护边界验证和安装；GC 重建 lookup，完整 proof 仍核对同 seq 元数据及容器一致性。
 
-同批对同 ID 的多次更新仍按顺序作用于唯一 shadow。每个成功 Append 的 prior/next TTL（包括中间版本）都加入提交期限；无关过期正文不阻断本批。上传或规划期间时钟推进时重新观察时间，过期候选返回 Busy、保留已知重放和未尝试范围。
+同批对同 ID 的多次更新按顺序作用于唯一成功前缀视图。每个成功 Append 的 prior/next TTL（包括中间版本）都加入提交期限；无关过期正文不阻断本批。上传或规划期间时钟推进时重新观察时间，过期候选返回 Busy、保留已知重放和未尝试范围。
 
-持久性、部分失败和取消语义不变：先 WAL/远端权威，后内存/派生发布；未知结果不当作拒绝，失败保持封锁，已接受任务由独立 owner 完成。该改动仅移除普通写的冗余 full base clone/比较；规划 shadow 仍是完整容器克隆，其成本仍随状态规模增长。
+持久性、部分失败和取消语义不变：先 WAL/远端权威，后内存/派生发布；未知结果不当作拒绝，失败保持封锁，已接受任务由独立 owner 完成。普通写不再复制 full base 或 full shadow；恢复和维护的完整状态克隆/校验保持原有边界。
+
+## 有界规划读取闭包
+
+规划只保留本批成功 Append 的 Record/Applied 共享值与两个小 map。每项先查询成功前缀（墓碑也是值），再在 Inner 短锁下回读 canonical State 的目标 Record/operation。该 State 由同一个实际 writer 保护，期间不能安装 GC/TTL/维护结果。只读请求可以推进 transient evaluation_time、索引消费者可以推进派生状态，但不能改写回读基准。不会提前收集后项 ID 或提前校验后项。
+
+唯一 mutation planner 接收明确的 Input：目标记录、相同 operation ID 的完整保留决定，以及整个候选的 seq/epoch/time、记录/操作/TTL 数量。向量补丁、TTL 继承和正文投影复用原 helper；Replay 不推进前缀、不增加 operation 或预留当前大正文。完整 State 的恢复/测试调用使用相同局部 helper，未引入另一套业务决定规则。
+
+每个成功 Append 的全局字节更新为：
+
+```text
+values_next = values_before - prior_record_wire + next_record_wire + applied_wire
+lookup_next = lookup_before + operation_id_wire
+containers_next = snapshot_next - values_next + lookup_next
+```
+
+snapshot_next 继续使用原增量编码公式，包括全局空/非空的逗号、转义 key、序号/epoch/time 位数变化。每个成功前缀的 container 高水位都在持久化前为 canonical State 预留；不是只计算最终状态或小 map 大小。map 的 key/node 在插入前逐项取得独立内存租约，Shared 值保持原 Prepared 所有权。所有可失败检查、预算申请均在局部前缀修改之前完成。减少复制会改变可用资源余量，不能承诺低内存情况下与旧实现有相同的拒绝点。
+
+收据 GC 的检查仍针对固定 canonical 前缀：本批新 operation 的 seq 大于固定 history.floor，不可能成为本轮 GC 对象。检查 epoch 取当前 UTC epoch 与成功候选 epoch watermark 的较大者，不能在午夜附近丢弃候选已观察的更高 epoch。这个 GC 前缀扫描仍可能与历史规模有关；查找仍有树索引成本，持久化和异步索引也有各自成本。因此不宣称整个写入已成为 O(batch)，或尾延迟、RSS 必然改善。

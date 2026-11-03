@@ -2,6 +2,8 @@
 //! Index publication can be synchronous or asynchronous; both use the same canonical commit path.
 use super::*;
 use futures::FutureExt;
+mod planning;
+use planning::PlanningView;
 
 /// Only the completed prefix has definite outcomes. Busy and uncertain
 /// outcomes keep their original identity and leave the suffix pending.
@@ -462,7 +464,7 @@ impl RecordPartition {
         #[cfg(test)]
         let root = inner.journal.root().to_path_buf();
         let base_seq = inner.state.seq;
-        let mut shadow = inner.state.try_clone()?;
+        let mut candidate = PlanningView::new(&inner.state)?;
         let mut snapshot = inner.snapshot_bytes;
         let mut plans = Vec::new();
         let mut publication = Vec::new();
@@ -482,19 +484,23 @@ impl RecordPartition {
                 if !inner.healthy {
                     return Err(RecordError::RecoveryRequired);
                 }
-                if !shadow.operation_lookup.contains_key(&request.operation_id) {
+                let (previous, operation) = candidate.read(&inner.state, &request);
+                let input = candidate.input(previous.as_deref(), operation.as_deref());
+                if input.operation.is_none() {
                     if inner.maintenance_requested.is_some() {
                         return Err(RecordError::Busy);
                     }
-                    if maintenance::has_expired_operations(&shadow, current_epoch())? {
+                    // New prefix decisions are above the fixed history floor;
+                    // only the unchanged canonical prefix can require GC.
+                    if maintenance::has_expired_operations(&inner.state, current_epoch().max(candidate.epoch_watermark))? {
                         return Err(inner.request_checkpoint("expired_operation_receipts"));
                     }
                 }
                 drop(inner);
                 #[cfg(test)]
                 pause_encoding(&root).await;
-                let plan = mutation::prepare_at(
-                    &shadow,
+                let plan = mutation::prepare_input(
+                    &input,
                     &config,
                     snapshot,
                     request,
@@ -513,7 +519,7 @@ impl RecordPartition {
                     return Ok(plan);
                 };
                 let (growth, updates) =
-                    build_budget::write_estimate(&shadow, &inner.config, applied)?;
+                    build_budget::write_estimate_for(input.previous, &inner.config, applied)?;
                 if growth > 0 {
                     let fresh = (inner.config.schema.len() as u64)
                         .checked_mul(65536 * 32)
@@ -595,16 +601,15 @@ impl RecordPartition {
                 }
                 // Only this command's read/constructed rows can affect its
                 // TTL decision. Unrelated expired bodies await background GC.
-                let prior_deadline=shadow.records.get(&applied.request.record_id)
+                let prior_deadline=input.previous
                     .filter(|r|temporal::visible(r,evaluation_time_ms)).and_then(|r|r.temporal.expire_at_ms);
-                let prepared = state_memory::Prepared::new(&shadow, applied)?;
-                prepared.admit_containers(&mut shadow, *snapshot_bytes)?;
-                apply_prepared(&mut shadow, applied, Some(prepared.clone()))?;
-                let next_deadline=shadow.records.get(&applied.request.record_id)
+                let prepared = state_memory::Prepared::from_previous(input.previous, applied)?;
+                let next_deadline=Some(&*prepared.record)
                     .filter(|r|r.document.is_some()).and_then(|r|r.temporal.expire_at_ms);
+                let container = candidate.advance(&input, applied, &prepared, *snapshot_bytes)?;
                 expires_at=[expires_at,prior_deadline,next_deadline].into_iter().flatten().min();
                 snapshot = *snapshot_bytes;
-                container_bound = container_bound.max(shadow.container_bytes(snapshot)?);
+                container_bound = container_bound.max(container);
                 growth_total = total;
                 updates_total = native;
                 journal_bytes = physical;
@@ -643,7 +648,7 @@ impl RecordPartition {
         }
         // Admit live container growth before persistence. Values are separately owned.
         inner.state.admit_containers(container_bound)?;
-        drop(shadow);
+        drop(candidate);
         Ok(PreparedBatch {
             _writer: writer,
             plans,

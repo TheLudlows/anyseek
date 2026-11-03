@@ -94,6 +94,9 @@
   "record::maintenance::gc_tests::captured_receipt_gc_does_not_expand_with_catchup_floor_or_epoch",
   "record::maintenance::gc_tests::receipt_gc_background_catchup_keeps_newly_expired_history_receipt",
   "record::lexical::runtime::tests::independent_merge_serializes_append_without_blocking_fixed_reader",
+  "record::view::tests::cancelled_rotation_lock_wait_preserves_view_and_can_retry",
+  "record::view::tests::rejected_rotation_preserves_live_addresses_and_statistics",
+  "record::view::tests::real_record_writes_and_deletes_span_two_frozen_shards_and_tail",
   "record::view::merge::tests::merge_install_discards_concurrent_updates_and_deletes",
   "record::view::merge::tests::old_reader_retirement_survives_merge_rotation_and_second_merge",
   "record::lexical::runtime_query::candidate_tests::captured_order_matches_guarded_order_for_id_and_score",
@@ -188,5 +191,6 @@
   "record::remote_checkpoint::tests::automatic_ttl_checkpoint_progresses_when_remote_tail_is_full",
   "record::write::tests::planning_requires_the_same_partition_writer",
   "record::write::tests::planning_excludes_history_install_but_allows_read_time",
-  "record::history::retention_tests::two_day_retention_keeps_active_epochs_and_requires_authenticated_floor"
+  "record::history::retention_tests::two_day_retention_keeps_active_epochs_and_requires_authenticated_floor",
+  "record::write::planning::tests::local_prefix_matches_full_state_counts_replays_and_wire_budget"
 ]

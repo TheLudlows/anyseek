@@ -19,9 +19,9 @@ pub(super) fn document(previous: Option<&Record>, request: &RecordWrite) -> Resu
     Ok(Some(document))
 }
 
-pub(super) fn validate(state: &State, config: &RecordConfig, request: &RecordWrite, evaluation:u64) -> Result<(), RecordError> {
+pub(super) fn validate(previous: Option<&Record>, config: &RecordConfig, request: &RecordWrite, evaluation:u64) -> Result<(), RecordError> {
     let Some(patch) = &request.vector_patch else { return Ok(()); };
-    if !state.records.get(&request.record_id).is_some_and(|r|temporal::visible(r,evaluation)) {
+    if !previous.is_some_and(|r|temporal::visible(r,evaluation)) {
         return Err(RecordError::Conflict("vector target not visible".into()));
     }
     for field in patch.keys() {
