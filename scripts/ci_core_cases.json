@@ -188,5 +188,6 @@
   "record::remote_checkpoint::tests::automatic_ttl_checkpoint_progresses_when_remote_tail_is_full",
   "record::write::tests::planning_requires_the_same_partition_writer",
   "record::write::tests::planning_excludes_history_install_but_allows_read_time",
-  "record::history::retention_tests::two_day_retention_keeps_active_epochs_and_requires_authenticated_floor"
+  "record::history::retention_tests::two_day_retention_keeps_active_epochs_and_requires_authenticated_floor",
+  "record::write::planning::tests::local_prefix_matches_full_state_counts_replays_and_wire_budget"
 ]

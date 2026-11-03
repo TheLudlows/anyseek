@@ -1,8 +1,8 @@
 //! Validate a Record command without touching authority or derived indexes.
 //!
 //! This is the single live-write planner. It runs under the partition executor's
-//! writer ownership against a private captured state, without the state mutex.
-//! Publication revalidates the captured basis and deadlines. Recovery
+//! writer ownership against one record/receipt and global admission counters.
+//! Publication retains that writer and revalidates deadlines. Recovery
 //! consumes Applied decisions, not this admission path (wall time and current
 //! retry windows must not reinterpret previously durable commands).
 use super::*;
@@ -18,6 +18,30 @@ pub(super) enum PreparedWrite {
     },
 }
 
+/// The complete read set for a single command. Counts describe the whole
+/// candidate, even when only this batch's changed rows are retained locally.
+pub(super) struct Input<'a> {
+    pub previous: Option<&'a Record>,
+    pub operation: Option<&'a Applied>,
+    pub seq: u64,
+    pub epoch_watermark: u64,
+    pub time_watermark_ms: u64,
+    pub record_count: usize,
+    pub operation_count: usize,
+    pub ttl_count: usize,
+}
+impl<'a> Input<'a> {
+    fn from_state(state: &'a State, request: &RecordWrite) -> Self {
+        Self {
+            previous: state.records.get(&request.record_id),
+            operation: state.operation_lookup.get(&request.operation_id).map(|&i| &state.operations[i]),
+            seq: state.seq, epoch_watermark: state.epoch_watermark, time_watermark_ms: state.time_watermark_ms,
+            record_count: state.records.len(), operation_count: state.operations.len(),
+            ttl_count: state.records.live_ttl_count(),
+        }
+    }
+}
+
 #[cfg(test)]
 pub(super) fn prepare(
     state: &State,
@@ -28,8 +52,12 @@ pub(super) fn prepare(
 ) -> Result<PreparedWrite, RecordError> {
     prepare_at(state,config,current_snapshot_bytes,request,wall_epoch,state.time_watermark_ms)
 }
+#[cfg(test)]
 pub(super) fn prepare_at(state:&State, config:&RecordConfig, current_snapshot_bytes:usize, request:RecordWrite, wall_epoch:u64, evaluation_time_ms:u64)->Result<PreparedWrite,RecordError> {
-    let epoch = wall_epoch.max(state.epoch_watermark);
+    prepare_input(&Input::from_state(state, &request), config, current_snapshot_bytes, request, wall_epoch, evaluation_time_ms)
+}
+pub(super) fn prepare_input(input: &Input<'_>, config:&RecordConfig, current_snapshot_bytes:usize, request:RecordWrite, wall_epoch:u64, evaluation_time_ms:u64)->Result<PreparedWrite,RecordError> {
+    let epoch = wall_epoch.max(input.epoch_watermark);
     if request.operation_id.epoch > epoch || request.operation_id.epoch.saturating_add(1) < epoch {
         return Err(RecordError::OperationExpired);
     }
@@ -48,10 +76,7 @@ pub(super) fn prepare_at(state:&State, config:&RecordConfig, current_snapshot_by
     let _request_plan=crate::storage::build_budget::reserve_memory(request_bytes.checked_mul(32).ok_or_else(||storage("planner request estimate overflow"))?).map_err(storage)?;
     // serde_json::Value equality ignores object insertion order; the
     // whole semantic request is compared, not a collision-prone digest.
-    if let Some(old) = state
-        .operation_lookup
-        .get(&request.operation_id)
-        .map(|&position| &state.operations[position])
+    if let Some(old) = input.operation
     {
         let comparison=(checkpoint_codec::json_length(&old.request)? as u64).checked_mul(32).ok_or_else(||storage("retry comparison estimate overflow"))?;
         let _comparison=crate::storage::build_budget::reserve_memory(comparison).map_err(storage)?;
@@ -66,13 +91,13 @@ pub(super) fn prepare_at(state:&State, config:&RecordConfig, current_snapshot_by
     }
     // Replay compares the retained request; it must not reserve the current
     // record body, which may have grown since that operation was committed.
-    let prior_bytes=state.records.get(&request.record_id).map(checkpoint_codec::json_length).transpose()?.unwrap_or(0) as u64;
+    let prior_bytes=input.previous.map(checkpoint_codec::json_length).transpose()?.unwrap_or(0) as u64;
     let _prior_plan=crate::storage::build_budget::reserve_memory(prior_bytes.checked_mul(32).ok_or_else(||storage("planner prior estimate overflow"))?).map_err(storage)?;
     if request.vector_patch.is_some() {
-        enrichment::validate(state, config, &request, evaluation_time_ms)?;
+        enrichment::validate(input.previous, config, &request, evaluation_time_ms)?;
     }
-    let temporal = temporal::retained(state.records.get(&request.record_id), &request, evaluation_time_ms)?;
-    let next_document = enrichment::document(state.records.get(&request.record_id), &request)?;
+    let temporal = temporal::retained(input.previous, &request, evaluation_time_ms)?;
+    let next_document = enrichment::document(input.previous, &request)?;
     if let Some(document) = &next_document {
         validate_document_depth(document)?;
         crate::index::validate_field_values(config.schema.iter(), document).map_err(RecordError::Rejected)?;
@@ -80,13 +105,11 @@ pub(super) fn prepare_at(state:&State, config:&RecordConfig, current_snapshot_by
             return Err(RecordError::Rejected("enriched record byte budget exceeded".into()));
         }
     }
-    let previous_ttl=state.records.get(&request.record_id).is_some_and(temporal::live_ttl);
+    let previous_ttl=input.previous.is_some_and(temporal::live_ttl);
     let next_ttl=next_document.is_some() && temporal.expire_at_ms.is_some();
-    let reserve_bytes = temporal::reserve_bytes(state) + usize::from(next_ttl)*8192 - usize::from(previous_ttl)*8192;
+    let reserve_bytes = input.ttl_count * 8192 + usize::from(next_ttl)*8192 - usize::from(previous_ttl)*8192;
     if serde_json::to_vec(&request).map_err(storage)?.len() > config.max_record_bytes
-        || state
-            .operations
-            .len()
+        || input.operation_count
             .saturating_add(1)
             > config.max_operations
     {
@@ -94,7 +117,7 @@ pub(super) fn prepare_at(state:&State, config:&RecordConfig, current_snapshot_by
             "record/operation budget exceeded".into(),
         ));
     }
-    let previous = state.records.get(&request.record_id);
+    let previous = input.previous;
     let matches = match request.expected {
         ExpectedVersion::Any => true,
         ExpectedVersion::Absent => previous.is_none_or(|r| !temporal::visible(r,evaluation_time_ms)),
@@ -103,7 +126,7 @@ pub(super) fn prepare_at(state:&State, config:&RecordConfig, current_snapshot_by
     if !matches {
         return Err(RecordError::Conflict("version precondition failed".into()));
     }
-    if previous.is_none() && state.records.len() >= config.max_records {
+    if previous.is_none() && input.record_count >= config.max_records {
         return Err(RecordError::Rejected("identity budget exceeded".into()));
     }
     if let Some(document) = &next_document {
@@ -115,8 +138,7 @@ pub(super) fn prepare_at(state:&State, config:&RecordConfig, current_snapshot_by
         .map_err(RecordError::Rejected)?;
     }
     let receipt = WriteReceipt {
-        seq: state
-            .seq
+        seq: input.seq
             .checked_add(1)
             .ok_or_else(|| storage("sequence exhausted"))?,
         version: previous
@@ -130,8 +152,8 @@ pub(super) fn prepare_at(state:&State, config:&RecordConfig, current_snapshot_by
         observed_epoch: epoch,
         observed_time_ms: evaluation_time_ms,
     };
-    let next_record = projected_record(state, &applied, next_document, temporal);
-    let snapshot_bytes = snapshot_after(state, current_snapshot_bytes, &applied, &next_record)?;
+    let next_record = projected_record(input.previous, &applied, next_document, temporal);
+    let snapshot_bytes = snapshot_after_input(input, current_snapshot_bytes, &applied, &next_record)?;
     if checkpoint_codec::validate_size(snapshot_bytes, reserve_bytes, config.max_journal_bytes)
         .is_err()
     {
@@ -151,8 +173,7 @@ pub(super) fn prepare_at(state:&State, config:&RecordConfig, current_snapshot_by
 
 // Shared arithmetic only: recovery never re-runs admission, wall-clock policy,
 // expected-version planning or operation-ID generation for a durable decision.
-pub(super) fn projected_record(state: &State, applied: &Applied, document: Option<Document>, temporal: TemporalMetadata) -> Record {
-    let previous = state.records.get(&applied.request.record_id);
+pub(super) fn projected_record(previous: Option<&Record>, applied: &Applied, document: Option<Document>, temporal: TemporalMetadata) -> Record {
     Record {
         record_id: applied.request.record_id.clone(),
         version: applied.receipt.version,
@@ -162,12 +183,15 @@ pub(super) fn projected_record(state: &State, applied: &Applied, document: Optio
 }
 
 pub(super) fn snapshot_after(state: &State, before: usize, applied: &Applied, next: &Record) -> Result<usize, RecordError> {
-    let old = state.records.get(&next.record_id);
+    snapshot_after_input(&Input::from_state(state, &applied.request), before, applied, next)
+}
+fn snapshot_after_input(input: &Input<'_>, before: usize, applied: &Applied, next: &Record) -> Result<usize, RecordError> {
+    let old = input.previous;
     let old_bytes = old.map(checkpoint_codec::json_length).transpose()?.unwrap_or(0);
-    let key = if old.is_none() { checkpoint_codec::json_length(&next.record_id)?.checked_add(1+usize::from(!state.records.is_empty())).ok_or_else(||storage("snapshot key size overflow"))? } else { 0 };
+    let key = if old.is_none() { checkpoint_codec::json_length(&next.record_id)?.checked_add(1+usize::from(input.record_count != 0)).ok_or_else(||storage("snapshot key size overflow"))? } else { 0 };
     let delta = |new:u64, old:u64| new.to_string().len().checked_sub(old.to_string().len()).ok_or_else(||storage("snapshot scalar regressed"));
-    let additions = [key,checkpoint_codec::json_length(next)?,checkpoint_codec::json_length(applied)?,usize::from(!state.operations.is_empty()),
-        delta(applied.receipt.seq,state.seq)?,delta(applied.observed_epoch.max(state.epoch_watermark),state.epoch_watermark)?,delta(applied.observed_time_ms.max(state.time_watermark_ms),state.time_watermark_ms)?];
+    let additions = [key,checkpoint_codec::json_length(next)?,checkpoint_codec::json_length(applied)?,usize::from(input.operation_count != 0),
+        delta(applied.receipt.seq,input.seq)?,delta(applied.observed_epoch.max(input.epoch_watermark),input.epoch_watermark)?,delta(applied.observed_time_ms.max(input.time_watermark_ms),input.time_watermark_ms)?];
     additions.into_iter().try_fold(before.checked_sub(old_bytes).ok_or_else(||storage("snapshot size underflow"))?, |sum,n|sum.checked_add(n).ok_or_else(||storage("snapshot size overflow")))
 }
 
@@ -179,7 +203,7 @@ pub(super) fn replay_checkpoint_size(state: &State, before: usize, applied: &App
     let previous=state.records.get(&applied.request.record_id);
     let document=enrichment::document(previous,&applied.request)?;
     let temporal=temporal::retained(previous,&applied.request,applied.observed_time_ms)?;
-    snapshot_after(state,before,applied,&projected_record(state,applied,document,temporal))
+    snapshot_after(state,before,applied,&projected_record(previous,applied,document,temporal))
 }
 
 

@@ -32,6 +32,9 @@ impl<T: Serialize> Values<T> {
         for (a,b) in self.values.iter().zip(&other.values) {if !a.same_value(b)? {return Ok(false);}}
         Ok(true)
     }
+    pub(super) fn shared(&self, index: usize) -> Shared<T> {
+        self.values[index].clone()
+    }
     pub(super) fn len(&self) -> usize {
         self.values.len()
     }
@@ -390,7 +393,7 @@ mod admission_count_tests {
         assert!(!records.visit_due_ttl(u64::MAX, |_| panic!("empty scan")));
         let mut restored = Records::default();
         // Invalid late/absent watermarks are detected by the recovery oracle.
-        restored.insert("id".into(), mutation::projected_record(&State::default(), &applied,
+        restored.insert("id".into(), mutation::projected_record(None, &applied,
             applied.request.document.clone(), applied.request.temporal.clone().unwrap())).unwrap();
         restored.ttl_deadline_lower_bound = Some(1001);
         assert!(restored.validate_counts().is_err());
