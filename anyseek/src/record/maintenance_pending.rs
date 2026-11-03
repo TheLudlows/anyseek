@@ -59,9 +59,14 @@ impl RecordPartition {
                         continue;
                     }
                     attempts+=1;
-                    let job=if inner.maintenance_requested==Some(cache_merge::CAUSE) {
+                    let job=crate::resources::lifecycle::automatic(|| if inner.maintenance_requested==Some(cache_merge::CAUSE) {
                         partition.start_cache_merge_with_worker(WAIT_LIMIT,worker)
-                    }else{partition.start_automatic_with_worker(worker)};
+                    }else{partition.start_automatic_with_worker(worker)});
+                    let Some(job)=job else {
+                        inner.maintenance_scheduled=false;
+                        inner.maintenance_pending=false;
+                        return Ok(());
+                    };
                     match job {
                         Ok(job)=>{
                             inner.maintenance_pending=false;
@@ -80,7 +85,18 @@ impl RecordPartition {
                     tokio::time::sleep(RECHECK).await;
                 }
             };
-            if !matches!(tokio::time::timeout(WAIT_LIMIT,retry).await,Ok(Ok(()))) {
+            let outcome = tokio::select! {
+                result = tokio::time::timeout(WAIT_LIMIT,retry) => result,
+                _ = crate::resources::lifecycle::stopping() => {
+                    if let Some(partition)=upgrade() {
+                        let mut inner=partition.inner.lock().await;
+                        inner.maintenance_scheduled=false;
+                        inner.maintenance_pending=false;
+                    }
+                    return;
+                }
+            };
+            if !matches!(outcome,Ok(Ok(()))) {
                 if let Some(partition)=upgrade() {
                     let mut inner=partition.inner.lock().await;
                     inner.maintenance_scheduled=false;
@@ -98,6 +114,31 @@ impl RecordPartition {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn shutdown_stops_deferred_maintenance_without_releasing_an_active_owner() {
+        let root=tempfile::tempdir().unwrap();
+        let path=root.path().join("records");
+        let p=RecordPartition::create(&path,crate::record::tests::config()).await.unwrap();
+        let workers=indexer::WORKERS.clone().acquire_many_owned(2).await.unwrap();
+        let lifecycle=Arc::new(crate::resources::Lifecycle::default());
+        let activity=lifecycle.enter().unwrap();
+        p.inner.lock().await.request_checkpoint("shutdown-test");
+        activity.run(p.kick_maintenance()).await;
+        assert!(p.inner.lock().await.maintenance_pending);
+        lifecycle.stop();
+        tokio::time::timeout(Duration::from_secs(5),lifecycle.drained()).await.unwrap();
+        let inner=p.inner.lock().await;
+        assert!(!inner.maintenance_pending);
+        assert!(!inner.maintenance_scheduled);
+        assert!(inner.maintenance_requested.is_some());
+        drop(inner);
+        drop(workers);
+        p.finish_service_shutdown().await.unwrap();
+        drop(p);
+        let reopened=RecordPartition::open(&path,crate::record::tests::config().max_journal_bytes).await.unwrap();
+        drop(reopened);
+    }
 
     #[tokio::test]
     async fn pending_admission_is_bounded_deduplicated_and_does_not_retain_incarnations() {

@@ -58,7 +58,7 @@ impl Candidate {
 /// An accepted cancellation-safe maintenance job. Dropping this handle leaves
 /// its bounded owned worker running; `finish` waits for the indexed cut.
 pub struct IndexJob {
-    pub(super) handle: tokio::task::JoinHandle<Result<u64,RecordError>>,
+    pub(super) handle: crate::resources::Task<Result<u64,RecordError>>,
 }
 impl IndexJob {
     /// Wait for publication. Output still requires the service authorization permit.
@@ -359,7 +359,7 @@ impl RecordPartition {
                 // journal owner and writer guard together; caller cancellation
                 // cannot release either while a filesystem transaction runs.
                 #[cfg(test)] let journal_root = root.clone();
-                let (returned_inner, _writer, journal_result) = tokio::task::spawn_blocking(move || {
+                let (returned_inner, _writer, journal_result) = crate::resources::spawn_blocking(move || {
                     let mut install = || {
                         let _phase = maintenance::Phase::new("background_journal_install_locked", inner.state.seq);
                         let Inner { journal, background, .. } = &mut *inner;

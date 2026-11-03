@@ -1,6 +1,6 @@
 //! Query configuration and Record's private vector-component execution.
 use crate::record::RecordError;
-use crate::{INDEX_RUNTIME, index::VectorIndexArc, min_heap::{Result, result_ordering_root},
+use crate::{index::VectorIndexArc, min_heap::{Result, result_ordering_root},
     vector::{Embedding, Inference, Quantization, SearchVectorSegment},
     vector_similarity::{AnnMode, QuantizedVector, VectorSimilarity, normalize_f32, normalize_f32_simd,
         quantize_f32_to_i8, quantize_f32_to_i8_simd}};
@@ -480,13 +480,13 @@ pub(crate) async fn search_with_counts(
             let ann = ann_mode.clone();
             let fields = field_filter.clone();
             let filters = facet_filter.clone();
-            tasks.push(INDEX_RUNTIME.handle().spawn(crate::resources::inherit(async move {
+            tasks.push(crate::resources::spawn(async move {
                 #[cfg(test)] crate::record::query_test_gate().await;
                 let mut result = shard.search_vector_segment(query, offset + length, include_uncommitted,
                     similarity_threshold, ann, fields, filters).await?;
                 for hit in &mut result.results { hit.doc_id = hit.doc_id * segment_count + slot; }
                 Ok(result)
-            })));
+            }));
         }
         let mut result = ResultObject { original_query: query_string.clone(), query: query_string,
             ..Default::default() };

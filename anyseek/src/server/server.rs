@@ -66,14 +66,25 @@ pub(crate) async fn initialize(params: HashMap<String, String>) {
             log::error!("Starting server failed: {error}");
             std::process::exit(1)
         });
-    if let Err(error) = axum::serve(listener, crate::record_service::router(service))
-        .with_graceful_shutdown(shutdown_signal())
-        .await
-    {
+    let stopping = service.clone();
+    let http_result = axum::serve(listener, crate::record_service::router(service.clone()))
+        .with_graceful_shutdown(async move {
+            shutdown_signal().await;
+            stopping.stop_accepting();
+        })
+        .await;
+    if let Err(error) = &http_result {
         log::error!("HTTP service failed: {error}");
     }
-
-    log::info!("Shutdown complete");
+    let mut shutdown = service.shutdown();
+    match shutdown.wait().await {
+        Ok(()) if http_result.is_ok() => log::info!("Shutdown complete"),
+        Ok(()) => std::process::exit(1),
+        Err(error) => {
+            log::error!("Shutdown failed; recovery may be required: {error}");
+            std::process::exit(1);
+        }
+    }
 }
 
 pub(crate) async fn shutdown_signal() {

@@ -4,7 +4,12 @@ use anyseek::resources::Lane;
 use axum::{extract::{FromRequestParts, MatchedPath}, http::Method};
 use std::io::Write;
 
-pub(super) struct OutputBytes { pub bytes: Bytes, pub _scope: ResourceScope }
+pub(super) struct OutputBytes {
+    pub bytes: Bytes,
+    pub _scope: ResourceScope,
+    // A transport frame may outlive its Body after poll_frame hands it off.
+    pub _activity: Option<anyseek::resources::Activity>,
+}
 impl AsRef<[u8]> for OutputBytes { fn as_ref(&self) -> &[u8] { &self.bytes } }
 
 // Refuse before Vec growth, including serializers which write many small pieces.

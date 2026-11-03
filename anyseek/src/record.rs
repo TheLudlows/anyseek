@@ -960,6 +960,18 @@ fn apply_prepared(state: &mut State, applied: &Applied, prepared: Option<state_m
     Ok(())
 }
 impl RecordPartition {
+    /// Internal service teardown, after transport admission and all owned work
+    /// have drained. This joins retained index workers; it does not checkpoint
+    /// or permit callers to reuse this partition afterwards.
+    #[doc(hidden)]
+    pub async fn finish_service_shutdown(&self) -> Result<(), RecordError> {
+        if Arc::strong_count(&self.inner) != 1 {
+            return Err(RecordError::Busy);
+        }
+        let _writer = self.writer.lock().await;
+        let inner = self.inner.lock().await;
+        inner.index.shutdown_workers().await
+    }
     /// Capture a failure fence before reading data and check it at handoff.
     /// Normal commits may leave an already validated complete read view usable.
     pub fn output_permit(&self) -> Result<DataOutputPermit, RecordError> {

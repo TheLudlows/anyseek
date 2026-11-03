@@ -44,6 +44,9 @@ struct Data {
     index: NativeIndex,
     reader: IndexReader,
     writer: Option<IndexWriter<TantivyDocument>>,
+    // Joining consumes the writer even on failure. Retain that failure so a
+    // later shutdown cannot mistake an absent writer for a successful join.
+    writer_join_error: Option<String>,
     identities: Vec<Identity>,
     identity_charge: Charge,
     pending_analysis_bytes: u64,
@@ -66,13 +69,10 @@ impl std::ops::DerefMut for OwnedData { fn deref_mut(&mut self) -> &mut Data { &
 impl Drop for Runtime {
     fn drop(&mut self) {
         if let Some(directory) = &self.directory { directory.cancel_io_waiters(); }
-        if let Some(writer) = Arc::get_mut(&mut self.data).expect("native data owner outlived Runtime").get_mut().writer.take() {
-            if writer.wait_merging_threads().is_ok() {
-                if let Some(directory)=&self.directory {directory.release_joined_writer();}
-            }
-            // On join failure Directory ownership conservatively retains the
-            // charge until the remaining workers and snapshots release it.
-        }
+        let data = Arc::get_mut(&mut self.data).expect("native data owner outlived Runtime").get_mut();
+        // Drop remains the fallback for abandoned candidates. Explicit service
+        // shutdown reports this error before allowing its root owner to close.
+        let _ = Self::join_writer(data, self.directory.as_ref());
     }
 }
 impl Runtime {
@@ -84,7 +84,7 @@ impl Runtime {
         data.unacknowledged = true;
         let owner = self.clone();
         let scope = crate::resources::Scope::current();
-        let (mut data, value) = tokio::task::spawn_blocking(move || {
+        let (mut data, value) = crate::resources::spawn_blocking(move || {
             let run = || {
                 let result = work(&owner, &mut data);
                 // Preserve definite errors (including admission before mutation).
@@ -106,7 +106,7 @@ impl Runtime {
         let path = path.to_owned();
         let config = config.clone();
         let scope = crate::resources::Scope::current();
-        tokio::task::spawn_blocking(move || {
+        crate::resources::spawn_blocking(move || {
             let run = || if open { Self::open(&path, &config) } else { Self::create(&path, &config) };
             match scope { Some(scope) => scope.run_sync(run), None => run() }
         }).await.map_err(storage)?
@@ -152,6 +152,7 @@ impl Runtime {
                 index,
                 reader,
                 writer: None,
+                writer_join_error: None,
                 pending_analysis_bytes: 0,
                 pending_analysis_documents: 0,
                 identities: Vec::new(),
@@ -209,6 +210,7 @@ impl Runtime {
                 index,
                 reader,
                 writer: None,
+                writer_join_error: None,
                 pending_analysis_bytes: 0,
                 pending_analysis_documents: 0,
                 identities: manifest.identities,
@@ -475,7 +477,9 @@ impl Runtime {
                         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
                     }
                 }
-                let result = merge.await.map_err(storage);
+                // The caller only needs completion. Release Tantivy's tracked
+                // SegmentMeta inside this task before its lifecycle ticket ends.
+                let result = merge.await.map(|_| ()).map_err(storage);
                 #[cfg(test)]
                 if test_path.join(".test-merge-started").exists() {
                     std::fs::write(test_path.join(".test-merge-finished"),b"finished").map_err(storage)?;
@@ -524,14 +528,43 @@ impl Runtime {
             }
             data.write_state = WriteState::Failed;
             owner.flush_locked(data)?;
-            if let Some(writer) = data.writer.take() {
-                writer.wait_merging_threads().map_err(storage)?;
-                if let Some(directory) = &owner.directory { directory.release_joined_writer(); }
-            }
+            Self::join_writer(data, owner.directory.as_ref())?;
             data.write_state = WriteState::Sealed;
             Ok(())        }).await?;
             Ok(())
         }
+    fn join_writer(data: &mut Data, directory: Option<&super::directory::BudgetDirectory>) -> Result<(), RecordError> {
+        if let Some(error) = &data.writer_join_error { return Err(storage(error.clone())); }
+        if data.writer.is_none() { return Ok(()); }
+        data.writer_join_error = Some("native writer join did not complete".into());
+        let writer = data.writer.take().unwrap();
+        if let Err(error) = writer.wait_merging_threads() {
+            let error = error.to_string();
+            data.writer_join_error = Some(error.clone());
+            // Directory clones retain admission and pins until every remaining
+            // worker and fixed reader releases them. Never refund on failure.
+            return Err(storage(error));
+        }
+        if let Some(directory) = directory { directory.release_joined_writer(); }
+        data.pending_analysis_bytes = 0;
+        data.pending_analysis_documents = 0;
+        data.writer_join_error = None;
+        Ok(())
+    }
+    /// Stop native workers after service admission and owned tasks have drained.
+    /// This does not flush, publish a Searcher or checkpoint. Fixed readers keep
+    /// their pins; a failed join remains an error on every subsequent attempt.
+    pub(crate) async fn shutdown(self: &Arc<Self>) -> Result<(), RecordError> {
+        let data = OwnedData { guard: self.data.clone().lock_owned().await, _owner: self.clone(), unacknowledged: false };
+        self.blocking(data, |owner, data| {
+            data.write_state = WriteState::Failed;
+            if let Some(directory) = &owner.directory { directory.cancel_io_waiters(); }
+            Self::join_writer(data, owner.directory.as_ref())?;
+            data.write_state = WriteState::Sealed;
+            Ok(())
+        }).await?;
+        Ok(())
+    }
         pub(crate) fn reserve_update(&self) {
             self.updates.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         }
@@ -811,6 +844,50 @@ impl Runtime {
             assert!(!crate::record::package_pins::retire_if_unpinned(&package,||{panic!("live Searcher must protect package")}).unwrap());
             drop(held);drop(capacity);
             assert!(crate::record::package_pins::retire_if_unpinned(&package,||Ok(())).unwrap());
+        }
+
+        #[tokio::test]
+        async fn shutdown_joins_without_publication_and_retains_join_failure() {
+            for fail in [false, true] {
+                let root = tempfile::tempdir().unwrap();
+                let package = root.path().join("package");
+                std::fs::create_dir(&package).unwrap();
+                let scope = Arc::new(crate::resources::Governor::default())
+                    .admit("native-shutdown".into(), crate::resources::Lane::Foreground, 0).unwrap();
+                let accounting = scope.clone().in_lane(crate::resources::Lane::Background);
+                let native = scope.run(Runtime::create_owned(&package.join("native"), &config())).await.unwrap();
+                let document = serde_json::from_str(r#"{"body":"alpha"}"#).unwrap();
+                native.append(Identity { id: "selected".into(), version: 1, revision: 1 }, &document, true).await.unwrap();
+                let selected = native.snapshot().await.unwrap();
+                let manifest = std::fs::read(package.join("native/record-native.json")).unwrap();
+                let directory = native.directory.as_ref().unwrap().clone();
+                if fail {
+                    directory.reject_writes_for_test();
+                    native.append(Identity { id: "unpublished".into(), version: 1, revision: 2 }, &document, false).await.unwrap();
+                }
+                let first = native.shutdown().await;
+                assert!(native.data.lock().await.writer.is_none(), "shutdown must consume and join the real writer");
+                if fail {
+                    let error = first.unwrap_err().to_string();
+                    assert_eq!(native.shutdown().await.unwrap_err().to_string(), error,
+                        "an absent writer must not erase a previous join failure");
+                    assert!(accounting.bytes(2039 * 1024 * 1024).is_err(),
+                        "failed join must retain writer admission with Directory owners");
+                } else {
+                    first.unwrap();
+                    native.shutdown().await.unwrap();
+                    drop(accounting.bytes(2039 * 1024 * 1024).expect("joined writer must release its buffer"));
+                }
+                assert_eq!(std::fs::read(package.join("native/record-native.json")).unwrap(), manifest);
+                assert_eq!(native.snapshot().await.unwrap().identities.len(), 1);
+                assert!(native.append(Identity { id: "late".into(), version: 1, revision: 3 }, &document, true).await.is_err());
+                drop(native);
+                assert_eq!(selected.identities.len(), 1);
+                assert!(!crate::record::package_pins::retire_if_unpinned(&package,
+                    || panic!("shutdown must preserve fixed-reader pins")).unwrap());
+                drop(selected);
+                drop(directory);
+            }
         }
 
         #[tokio::test]

@@ -209,7 +209,7 @@ impl RecordPartition {
         let runtime = tokio::runtime::Handle::current();
         let owner = self.clone();
         #[cfg(test)] let scoring_root = root.clone();
-        let (handle, result) = tokio::task::spawn_blocking(move || {
+        let (handle, result) = crate::resources::spawn_blocking(move || {
             let _owner = owner;
             #[cfg(test)]
             blocking_scoring_pause(&scoring_root);

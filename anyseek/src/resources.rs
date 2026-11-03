@@ -5,6 +5,8 @@
 //! Already-admitted native transactions may wait for I/O on dedicated blocking
 //! workers; ordinary admission, bytes, and I/O requests still refuse immediately.
 use std::{collections::BTreeMap, future::Future, sync::{Arc, Condvar, LazyLock, Mutex, atomic::{AtomicBool, Ordering}}};
+pub(crate) mod lifecycle;
+pub use lifecycle::{Activity, Lifecycle, Task};
 
 /// Independent resource classes. Control capacity is never lent to data work.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -235,7 +237,7 @@ impl Scope {
     /// off the executor; the caller must hold no I/O permit while awaiting it.
     pub(crate) async fn journal_io(&self) -> Result<JournalIo, Busy> {
         let scope = self.clone();
-        tokio::task::spawn_blocking(move || {
+        spawn_blocking(move || {
             let lease = scope.native_io_wait(&AtomicBool::new(false))?;
             Ok(JournalIo { scope, _lease: lease })
         }).await.map_err(|error| Busy::new(format!("class=io_worker {error}")))?
@@ -268,16 +270,34 @@ pub(crate) fn inherit<F: Future>(future: F) -> impl Future<Output = F::Output> {
     async move { match context { Some(scope) => scope.run(future).await, None => future.await } }
 }
 /// Spawn on the index runtime, retaining request context after caller cancellation.
-pub(crate) fn spawn<F>(future: F) -> tokio::task::JoinHandle<F::Output>
+pub(crate) fn spawn<F>(future: F) -> Task<F::Output>
 where F: Future + Send + 'static, F::Output: Send + 'static {
     let context = Scope::current();
-    crate::INDEX_RUNTIME.spawn(async move { match context { Some(scope) => scope.run(future).await, None => future.await } })
+    Task(crate::INDEX_RUNTIME.spawn(lifecycle::track(async move { match context { Some(scope) => scope.run(future).await, None => future.await } })))
 }
 /// Like `spawn`, with a distinct background I/O class.
-pub(crate) fn spawn_background<F>(future: F) -> tokio::task::JoinHandle<F::Output>
-where F: Future + Send + 'static, F::Output: Send + 'static {
+pub(crate) fn spawn_background<F>(future: F) -> Task<F::Output>
+where F: Future + Send + 'static, F::Output: lifecycle::BackgroundOutput + Send + 'static {
     let context = Scope::current().map(|scope| scope.in_lane(Lane::Background));
-    crate::INDEX_RUNTIME.spawn(async move { match context { Some(scope) => scope.run(future).await, None => future.await } })
+    Task(crate::INDEX_RUNTIME.spawn(lifecycle::track_background(async move { match context { Some(scope) => scope.run(future).await, None => future.await } })))
+}
+
+/// Keep service work on its current runtime while retaining its accepted activity.
+pub fn spawn_owned<F>(future: F) -> Task<F::Output>
+where F: Future + Send + 'static, F::Output: Send + 'static {
+    Task(tokio::spawn(lifecycle::track(inherit(future))))
+}
+
+/// Blocking owners and their returned handles outlive cancelled async waiters.
+pub(crate) fn spawn_blocking<F, T>(work: F) -> Task<T>
+where F: FnOnce() -> T + Send + 'static, T: Send + 'static {
+    let scope = Scope::current();
+    let activity = Activity::current();
+    Task(tokio::task::spawn_blocking(move || {
+        let run = || match scope { Some(scope) => scope.run_sync(work), None => work() };
+        let value = match activity.clone() { Some(a) => a.run_sync(run), None => run() };
+        lifecycle::Output { value, _activity: activity }
+    }))
 }
 /// Verified bytes keep their charge until the caller has finished consuming them.
 pub(crate) struct Buffer { bytes: Vec<u8>, _lease: Lease }

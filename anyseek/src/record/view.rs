@@ -29,6 +29,16 @@ pub(super) struct RetrievalView {
     owner: std::sync::Weak<Mutex<Inner>>,
 }
 impl RetrievalView {
+    pub(super) async fn shutdown_workers(&self) -> Result<(), RecordError> {
+        let vector = if let Some(worker) = &self.vector { worker.join_worker().await } else { Ok(()) };
+        let lexical = if let Some(worker) = &self.lexical { worker.join_worker().await } else { Ok(()) };
+        vector.and(lexical)?;
+        for index in [&self.query, &self.tail] {
+            let runtimes: Vec<_> = index.read().await.segments.iter().map(|segment| segment.lexical.clone()).collect();
+            for native in runtimes { native.shutdown().await?; }
+        }
+        Ok(())
+    }
     pub(super) fn retain_address_budget(&mut self,memory:crate::storage::build_budget::MemoryLease,scope:Option<crate::resources::Lease>) {
         self.merge_address_memory=Some(memory);self.merge_address_scope=scope;
     }

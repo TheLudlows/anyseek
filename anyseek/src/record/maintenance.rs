@@ -104,6 +104,9 @@ mod tests {
         trace_timings();
         use super::super::tests::{config,path,write};
         let root=path();let mut settings=config();settings.max_records=256;settings.max_operations=2048;
+        let lifecycle=std::sync::Arc::new(crate::resources::Lifecycle::default());
+        let activity=lifecycle.enter().unwrap();
+        let (p,request,receipt)=activity.run(async {
         let p=RecordPartition::create(&root,settings.clone()).await.unwrap();
         for i in 0..1024 {
             let expected=if i==0 {ExpectedVersion::Absent}else{ExpectedVersion::Match(i)};
@@ -138,6 +141,13 @@ mod tests {
         let receipt=p.write(request.clone()).await.unwrap();assert_eq!(receipt.seq,1153);
         // This newly rotated spare tail may schedule a second owned merge.
         super::super::tests::wait_maintenance_idle(&p).await;
+        (p,request,receipt)
+        }).await;
+        // The scheduling flag may clear before a worker releases its final
+        // owner. Immediate reopen requires the actual close boundary.
+        lifecycle.stop();
+        tokio::time::timeout(std::time::Duration::from_secs(20),lifecycle.drained()).await.unwrap();
+        p.finish_service_shutdown().await.unwrap();
         drop(p);let p=RecordPartition::open(&root,settings.max_journal_bytes).await.unwrap();
         assert_eq!(p.write(request).await.unwrap(),receipt);assert!(p.get("new").await.unwrap().is_some());
         drop(p);std::fs::remove_dir_all(root).unwrap();
@@ -432,6 +442,9 @@ impl RecordPartition {
         self.schedule_maintenance(&mut inner);
     }
     fn schedule_maintenance(&self,inner:&mut Inner) {
+        crate::resources::lifecycle::automatic(|| self.schedule_maintenance_admitted(inner));
+    }
+    fn schedule_maintenance_admitted(&self,inner:&mut Inner) {
         if !inner.healthy || inner.maintenance_requested.is_none()
             || inner.background.is_some() || inner.maintenance_scheduled || inner.maintenance_pending {return;}
         inner.maintenance_scheduled=true;

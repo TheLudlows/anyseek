@@ -1,4 +1,8 @@
 [
+  "resources::lifecycle::tests::stopping_keeps_required_children_and_detached_output_owned",
+  "resources::lifecycle::tests::cancelled_waiter_does_not_release_blocking_work",
+  "record::maintenance::pending::tests::shutdown_stops_deferred_maintenance_without_releasing_an_active_owner",
+  "record::lexical::runtime::tests::shutdown_joins_without_publication_and_retains_join_failure",
   "resources::tests::native_io_wait_preserves_scope_and_allows_async_holder_to_release",
   "resources::tests::native_io_cancellation_wakes_without_refunding_another_owner",
   "resources::tests::native_io_permanent_refusals_never_wait",

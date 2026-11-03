@@ -10,7 +10,7 @@ impl RecordPartition {
     pub async fn reclaim_deleted_files(path: &Path, limit: usize) -> Result<bool, RecordError> {
         let path = path.to_owned();
         let scope = crate::resources::Scope::current();
-        tokio::task::spawn_blocking(move || {
+        crate::resources::spawn_blocking(move || {
             let _io = scope.as_ref().map(|scope| scope.io()).transpose().map_err(|_| RecordError::Busy)?;
             let work = || {
                 if !path.parent().is_some_and(Path::exists) { return Ok(true); }
