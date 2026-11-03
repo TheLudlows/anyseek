@@ -198,7 +198,7 @@ mod retention_tests {
         drop(initial);
         let now=SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64;
         let beginning=now-8*86_400_000;
-        apply_at(&mut state,&settings,write("source","s","evidence original",ExpectedVersion::Absent),beginning);
+        apply_at(&mut state,&settings,write("seed-s","s","plain original",ExpectedVersion::Absent),beginning);
         apply_at(&mut state,&settings,write("initial", "ordinary", "alpha", ExpectedVersion::Absent),beginning);
         for i in 1..=768u64 {
             apply_at(&mut state,&settings,write(&format!("update-{i}"),"ordinary","alpha",ExpectedVersion::Match(i)),beginning+i*900_000);
@@ -208,7 +208,7 @@ mod retention_tests {
         let recent_seq=state.seq;
         validate_restored_state(&settings,&state).unwrap();
         assert_eq!(committed_floor(&state,beginning+settings.history.retention_ms,
-            settings.history.retention_ms),Some(2),"upper bound includes both equal-time source and ordinary write");
+            settings.history.retention_ms),Some(2),"upper bound includes both equal-time record writes");
         let safe=committed_floor(&state,now,settings.history.retention_ms).unwrap();
         assert!(safe>1 && safe<last_update);
         let mut bad=Trim {previous:0,floor:recent_seq,at:now};

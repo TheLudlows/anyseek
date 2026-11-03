@@ -607,11 +607,11 @@ mod tests {
                 .await
                 .unwrap();
         }
-        both(&partition, &oracle, write("source","s","evidence original",ExpectedVersion::Absent)).await;
+        both(&partition, &oracle, write("initial","s","plain original",ExpectedVersion::Absent)).await;
         both(
             &partition,
             &oracle,
-            write("derived","d","evidence original",ExpectedVersion::Absent),
+            write("peer","d","plain original",ExpectedVersion::Absent),
         )
         .await;
         both(
@@ -640,7 +640,7 @@ mod tests {
             write("third", "c", "alpha omega", ExpectedVersion::Absent),
         )
         .await;
-        let mut delete = write("source-delete", "s", "", ExpectedVersion::Match(1));
+        let mut delete = write("delete-target", "s", "", ExpectedVersion::Match(1));
         delete.document = None;
         both(&partition, &oracle, delete).await;
         assert!(partition.get("d").await.unwrap().is_some());

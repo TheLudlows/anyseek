@@ -214,7 +214,7 @@ pub struct RecordWrite {
     /// Complete original input including vectors; None deletes unless vector_patch is set.
     pub document: Option<Document>,
     /// Fill previously absent schema vector fields for an exact body version.
-    /// Mutually exclusive with document/system; preserves body version.
+    /// Mutually exclusive with document; preserves body version.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vector_patch: Option<Document>,
     /// UTC millisecond metadata for a complete body revision; omitted inherits.
@@ -1920,14 +1920,8 @@ mod tests {
         wait_maintenance_idle(p).await;
     }
 
-
-
-
-
-
-
     #[test]
-    fn previous_document_upload_storage_formats_are_rejected() {
+    fn previous_record_storage_formats_are_rejected() {
         for tag in ["RecordCheckpointV18", "RecordAppliedV15", "RecordAnchorV4", "RecordExpiredV12", "RecordHistoryTrimV13", "RecordCheckpointV17", "RecordCheckpointV16", "RecordAppliedV14", "RecordAnchorV3", "RecordCheckpointV15", "RecordAppliedV13", "RecordAnchorV2", "RecordLeaseExpiredV12"] {
             let value=serde_json::json!({tag:{}});
             let error=serde_json::from_value::<Entry>(value).unwrap_err().to_string();
@@ -1945,54 +1939,45 @@ mod tests {
         assert!(serde_json::from_value::<RecordWrite>(request).is_ok());
     }
 
-
-
-
-    fn fusion_query() -> RecordQuery {
+    fn ranking_query() -> RecordQuery {
         RecordQuery{temporal:None,text:"alpha".into(),vector:Some(Embedding::F32(vec![1.0,0.0])),mode:SearchMode::Hybrid{similarity_threshold:None,ann_mode:crate::vector_similarity::AnnMode::All, rrf: Default::default() },query_type:QueryType::Union,offset:0,length:20,result_type:ResultType::Topk,fields:vec![],filters:vec![],sort:vec![]}
     }
-
-
 
     #[tokio::test]
     async fn query_explanations_preserve_raw_scores_ranks_and_pagination() {
         let root=path();let p=RecordPartition::create(&root,config()).await.unwrap();
         for id in ["c","a","b"] {p.write(write(id,id,"alpha",ExpectedVersion::Absent)).await.unwrap();}
         for mode in [SearchMode::Lexical,SearchMode::Vector{similarity_threshold:None,ann_mode:AnnMode::All}] {
-            let mut q=fusion_query();q.mode=mode.clone();if mode==SearchMode::Lexical{q.vector=None;}q.offset=1;q.length=1;
+            let mut q=ranking_query();q.mode=mode.clone();if mode==SearchMode::Lexical{q.vector=None;}q.offset=1;q.length=1;
             let r=p.query(q).await.unwrap();assert_eq!(r.hits.len(),1);let hit=&r.hits[0];assert_eq!(hit.channels.len(),1);assert_eq!(hit.channels[0].rank,1);assert_eq!(hit.channels[0].raw_score,Some(hit.score));assert!(hit.channels[0].rrf_contribution.is_none());
         }
         // Count must still evaluate vector thresholds in both channel modes.
         for threshold in [None, Some(0.5)] {
             for mode in [SearchMode::Vector { similarity_threshold:threshold, ann_mode:AnnMode::All },
                 SearchMode::Hybrid { similarity_threshold:threshold, ann_mode:AnnMode::All, rrf:Default::default() }] {
-                let mut q=fusion_query();q.mode=mode;q.text="missing".into();
+                let mut q=ranking_query();q.mode=mode;q.text="missing".into();
                 q.vector=Some(Embedding::F32(vec![-1.0,0.0]));q.result_type=ResultType::Count;
                 let counted=p.query(q).await.unwrap();
                 assert_eq!(counted.count_total, if threshold.is_some() {0} else {3});
                 assert!(counted.hits.is_empty());
             }
         }
-        let mut q=fusion_query();q.mode=SearchMode::Hybrid{similarity_threshold:None,ann_mode:AnnMode::All,rrf:crate::search::RrfOptions{constant:3.0,keyword_weight:0.5,vector_weight:2.0,keyword_candidates:Some(3),vector_candidates:Some(2)}};
+        let mut q=ranking_query();q.mode=SearchMode::Hybrid{similarity_threshold:None,ann_mode:AnnMode::All,rrf:crate::search::RrfOptions{constant:3.0,keyword_weight:0.5,vector_weight:2.0,keyword_candidates:Some(3),vector_candidates:Some(2)}};
         let all=p.query(q).await.unwrap();
         let lexical_raw=query(&p,SearchMode::Lexical).await.hits[0].score;
         let vector_raw=query(&p,SearchMode::Vector{similarity_threshold:None,ann_mode:AnnMode::All}).await.hits[0].score;
         assert!(all.hits.iter().flat_map(|h|&h.channels).all(|c|c.raw_score==Some(if c.channel=="lexical"{lexical_raw}else{vector_raw})));
         for (rank,hit) in all.hits.iter().enumerate(){assert_eq!(hit.record.record_id,["a","b","c"][rank]);assert_eq!(hit.channels.iter().map(|c|c.rrf_contribution.unwrap()).sum::<f32>(),hit.score);let lex=hit.channels.iter().find(|c|c.channel=="lexical").unwrap();assert_eq!(lex.rank,rank);assert_eq!(lex.rrf_contribution,Some(0.5/(3.0+rank as f32)));assert_eq!(hit.channels.iter().any(|c|c.channel=="vector"),rank<2);}
-        let mut q=fusion_query();q.mode=SearchMode::Hybrid{similarity_threshold:None,ann_mode:AnnMode::All, rrf: Default::default() };q.offset=1;q.length=1;
+        let mut q=ranking_query();q.mode=SearchMode::Hybrid{similarity_threshold:None,ann_mode:AnnMode::All, rrf: Default::default() };q.offset=1;q.length=1;
         let page=p.query(q).await.unwrap();assert_eq!(page.hits[0].channels[0].rank,1);assert_eq!(page.hits[0].channels[1].rank,1);
-        let mut q=fusion_query();q.mode=SearchMode::Hybrid{similarity_threshold:None,ann_mode:AnnMode::All,rrf:crate::search::RrfOptions{constant:3.0,keyword_weight:0.0,vector_weight:1.0,keyword_candidates:Some(3),vector_candidates:Some(3)}};
+        let mut q=ranking_query();q.mode=SearchMode::Hybrid{similarity_threshold:None,ann_mode:AnnMode::All,rrf:crate::search::RrfOptions{constant:3.0,keyword_weight:0.0,vector_weight:1.0,keyword_candidates:Some(3),vector_candidates:Some(3)}};
         let vector_only=p.query(q).await.unwrap();assert!(!vector_only.hits.is_empty());assert!(vector_only.hits.iter().all(|h|h.channels.len()==1&&h.channels[0].channel=="vector"&&h.channels[0].rrf_contribution==Some(h.score)));
-        let mut q=fusion_query();q.mode=SearchMode::Lexical;q.vector=None;q.sort=vec![crate::search::ResultSort{field:"_id".into(),order:crate::search::SortOrder::Descending}];q.offset=1;q.length=1;
+        let mut q=ranking_query();q.mode=SearchMode::Lexical;q.vector=None;q.sort=vec![crate::search::ResultSort{field:"_id".into(),order:crate::search::SortOrder::Descending}];q.offset=1;q.length=1;
         let sorted=p.query(q).await.unwrap();assert_eq!(sorted.hits.len(),1);assert_eq!(sorted.hits[0].channels[0].rank_basis,"requested_order");assert_eq!(sorted.hits[0].channels[0].rank,1);
         let browse=p.search(String::new(),None,SearchMode::Lexical,vec![],10).await.unwrap();assert!(browse.hits.iter().all(|h|h.channels[0].channel=="browse"&&h.channels[0].raw_score.is_none()));
         p.compact_journal().await.unwrap();drop(p);let p=RecordPartition::open(&root,config().max_journal_bytes).await.unwrap();let restored=query(&p,SearchMode::Hybrid{similarity_threshold:None,ann_mode:AnnMode::All, rrf: Default::default() }).await;assert!(restored.hits.iter().all(|h|h.channels.len()==2));
         drop(p);std::fs::remove_dir_all(root).unwrap();
     }
-
-
-
-
 
     #[tokio::test]
     async fn history_trim_checkpoint_budget_does_not_block_expiration() {
@@ -2155,14 +2140,12 @@ mod tests {
     async fn optional_vectors_enrich_exact_revision_and_recover() {
         let root = path(); let archive = path();
         let p = RecordPartition::create(&root, config()).await.unwrap();
-        let mut source = write("s","s","evidence original",ExpectedVersion::Absent);
-        source.document.as_mut().unwrap().remove("vector");
-        source.document.as_mut().unwrap().insert("body".into(), serde_json::json!("alpha original"));
-        p.write(source).await.unwrap();
-        let mut derived = write("d","d","evidence original",ExpectedVersion::Absent);
-        derived.document.as_mut().unwrap().remove("vector");
-        derived.document.as_mut().unwrap().insert("body".into(), serde_json::json!("alpha derived"));
-        p.write(derived).await.unwrap();
+        let mut initial = write("s","s","alpha original",ExpectedVersion::Absent);
+        initial.document.as_mut().unwrap().remove("vector");
+        p.write(initial).await.unwrap();
+        let mut secondary = write("d","d","alpha secondary",ExpectedVersion::Absent);
+        secondary.document.as_mut().unwrap().remove("vector");
+        p.write(secondary).await.unwrap();
         let vector = SearchMode::Vector { similarity_threshold: None, ann_mode: AnnMode::All };
         assert!(query(&p, vector.clone()).await.hits.is_empty());
         assert_eq!(query(&p, SearchMode::Lexical).await.hits.len(), 2);
@@ -2182,7 +2165,7 @@ mod tests {
         let p = RecordPartition::open(&root, config().max_journal_bytes).await.unwrap();
         assert_eq!(p.write(patch).await.unwrap(), receipt);
         assert_eq!(query(&p, vector).await.hits.len(), 1);
-        let mut update = write("newsource", "s", "alpha new", ExpectedVersion::Match(1));
+        let mut update = write("update-body", "s", "alpha new", ExpectedVersion::Match(1));
         update.document.as_mut().unwrap().remove("vector"); p.write(update).await.unwrap();
         let mut late = write("late", "s", "unused", ExpectedVersion::Match(1)); late.document = None;
         late.vector_patch = Some(serde_json::from_value(serde_json::json!({"vector":[2.0,0.0]})).unwrap());
@@ -2213,18 +2196,12 @@ mod tests {
         drop(p); std::fs::remove_dir_all(root).unwrap();
     }
 
-
-
-
-
-
-
     #[tokio::test]
     async fn durable_delete_failure_fences_output_and_replays_only_target() {
         let root = path();
         let p = RecordPartition::create(&root, config()).await.unwrap();
-        p.write(write("s","s","evidence original",ExpectedVersion::Absent)).await.unwrap();
-        p.write(write("d","d","evidence original",ExpectedVersion::Absent)).await.unwrap();
+        p.write(write("s","s","plain original",ExpectedVersion::Absent)).await.unwrap();
+        p.write(write("d","d","plain original",ExpectedVersion::Absent)).await.unwrap();
         let output = p.output_permit().unwrap();
         p.inner.lock().await.fail_after_durable = true;
         let mut delete = write("delete", "s", "", ExpectedVersion::Match(1)); delete.document = None;
@@ -2237,10 +2214,6 @@ mod tests {
         assert_eq!(p.statistics().await.unwrap().active_records, 1);
         drop(p); std::fs::remove_dir_all(root).unwrap();
     }
-
-
-
-
 
     #[test]
     fn record_identity_contract_rejects_removed_fields() {
@@ -2257,13 +2230,13 @@ mod tests {
         assert!(serde_json::from_value::<IndexMetaObject>(metadata).is_err());
         let config = config();
         let mut state = State::default();
-        let source = write("source","s","evidence original",ExpectedVersion::Absent);
-        strict(&source);
-        let epoch = source.operation_id.epoch;
+        let request = write("initial","s","plain original",ExpectedVersion::Absent);
+        strict(&request);
+        let epoch = request.operation_id.epoch;
         let mutation::PreparedWrite::Append { applied, .. } = mutation::prepare_at(
             &state, &config, checkpoint_codec::length(&config, &state).unwrap(),
-            source, epoch, epoch,
-        ).unwrap() else { panic!("new source") };
+            request, epoch, epoch,
+        ).unwrap() else { panic!("new operation") };
         apply(&mut state, &applied).unwrap();
         strict(&state.records["s"]);
         assert_eq!(state.records["s"].version, 1);
@@ -2284,8 +2257,6 @@ mod tests {
         assert!(error.to_string().contains("RecordCheckpointV17"));
         std::fs::remove_dir_all(root).unwrap();
     }
-
-
 
     #[test]
     fn record_planning_is_read_only_and_recovery_ignores_retry_clock() {

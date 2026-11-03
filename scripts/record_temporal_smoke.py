@@ -28,13 +28,13 @@ def exercise(call, restart_with, directory, faults):
     endpoint = '/api/v1/index/temporal'
     reader=base64.b64encode(os.urandom(32)).decode()
     call('POST','/api/v1/apikey',{'operation_id':operation(),'key_id':'temporal-reader','apikey_base64':reader})
-    source = {'operation_id': operation(), 'record_id': 's',  'expected': 'Absent',
-              'document': {'body': 'temporal source'},
+    record = {'operation_id': operation(), 'record_id': 's',  'expected': 'Absent',
+              'document': {'body': 'temporal record'},
               'temporal': {'event_time_ms': 100, 'valid_from_ms': 100, 'valid_to_ms': 200, 'expire_at_ms': now + (100 if faults else 86400000)}}
-    receipt = write_one(call, endpoint, source)['receipt']
-    for rid, _parent in [('d', 's'), ('i', 'd')]:
+    receipt = write_one(call, endpoint, record)['receipt']
+    for rid in ['d', 'i']:
         write_one(call, endpoint, {'operation_id': operation(), 'record_id': rid,  'expected': 'Absent',
-             'document': {'body': 'temporal peer'}, 'temporal': {'expire_at_ms': source['temporal']['expire_at_ms']}})
+             'document': {'body': 'temporal peer'}, 'temporal': {'expire_at_ms': record['temporal']['expire_at_ms']}})
     query = {'query': 'temporal', 'temporal': {'event': {'from_ms': 100, 'to_ms': 101}, 'valid_at_ms': 100}}
     result = call('POST', endpoint + '/query', query)
     assert [h['record']['record_id'] for h in result['hits']] == ['s'], result
@@ -60,7 +60,7 @@ def exercise(call, restart_with, directory, faults):
         for rid in ['s', 'd', 'i']:
             call('GET', endpoint + '/doc/' + rid, status=404)
         assert call('POST', endpoint + '/query', {})['statistics']['active_records'] == 0
-        assert write_one(call, endpoint, source)['receipt'] == receipt
+        assert write_one(call, endpoint, record)['receipt'] == receipt
         # Wait for background persistence before checking the persisted floor.
         # Reads themselves only filter; the version changes only after GC.
         reclaimed(endpoint,2)
@@ -70,16 +70,16 @@ def exercise(call, restart_with, directory, faults):
         assert call('POST', endpoint + '/query', {}, status=503)['code'] == 'clock_uncertain'
         clock(now + 101)
         assert call('POST', endpoint + '/query', {})['count_total'] == 0
-        reuse={**source,'operation_id':operation(),'expected':'Absent','temporal':None}
+        reuse={**record,'operation_id':operation(),'expected':'Absent','temporal':None}
         assert write_one(call,endpoint,reuse)['receipt']['version']==3
-        assert call('GET',endpoint+'/doc/s')['document']==source['document']
+        assert call('GET',endpoint+'/doc/s')['document']==record['document']
         print('PASS temporal HTTP: logical filtering, background reclaim, durable floor, ID reuse and original retry')
         for stage in ['after_append_unknown', 'after_durable', 'crash_after_durable', 'crash_after_visible']:
             # All commands use the same controlled time; no sleep determines expiry.
             cid = 'ttl-' + stage.replace('_', '-')
             endpoint = '/api/v1/index/' + cid
             call('POST', '/api/v1/index', {'operation_id': operation(), 'collection_id': cid, 'config': config})
-            write = {**source, 'operation_id': operation(), 'temporal': {'expire_at_ms': now + 200}}
+            write = {**record, 'operation_id': operation(), 'temporal': {'expire_at_ms': now + 200}}
             original = write_one(call, endpoint, write)['receipt']
             restart_with({**env, 'ANYSEEK_TEMPORAL_FAULT': stage})
             # Reopen loads partitions lazily. Capture it while still live, then

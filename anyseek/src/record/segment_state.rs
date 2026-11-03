@@ -129,7 +129,7 @@ mod tests {
         let partition=RecordPartition::create(&root,config.clone()).await.unwrap();
         let objects=root.join("objects");std::fs::create_dir(&objects).unwrap();
         let budget=Budget{bytes:config.max_journal_bytes,objects:4,payloads:100,body_bytes:config.max_record_bytes};
-        partition.write(super::super::tests::write("initial","source","evidence original",ExpectedVersion::Absent)).await.unwrap();
+        partition.write(super::super::tests::write("initial","r","plain original",ExpectedVersion::Absent)).await.unwrap();
         let mut pool=PoolBuilder::begin(&objects,Closure::default(),budget,format!("{:032x}",1)).unwrap();
         let first={let inner=partition.inner.lock().await;ReferencedState::write(&inner.config,&inner.state,&mut pool).unwrap()};
         let closure=pool.finish().unwrap();assert_eq!(closure.objects.values().map(|d|d.payloads.len()).sum::<usize>(),1);
@@ -138,7 +138,7 @@ mod tests {
         let narrow=ReferencedState{config:RecordConfig{max_record_bytes:1,..config.clone()},state:first.state.clone()};
         assert!(narrow.read(&reader,config.max_journal_bytes).unwrap_err().to_string().contains("payload read budget exceeded"));
         first.read(&reader,config.max_journal_bytes).unwrap();drop(reader);
-        let mut update=super::super::tests::write("revision","source","evidence original",ExpectedVersion::Absent);update.expected=ExpectedVersion::Match(1);
+        let mut update=super::super::tests::write("revision","r","plain original",ExpectedVersion::Absent);update.expected=ExpectedVersion::Match(1);
         update.document.as_mut().unwrap().insert("body".into(),serde_json::json!("revised alpha"));
         partition.write(update).await.unwrap();
         let mut pool=PoolBuilder::begin(&objects,closure,budget,format!("{:032x}",2)).unwrap();
@@ -178,14 +178,14 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
     #[tokio::test]
-    async fn referenced_state_keeps_history_and_same_version_vector_patch() {
+    async fn referenced_state_keeps_retry_requests_and_same_version_vector_patch() {
         use super::super::tests::{path,config,write};
         let root=path(); let settings=config();
         let partition=RecordPartition::create(&root,settings.clone()).await.unwrap();
-        let mut source=write("source","s","evidence original",ExpectedVersion::Absent);
-        source.document.as_mut().unwrap().shift_remove("vector");
-        let original=source.document.clone();
-        partition.write(source.clone()).await.unwrap();
+        let mut initial=write("initial","s","plain original",ExpectedVersion::Absent);
+        initial.document.as_mut().unwrap().shift_remove("vector");
+        let original=initial.document.clone();
+        partition.write(initial.clone()).await.unwrap();
         let mut patch=write("patch","s","ignored",ExpectedVersion::Match(1));
         patch.document=None;
         patch.vector_patch=Some(serde_json::from_value(serde_json::json!({"vector":[7.0,0.0]})).unwrap());

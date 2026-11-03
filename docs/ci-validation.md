@@ -2,7 +2,7 @@
 
 `PR feedback` runs on pull requests, master pushes and manual dispatch. It checks
 retired dependencies, console asset separation and the lexical partition;
-on code changes it builds and runs 174 exact bounded core regressions plus the
+on code changes it builds and runs the exact bounded core regression list plus the
 small query integration matrix on Linux and Windows, then builds the service with the same features and generates its
 OpenAPI schema. The case list is `scripts/ci_core_cases.json`; missing or renamed
 cases fail rather than silently matching zero tests. Integration scales are listed
@@ -12,6 +12,9 @@ Markdown file links and anchors need a separate check; the retired brand checker
 is not part of the workflow. Console build/unit checks run for code changes, and
 the Linux core lane runs the standalone browser suite against a disposable API.
 Both core lanes also run local/S3-fixture deleted-generation reclamation checks.
+The service persistence-error/fence case is invoked explicitly with
+`fault-injection` on both OSes; the normal service build and OpenAPI smoke keep
+the default feature set.
 Generic x86-64 CPU flags permit target caching within each OS; full acceptance
 retains the existing native-CPU configuration and source-only cache policy.
 
@@ -104,7 +107,7 @@ unchanged, as are HTTP repeated operation replay and separate Indexer/auth tests
 ## Small and full query fixtures (P1)
 
 Default PR core jobs explicitly select `small` and run six integration targets
-in addition to the 174 exact core cases. The manual matrix explicitly selects
+in addition to the exact core case list. The manual matrix explicitly selects
 `full`, including its four independent Windows lexical jobs. No production
 capacity, scoring, timeout or fault boundary changes.
 

@@ -816,8 +816,8 @@ mod tests {
     #[tokio::test]
     async fn background_index_cut_keeps_concurrent_writes_deletes_receipts_and_output_barrier() {
         let root=path();let p=RecordPartition::create(&root,config()).await.unwrap();
-        p.write(write("source","s","evidence original",ExpectedVersion::Absent)).await.unwrap();
-        p.write(write("derived","d","evidence original",ExpectedVersion::Absent)).await.unwrap();
+        p.write(write("initial","s","plain original",ExpectedVersion::Absent)).await.unwrap();
+        p.write(write("peer","d","plain original",ExpectedVersion::Absent)).await.unwrap();
         p.write(write("first","a","alpha",ExpectedVersion::Absent)).await.unwrap();
         let output=p.output_permit().unwrap();
         std::fs::write(root.join(".test-indexer-pause"),b"pause").unwrap();
@@ -826,7 +826,7 @@ mod tests {
         assert!(matches!(p.index_committed(Duration::from_secs(1)).await,Err(RecordError::Busy)));
         let update=write("second","a","alpha revised",ExpectedVersion::Match(1));
         let receipt=p.write(update.clone()).await.unwrap();
-        let mut delete=write("delete-source","s","",ExpectedVersion::Match(1));delete.document=None;
+        let mut delete=write("delete-target","s","",ExpectedVersion::Match(1));delete.document=None;
         p.write(delete).await.unwrap();
         assert!(p.get("d").await.unwrap().is_some());
         assert!(output.deliver(||()).is_ok());

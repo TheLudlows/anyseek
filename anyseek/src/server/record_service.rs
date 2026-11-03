@@ -101,15 +101,6 @@ fn not_found() -> Error {
 fn parse<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, Error> {
     serde_json::from_slice(bytes).map_err(bad)
 }
-// Never reinterpret retired typed commands as ordinary writes. Source metadata
-// belongs inside document; only the reserved top-level system command is rejected.
-fn reject_business_writes(value: &Value, field: &str) -> Result<(), Error> {
-    if value.get(field).and_then(Value::as_array).is_some_and(|rows|
-        rows.iter().any(|row| row.as_object().is_some_and(|r| r.contains_key("system")))) {
-        return Err(bad("system source/evidence commands are not supported; keep source and chunk information in document metadata"));
-    }
-    Ok(())
-}
 fn verifier(raw: &[u8]) -> String {
     Sha256::digest(raw)
         .iter()
@@ -913,7 +904,6 @@ async fn ingest(State(s): State<Arc<Service>>, headers: HeaderMap, Path(id): Pat
         record.as_object().is_some_and(|r| r.contains_key("document") || r.get("vector_patch").is_some_and(Value::is_object)))) {
         return Err(bad("each ingest record requires explicit document or vector_patch"));
     }
-    reject_business_writes(&value, "records")?;
     let request: IngestRequest = serde_json::from_value(value).map_err(bad)?;
     let key = s.authenticate(&headers).await?;
     let gate = s.write_gate.clone().read_owned().await;
@@ -1076,7 +1066,6 @@ async fn batch(
     {
         return Err(bad("every write must contain explicit document or vector_patch"));
     }
-    reject_business_writes(&value, "writes")?;
     let request: BatchRequest = serde_json::from_value(value).map_err(bad)?;
     if request.writes.is_empty() || request.writes.len() > 100 {
         return Err(bad("batch requires 1..100 independent writes"));

@@ -864,19 +864,19 @@ mod tests {
         let root = dir.path().join("records");
         let settings = config();
         let p = RecordPartition::create(&root, settings.clone()).await.unwrap();
-        let mut source = crate::record::tests::write("source","s","evidence original",ExpectedVersion::Absent);
-        source.document.as_mut().unwrap().remove("vector");
+        let mut initial = crate::record::tests::write("initial","s","plain original",ExpectedVersion::Absent);
+        initial.document.as_mut().unwrap().remove("vector");
         let mut patch = write("patch", "s", "", ExpectedVersion::Match(1));
         patch.document = None;
         patch.vector_patch = Some(serde_json::from_value(serde_json::json!({"vector":[2.0,0.0]})).unwrap());
         let update = write("update", "s", "updated", ExpectedVersion::Match(1));
-        let derived = crate::record::tests::write("derived","d","evidence original",ExpectedVersion::Absent);
+        let other = crate::record::tests::write("peer","d","plain original",ExpectedVersion::Absent);
         let conflict = write("conflict", "s", "bad", ExpectedVersion::Match(1));
         let suffix = write("suffix", "unused", "unused", ExpectedVersion::Absent);
-        let requests = vec![source, patch, update, derived, conflict, suffix];
+        let requests = vec![initial, patch, update, other, conflict, suffix];
 
         // Compare every retained value with an independent sequential projection,
-        // including the vector-only revision followed by an ordinary source update.
+        // including the vector-only revision followed by an ordinary body update.
         let writer=p.writer.clone().lock_owned().await;
         let mut oracle=p.inner.lock().await.state.try_clone().unwrap();
         let prepared = p.prepare_batch(&writer, requests.clone()).await.unwrap();

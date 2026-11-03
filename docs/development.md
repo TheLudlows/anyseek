@@ -70,7 +70,7 @@ python3 scripts/s3_acceptance.py --backend real --suite all \
   --server target/debug/anyseek_server --faults --report target/s3-real-acceptance.json
 ```
 
-报告必须同时核对 `backend=real`、`real_endpoint_exercised=true`、`all_requested_checks_passed=true` 和所运行 suite；fixture 通过、空配置拒绝或只运行合同均不代表完整真实后端认证。本轮按约定先交付工具与用例，未运行真实 endpoint。CI 的 `s3-native-acceptance` 在 Linux/Windows 使用 fixture 跑合同、权威回归及七组无缓存语义，原 native-storage 矩阵继续跑存储故障验收。
+报告必须同时核对 `backend=real`、`real_endpoint_exercised=true`、`all_requested_checks_passed=true` 和所运行 suite；fixture 通过、空配置拒绝或只运行合同均不代表完整真实后端认证。本轮按约定先交付工具与用例，未运行真实 endpoint。CI 的 `s3-native-acceptance` 在 Linux/Windows 使用 fixture 跑对象合同及六组无缓存语义（base、temporal、history、ingest、indexer、authorization）；同 feature 的权威库回归和存储故障验收归 persistence-native 矩阵。
 
 ## API 与文档
 

@@ -639,13 +639,13 @@ mod tests {
         let partition = RecordPartition::create(&root.join("partition"), config.clone())
             .await
             .unwrap();
-        let mut first = super::super::tests::write("source","s","evidence original",ExpectedVersion::Absent);
+        let mut first = super::super::tests::write("initial","s","plain original",ExpectedVersion::Absent);
         first.document.as_mut().unwrap().insert(
             "opaque".into(),
             serde_json::json!({"$payload":123,"document":"unchanged", "float":1.23456789}),
         );
         partition.write(first).await.unwrap();
-        let mut revision = super::super::tests::write("revision","s","evidence original",ExpectedVersion::Absent);
+        let mut revision = super::super::tests::write("revision","s","plain original",ExpectedVersion::Absent);
         revision.expected = ExpectedVersion::Match(1);
         revision.document.as_mut().unwrap().insert(
             "body".into(),

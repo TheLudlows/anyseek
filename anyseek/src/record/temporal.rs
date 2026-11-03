@@ -122,10 +122,6 @@ pub(super) fn retained(
     }
     Ok(value)
 }
-pub(super) fn protected(record: &Record) -> bool {
-    record.temporal.expire_at_ms.is_some()
-        || record.expired_at_ms.is_some()
-}
 pub(super) fn visible(record: &Record, evaluation: u64) -> bool {
     record.document.is_some() && record.temporal.expire_at_ms.is_none_or(|deadline| deadline > evaluation)
 }

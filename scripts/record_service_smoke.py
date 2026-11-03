@@ -83,9 +83,8 @@ def main():
             exercise=importlib.import_module('record_'+name+'_smoke').exercise
             if name == 'ingest':
                 exercise(call,restart_with,root.parent,args.faults,base,tenant_key)
-            elif name in ['temporal','history','indexer','authorization']:
+            else:
                 exercise(call,restart_with,root.parent,args.faults)
-            else:exercise(call,restart_with,args.faults)
         try:
             if args.faults and args.section in (None, 'base'):
                 for stage in ['metadata_committed','root_published']:

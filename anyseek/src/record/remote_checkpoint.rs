@@ -1459,12 +1459,12 @@ mod tests {
     #[tokio::test]
     async fn cache_corruption_and_loss_preserve_checkpoint_tail_and_independent_records() {
         let (p,_,root,db,clock) = source().await;
-        p.write(write("source","s","evidence original",ExpectedVersion::Absent)).await.unwrap();
-        p.write(write("derived","d","evidence original",ExpectedVersion::Absent)).await.unwrap();
+        p.write(write("initial","s","plain original",ExpectedVersion::Absent)).await.unwrap();
+        p.write(write("peer","d","plain original",ExpectedVersion::Absent)).await.unwrap();
         p.compact_journal().await.unwrap();
         let request = write("tail","a","alpha tail",ExpectedVersion::Absent);
         let receipt = p.write(request.clone()).await.unwrap();
-        let mut deletion = write("delete-source","s","",ExpectedVersion::Match(1)); deletion.document = None;
+        let mut deletion = write("delete-target","s","",ExpectedVersion::Match(1)); deletion.document = None;
         p.write(deletion).await.unwrap();
         let expected = scores(&p).await;
         let cache_root = db.with_extension("object-cache");
@@ -1501,8 +1501,8 @@ mod tests {
     #[tokio::test]
     async fn background_index_keeps_new_commits_and_deletions_after_cache_loss() {
         let (p,_,root,_,clock)=source().await;
-        p.write(write("source","s","evidence original",ExpectedVersion::Absent)).await.unwrap();
-        p.write(write("derived","d","evidence original",ExpectedVersion::Absent)).await.unwrap();
+        p.write(write("initial","s","plain original",ExpectedVersion::Absent)).await.unwrap();
+        p.write(write("peer","d","plain original",ExpectedVersion::Absent)).await.unwrap();
         std::fs::write(root.join(".test-indexer-pause"),b"pause").unwrap();
         let job=p.start_index_committed(std::time::Duration::from_secs(30)).unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(5),async {
@@ -1510,7 +1510,7 @@ mod tests {
         }).await.unwrap();
         let request=write("concurrent","a","alpha revised",ExpectedVersion::Absent);
         let receipt=p.write(request.clone()).await.unwrap();
-        let mut deletion=write("delete-source","s","",ExpectedVersion::Match(1));deletion.document=None;
+        let mut deletion=write("delete-target","s","",ExpectedVersion::Match(1));deletion.document=None;
         p.write(deletion).await.unwrap();
         let expected=scores(&p).await;
         assert!(matches!(p.collect_s3_garbage().await,Err(RecordError::Busy)));
