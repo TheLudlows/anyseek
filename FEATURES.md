@@ -1,6 +1,6 @@
 # 当前功能与边界
 
-HTTP/Web UI 数据请求统一由服务内部的 Record/catalog 处理；旧低层全文 Rust API 已删除。职责边界见[实施说明](docs/engine-scope.md)；系统断电与长期持续运行容量仍未验收。[服务使用](anyseek/src/server/README.md) · [架构](ARCHITECTURE.md) · [状态与证据](STATUS.md)
+HTTP/Web UI 数据请求统一由服务内部的 Record/catalog 处理；旧低层全文 Rust API 已删除。职责边界见[Record 契约](docs/record-model.md)；系统断电与长期持续运行容量仍未验收。[服务使用](anyseek/src/server/README.md) · [架构](ARCHITECTURE.md) · [状态与证据](STATUS.md)
 
 ## 检索和数据
 
@@ -9,7 +9,7 @@ HTTP/Web UI 数据请求统一由服务内部的 Record/catalog 处理；旧低�
 | 全文 | BM25F/邻近度、布尔/短语、多字段、中文分词、停用词和 N-gram |
 | 向量 | 外部 JSON/base64、多向量字段、F32/I8、三种距离、量化、IVF ANN；模型推理由调用方提供 |
 | 混合 | 全文/向量共同视图 RRF，支持权重和候选预算、逐命中 rank/原始分数/贡献；候选窗口不当作全库精确并集 |
-| 时间与生命周期 | UTC 毫秒时间过滤、捕获 evaluation_time 与最终候选重验、TTL 后台回收；重启时钟回退边界见[说明](docs/engine-scope.md) |
+| 时间与生命周期 | UTC 毫秒时间过滤、捕获 evaluation_time 与最终候选重验、TTL 后台回收；重启时钟回退边界见[Record 契约](docs/record-model.md#时间ttl-与查询视图) |
 | 过滤和排序 | 共享元数据谓词、字段排序、分页和投影；ANN/Hybrid 候选内重排不保证全库字段 Top-K |
 | 身份和写入 | 稳定 Record ID、版本条件、墓碑、防 ABA、原 operation_id 重试 |
 | 原始数据 | 权威状态保留完整 Document 和原始向量；schema.store 控制查询投影，不控制原始数据持久保存 |
@@ -18,7 +18,7 @@ HTTP/Web UI 数据请求统一由服务内部的 Record/catalog 处理；旧低�
 | Tenant 认证 | 普通 Key 绑定 Tenant，同租户 Key 访问范围一致；撤销只影响后续认证，数据生命周期独立 |
 | 备份 | collection 独立快照、备份退役、完整 service/catalog 备份、新未启动根恢复 |
 
-全文派生包使用锁定版本的 Tantivy，保留正式 BM25F/邻近度和分析契约。向量/元数据使用独立组件，Payload 唯一保存规范原文和原向量。旧倒排压缩、docstore、Block-max WAND/MaxScore 执行器及公开 IndexArc/Commit/Search 入口已删除；调用方改用 RecordPartition。原生 commit 不是业务发布，认证包和 Record 权威状态决定可见 cut。仅支持新库，不提供旧格式读取、双写或迁移。Linux 最终回归和 Windows 验收状态见实施记录，不能把组件编译通过视为全部验收。
+全文派生包使用锁定版本的 Tantivy，保留正式 BM25F/邻近度和分析契约。向量/元数据使用独立组件，Payload 唯一保存规范原文和原向量。旧倒排压缩、docstore、Block-max WAND/MaxScore 执行器及公开 IndexArc/Commit/Search 入口已删除；调用方改用 RecordPartition。原生 commit 不是业务发布，认证包和 Record 权威状态决定可见 cut。仅支持新库，不提供旧格式读取、双写或迁移。各平台验证证据见 [STATUS](STATUS.md)，不能把组件编译通过视为全部验收。
 
 规范 Payload 与 Tantivy 原生包各自管理编码；不提供无实际效果的正文压缩选项。派生向量/元数据文件使用 mmap。
 
@@ -60,7 +60,7 @@ HTTP/Web UI 数据请求统一由服务内部的 Record/catalog 处理；旧低�
 
 ## Web UI 和工具
 
-独立 `console/` 使用 React/TypeScript/Vite，Rust 只保留 API，静态资源不嵌入服务。保留连接、创建/选择 collection、JSON 粘贴/文件输入、Lexical/Vector/Hybrid 搜索、外部向量、分页、原始记录/JSON 预览与复制、日期过滤和排序。创建/写入发送前保存原请求；未知结果在刷新或后续拒绝后仍保留身份。普通同步写入确认后直接可见；异步 ingest 的索引进度独立推进。界面不再做 POST 后 PATCH 提交。master 可在 UI 发起完整服务备份与新根恢复；没有通用 Tenant/Key 或逐条更新/删除管理页面。
+独立 `console/` 使用 React/TypeScript/Vite，Rust 只保留 API，静态资源不嵌入服务。支持中英文切换、连接、创建/选择 collection、JSON/文档输入、Lexical/Vector/Hybrid 搜索、外部向量、分页、原始记录/JSON 预览与复制、日期过滤和排序。创建/写入发送前保存原请求；未知结果在刷新或后续拒绝后仍保留身份。普通同步写入确认后直接可见；异步 ingest 的索引进度独立推进。界面不再做 POST 后 PATCH 提交。master 可在首次初始化中创建 Tenant、签发普通 Key，也可发起完整服务备份与新根恢复；初始化不管理已有 Tenant 的权限或密钥。具体操作与浏览器嵌入服务配置见[控制台指南](console/README.md)。
 
 完整冒烟为 `scripts/record_service_smoke.py`，浏览器验证在 `console/` 运行 `npm run test:browser`，显式 fault-injection 构建可运行 `--faults`。`scripts/anyseek_client.py` 和 `index_write_query_smoke.py` 使用新 Record 请求，后者发送前保存请求文件。OpenAPI 通过 `generate_openapi=true` 生成；HTTP 类型和 schema 位于 `anyseek::server` 模块。
 
