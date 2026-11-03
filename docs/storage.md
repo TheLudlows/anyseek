@@ -10,9 +10,11 @@
 
 `record/anchor.rs` 认证不可变 anchor、Segment 和 payload 闭包。完整原始 Document（含输入向量）保存在规范 payload pool；记录与操作回执通过引用共享。派生 Segment 不再存一份完整搜索正文，量化向量不能替代原始输入。全文使用锁定的 Tantivy 0.27.0 原生包，向量/元数据使用独立组件；旧低层 Index API 已移除，数据访问统一使用 RecordPartition。仅支持新库的 RecordCheckpointV19、完整/增量 state descriptor 6/7、私有向量/metadata descriptor 3、anchor manifest 9 / 检索 package manifest 3，不读取旧格式、迁移或双写。
 
-`record/view.rs` 在同一 partition guard 下检索多个冻结段与可变 tail。更新/墓碑先排除旧版本，再截断 Top-K；各段共享活动 N/df/字段长度上下文，每个通道先形成全局排名再融合。查询、过滤、回表与统计固定同一视图，缺少必要 tail 时失败，不能只搜旧段。
+`record/view.rs` 在 partition guard 下捕获冻结段与可变 tail 的派生拓扑，在 guard 外评分，最终回到当前权威状态重验版本、删除及 TTL。全文按选中的活动身份构建跨段 N/df/字段长度上下文，每个通道先形成全局排名再融合。异步消费者可处于不同进度，不能将权威 visible_seq 当作完整索引水位，也不能承诺查询、回表及返回统计来自同一不可变业务快照；最终重验可能缩短结果页。
 
-Flush 复用未变冻结段、冻结当前 tail；compaction 重建完整等价闭包。写入前按整个业务操作的原生成员数进行准入，超过 tail 的 128 次更新额度时先完成认证轮换。先完成构建、校验及同步，再发布选择证书，最后安装内存共同视图。发布后应用失败保持 fenced，恢复只采用认证选择结果。构建拒绝不得改变当前选择；退休失败可以重试，不回滚已提交状态。
+认证 checkpoint 可复用冻结段；compaction 重建完整等价闭包。可变 tail 按字节和 128 次原生更新额度准入，派生缓存封存/轮换不推进或替换 WAL 权威，恢复依据完整已提交 suffix。权威 checkpoint 则先完成构建、校验及同步，再发布选择证书并安装视图。发布后应用失败保持 fenced，恢复只采用认证选择结果；退休失败不回滚已提交状态。
+
+私有批量构建结束时，`finish_build` 复用有界小段合并，再由 Tantivy 按活跃文件引用执行 GC，之后封存并收集库存。1,024 文件上限保留；不得直接删除仍被旧读者、构建或备份引用的文件。预算不足或无法进一步合并时仍可能安全拒绝，不承诺任意规模都可构建。
 
 本地读者/构建由 partition guard 和包 pin 保护；固定 Searcher、原生 worker 与 mmap 使用的文件在最后一个持有者退出前不能删除。备份导出独立权威，不借用将被源端 GC 的可变路径。构建与回收有显式预算，当前仍保留完整内存 State 与保守准入，不承诺全进程 RSS 硬上限。
 
@@ -22,7 +24,7 @@ SQLite 是唯一可变协调权威，保存 head/owner epoch、提交和索引�
 
 服务使用根目录下的 `metadata.sqlite`，同时保存 Catalog 管理元数据与 S3 Record 协调状态；Catalog 不再维护独立持久化日志。Catalog 更新与管理回执在同一短事务提交，不复制正文、向量或完整 Record State。SQLite 使用 WAL 与 `synchronous=FULL`，不在事务内执行对象上传。Record 对象后端按分区持有稳定的本地 owner 文件锁；同一分区不能由两个 Record 实例同时持有，不同分区可以共享该数据库。集合备份只导出该分区的当前对象闭包和协调记录；恢复绑定按分区隔离，GC 只退休和删除本分区前缀的对象，全库可达性仍保护其他分区及 pin。集合本地目录直接派生为 `collections/{tenant_id}/{collection_id}/{generation}`，不保存名称到生成目录的映射。对象前缀为 `anyseek/{tenant_id}/{collection_id}/`，下分 `wal/records/lexical/vector/manifests`；内部代次编码在对象 ID 中。相同名称重建使用新代次，旧任务、回执与 GC 继续绑定原代次；客户端不传代次。没有自动 namespace 或 Bucket 归属标记，不同独立服务必须使用不同 bucket。
 
-普通写入先登记上传身份，再完成不可变 PUT、读回长度/字节/SHA-256 校验，最后由 SQLite 事务条件发布 head 与回执，再发布本地完整视图。对象缺失或校验失败不会回退为旧缓存成功。
+普通写入先登记上传身份，再完成不可变 PUT、读回长度/字节/SHA-256 校验，最后由 SQLite 事务条件发布 head 与回执，再应用本地权威状态并同步或排队派生索引。`/ingest` 不等待两个索引消费者追平。对象缺失或校验失败不会回退为旧缓存成功。
 
 ## 1. 远端检查点与 Segment 发布
 
@@ -47,17 +49,15 @@ SQLite 是唯一可变协调权威，保存 head/owner epoch、提交和索引�
 
 ### 有界后台 cut 发布（PR #75 已合入）
 
-`RecordPartition::start_index_committed` 在准入后返回 owned job，`finish` 等待结果；丢弃句柄不取消已接受工作。`index_committed` 是等待式包装。HTTP PATCH 在集合生命周期屏障内启动任务，屏障外等待；已认证任务不因凭据撤销而中断，来源删除的数据有效性仍在输出时检查。
+`RecordPartition::start_index_committed` 在准入后返回 owned job，`finish` 等待结果；丢弃句柄不取消已接受工作。`index_committed` 是等待式包装。HTTP PATCH 在集合生命周期屏障内启动任务，屏障外等待；已认证任务不因凭据撤销而中断，失败 fence 的输出保护仍保留。
 
-当前进程最多两个构建，每 partition 一个，无额外等待队列；超额返回 Busy。期限由调用者指定，最大五分钟，HTTP 为三十秒。快照与新增 tail 分别使用既有共享内存准入；捕获 tail 上限为 journal 预算与 64 MiB 的较小值，超限取消本轮构建，保留前台已确认操作，构建文件及并发 WAL 使用同一个磁盘 scope；这是保守估算，继续不承诺 RSS 硬上限。完整 State 仍驻内存。此批按固定 cut 全量构建，增量后台构建与自动调度后置。
+当前进程最多两个构建，每 partition 一个；显式构建准入超额返回 Busy，自动维护有下文所述的有界等待。期限由调用者指定，最大五分钟，HTTP 为三十秒。快照与新增 tail 分别使用既有共享内存准入；捕获 tail 上限为 journal 预算与 64 MiB 的较小值，超限取消本轮构建，保留前台已确认操作，构建文件及并发 WAL 使用同一个磁盘 scope；这是保守估算，继续不承诺 RSS 硬上限。完整 State 仍驻内存。完整 checkpoint 按固定 cut 构建，另有自动时间回收、日志压力维护和派生缓存合并，不等同于通用增量 checkpoint。
 
 SQLite 新增每 partition 一行 `index_builds`，只保存单调 build epoch、owner/cut/基础 manifest 与期限等发布绑定，完成后保留 epoch 防止 ABA，不复制 Record 或索引。登记与输入闭包 pin 同事务提交；输出对象在 PUT 前原子登记并 pin；后台构建期间新的共同 S3 备份返回 Busy，避免把未完成上传作为备份输入。对象 I/O 使用同一 SQLite 文件的独立连接，避免跨网络持有前台 authority mutex；不会产生另一套 head。pin 不因时间经过自行解除，过期只禁止发布，清理必须精确绑定 epoch。取得独占 owner 锁后，重开会取消未完成任务及其 pin。
 
 候选在 partition 屏障外构建和认证；本地 owned worker 保护候选及输入文件，期间显式 GC 返回 Busy，同步维护不能替换基础。发布时在 guard 内重放有界新增 tail，对比完整逻辑状态，检查本地基础和期限；SQLite 再检查持久 build/owner epoch、基础 manifest/indexed seq 和期限。它只推进 manifest/indexed/log base 至固定 cut，保留后续 committed seq 和 WAL tip，不消费业务序号。
 
 本地证书与完整新增 suffix 在私有 generation 中一起同步，然后发布目录，避免证书可见但后续已确认写入未落入新 generation。S3 在 SQLite 发布后本地失败继续 fenced，冷启动从远端 manifest 加完整 tail 恢复。构建失败、过期或 panic 不能把旧 cut 当成当前视图；panic 关闭输出，必须重开恢复。物理回收在候选 mmap 释放和任务结束后执行。
-
-[PR #75](https://github.com/TheLudlows/anyseek/pull/75) 已合入为 `09d30ae4`，最终提交 `96306e95` 的 [CI 五项全部成功](https://github.com/TheLudlows/anyseek/actions/runs/39891546462)。合入后主干 CI 单独记录。
 
 ### collection 生命周期与快照执行屏障
 

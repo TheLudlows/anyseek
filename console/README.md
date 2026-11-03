@@ -1,6 +1,6 @@
 # AnySeek Console
 
-独立的中文开发者控制台，使用 React、TypeScript 与 Vite。源码与构建产物位于 `console/`，不参与 Cargo 构建；Rust 服务只提供 HTTP API。
+独立的开发者控制台，支持中文/英文切换，使用 React、TypeScript 与 Vite。源码与构建产物位于 `console/`，不参与 Cargo 构建；Rust 服务只提供 HTTP API。
 
 ## 本地启动 UI
 

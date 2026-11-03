@@ -12,9 +12,9 @@ Markdown file links and anchors need a separate check; the retired brand checker
 is not part of the workflow. Console build/unit checks run for code changes, and
 the Linux core lane runs the standalone browser suite against a disposable API.
 Both core lanes also run local/S3-fixture deleted-generation reclamation checks.
-The service persistence-error/fence case is invoked explicitly with
-`fault-injection` on both OSes; the normal service build and OpenAPI smoke keep
-the default feature set.
+The service persistence-error/fence and shutdown ownership cases run explicitly
+with `fault-injection` on both OSes. Linux also runs the real SIGTERM smoke; the
+normal service build and OpenAPI smoke keep the default feature set.
 Generic x86-64 CPU flags permit target caching within each OS; full acceptance
 retains the existing native-CPU configuration and source-only cache policy.
 
@@ -46,37 +46,12 @@ complete matrix on the candidate SHA. A green quick matrix does not resolve an
 unrun or previously failing full check. Real S3, hard power loss and manual
 cross-AES acceptance remain separate from fixture/process tests.
 
-## Why split the workflows
+Historical workflow timings, failed runs and cleanup experiments remain in Git
+history and their PRs. They are not current validation results; moving a check to
+manual execution does not resolve a previous failure. Validation results and
+remaining acceptance gaps are tracked in [STATUS](../STATUS.md).
 
-Measured run `40301847907` at `a08456b`:
-
-| Job / step | Actual duration |
-| --- | ---: |
-| Linux Persistence total | 94m 39s |
-| Its retained integration contracts | 56m 42s |
-| Its no-default-feature build (historical) | 11m 45s |
-| Its HTTP process fault matrix | 14m 13s |
-| build-and-smoke total | 71m 25s |
-| Its workspace all-targets | 61m 50s |
-| Linux S3 semantic fixture step | 16m 36s |
-
-All-targets and persistence integrations overlap; several filtered lib suites are
-also rerun under different feature combinations. Four Windows lexical jobs are
-already excluded from the Windows remainder, so they are **not** four duplicate
-runs there, but each runner separately builds dependencies. Most cost in this
-run was execution, not compilation. The split reduces default work rather than
-claiming target caching alone solves the delay. The subsequent P0 target ownership split below removes the duplicate Linux
-integration run while explicitly retaining feature-specific library/bin coverage.
-
-That run ended with **2 successful / 7 failed jobs**: Windows owner-lock errors
-and a browser restore request exceeding its unchanged 30-second limit. The WAL
-fix has 19 combined bounded Linux regressions passing locally together with the
-encoding change, but needs Windows execution. The browser limit failure remains
-unresolved; moving the matrix to manual execution is not a fix or a green result.
-Original capacity writes remain stopped at 63,325 confirmed records; CI changes
-do not authorize resuming that experiment or claim 100k success.
-
-## Test-target ownership (P0)
+## Test-target ownership
 
 The full manual workflow sets `ANYSEEK_TEST_SCALE=full`; an absent variable means
 `small`, and any other value fails. Full-size inputs and repeated-query counts
@@ -104,7 +79,7 @@ small mode and twenty in full mode; its obsolete 65,536-boundary comments are
 corrected. Actual 65,536, 10,001, >16MiB, 64→65 and 128→129 boundary tests are
 unchanged, as are HTTP repeated operation replay and separate Indexer/auth tests.
 
-## Small and full query fixtures (P1)
+## Small and full query fixtures
 
 Default PR core jobs explicitly select `small` and run six integration targets
 in addition to the exact core case list. The manual matrix explicitly selects
@@ -128,21 +103,6 @@ original population values; small scale does not claim to exercise their larger
 layout boundaries. Dedicated 8192-package/10001-identity and other physical,
 byte-budget and publication boundaries remain in full acceptance.
 
-Local P0 paired measurement on the same debug profile (excluding compilation):
-bitmap 203.19s → 102.89s (all four assertions retained; about 49.4% shorter);
-union 34.41s → 34.10s (the data build dominates, so fewer repetitions have little
-measured benefit). These are one-run local observations, not a throughput claim.
-P1 historical full-size CI timings use a different runner and are not a paired
-speedup baseline for the local small-fixture run.
-
-P1 local small runs passed 13/13: frequent 6.65s, lexical six cases 134.11s,
-union ranking five cases 55.07s, forty-term union 4.75s. Selected full branches
-were also executed with the same binary/profile: frequent (3000) 108.58s and
-forty-term (1000) 47.10s, both passed. These compare fixture work at different
-scales, not engine throughput or identical large-layout coverage. Full 8194
-lexical and full union-ranking populations were preserved by parameter review
-but not rerun locally in this bounded validation.
-
 ## Default long-recovery exclusions and full-suite deduplication
 
 The default list omits these two 2,305-update tests; their source and assertions
@@ -157,11 +117,6 @@ fault-injection `--tests` (library unit tests are included). They retain the
 long-tail boundary evidence; the default suite retains bounded cache recovery,
 batch/crash, idempotency, owner-lock, TTL and queue coverage. Other historical
 cases remain because their age alone does not establish duplicate assertions.
-
-In successful CI run `40997772763`, these two cases consumed about 17m21s of
-Windows core execution. Removing that work is an estimate of saved execution
-on a comparable runner, not a measured new workflow duration or an equal
-reduction in total CI wall time; compilation and other jobs remain.
 
 Full acceptance avoids only these established repeats:
 
@@ -181,8 +136,8 @@ No test timeouts, fixtures, sharding or cache policy change in this trimming.
 
 ## Shared test bodies without removing scenarios
 
-The four `unlocked_encoding_*` / `unlocked_upload_*` pairs in
-`record/remote_checkpoint.rs` retain all eight individually selected test names.
+The three `unlocked_encoding_*` / `unlocked_upload_*` pairs in
+`record/remote_checkpoint.rs` retain six individually selected test names.
 Each pair now calls one assertion helper with its original `encode` or `upload`
 pause point; normalized bodies were identical before extraction. Both run under
 the same object-store test module (always included in service builds).
@@ -225,26 +180,5 @@ removed; they never selected a different query or persistence path. The common
 identity, synchronous visibility, Busy-only retry and panic-on-error behavior.
 Windows matrix names and remainder exclusions are updated together and guarded
 by `check_lexical_partition.py`. No production algorithm or data scale changes.
-
-Local before/after observation for this cleanup (one run each, not a benchmark):
-Linux x86-64, rustc 1.99.1, native CPU debug/test profile (historical service-enabled build),
-`ANYSEEK_TEST_SCALE=small`, `--test-threads=1 --nocapture`. Both runs passed all
-six tests; compilation is excluded. Existing progress logs give these summed
-phase times (rounded to milliseconds):
-
-| Phase | Before | After |
-| --- | ---: | ---: |
-| Fixture writes | 127.545s | 127.496s |
-| Checkpoint | 9.206s | 9.077s |
-| Reopen | 1.560s | 1.556s |
-| Queries | 1.302s | 1.279s |
-| Whole test target | 139.70s | 139.50s |
-
-Writes account for about 91% of execution. The 0.20s total difference is not
-credible evidence of a performance improvement; renaming also changes test
-execution order. The verified benefit is removing obsolete terminology and
-identical helper code without reducing cases or data. Full-scale and Windows
-execution were not repeated locally; their selection and unchanged fixtures
-were verified, not presented as executed acceptance.
 
 测试等价收敛：NOT oracle 的 Topk/TopkCount 共用初始化、compact 和 reopen 夹具，保留全部断言组合；固定状态计数查询保留首查和后续查两遍；退役字段按字段名各保留一个拒绝代表值。手工 S3 background_index 子集跳过同 feature 下已运行的 indexer::tests；不同平台、feature 和 HTTP 故障边界保持。

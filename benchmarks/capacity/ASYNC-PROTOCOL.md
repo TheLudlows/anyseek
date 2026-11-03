@@ -1,8 +1,9 @@
 # Final-build asynchronous comparison
 
-Run `async_compare.py` only after the final production implementation is fixed and
-its checks pass. Record the actual release binary hash and source revision. Do not
-run a previous anyseek revision. Raw data, databases, logs and downloaded binaries
+This harness compares one fixed AnySeek release with Meilisearch; it is not the
+before/after AnySeek optimization experiment described in the project roadmap.
+Run `async_compare.py` after the selected implementation's checks pass, recording
+the actual release binary hash and source revision. Raw data, databases, logs and downloaded binaries
 belong in a newly created directory outside the repository; preserve existing runs.
 
 The bounded experiment uses the same first 2,305 records of the verified
@@ -63,7 +64,7 @@ queries return empty results. The script retains all raw result IDs locally.
 Meilisearch has no equivalent per-index checkpoint in this harness; its successful
 task and process-reopen checks are reported separately.
 
-The approved local download is Meilisearch Community v1.56.0 from the project's
+The pinned comparison binary is Meilisearch Community v1.56.0 from the project's
 [official release](https://github.com/meilisearch/meilisearch/releases/tag/v1.56.0),
 asset `meilisearch-linux-amd64`, 357,300,520 bytes, SHA256
 `5a32e1d7a6a69e0ee5634a7456c421f59273d73f078b6f0d8f01384eafe79729`.
