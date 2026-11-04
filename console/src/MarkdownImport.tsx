@@ -1,12 +1,12 @@
 import { t } from "./i18n.ts";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { Collection } from "./types.ts";
 import { chunkMarkdown, markdownDocuments, type MarkdownChunk, type MarkdownMapping } from "./markdown.ts";
 import { message } from "./api.ts";
 import { Notice } from "./components.tsx";
 
-export function MarkdownImport({ collection, onSource, onReading }: {
-  collection: Collection; onSource: (source: string, bodyField?: string) => void; onReading: (reading: boolean) => void;
+export function MarkdownImport({ collection, onSource, onBodyFieldChange, onReading }: {
+  collection: Collection; onSource: (source: string) => void; onBodyFieldChange: (field: string) => void; onReading: (reading: boolean) => void;
 }) {
   const textFields = collection.schema.filter(f => !f.index_vector && ["Text", "String"].includes(f.field_type));
   const [mapping, setMapping] = useState<MarkdownMapping>({ body: textFields.find(f => f.field === "body")?.field || textFields.find(f => f.field !== "title")?.field || "", title: textFields.find(f => f.field === "title")?.field || "", source: textFields.find(f => f.field === "source")?.field || "", index: collection.schema.find(f => f.field === "chunk_index" && f.field_type === "Int")?.field || "" });
@@ -14,6 +14,7 @@ export function MarkdownImport({ collection, onSource, onReading }: {
   const [files, setFiles] = useState<string[]>([]);
   const [error, setError] = useState("");
   const [confirmed, setConfirmed] = useState(false);
+  useEffect(() => { onBodyFieldChange(mapping.body); }, [mapping.body, onBodyFieldChange]);
   async function readFiles(selected: FileList | null) {
     if (!selected?.length) return;
     onSource(""); setConfirmed(false); setChunks([]); setFiles([]); setError(""); onReading(true);
@@ -38,7 +39,7 @@ export function MarkdownImport({ collection, onSource, onReading }: {
     </label>
     <p className="field-help">{t("支持 UTF-8 文件，每次最多 20 个、合计 2 MiB。按标题、段落分块，目标约 4,000 字符；代码块和连续列表、表格不强行截断。外部链接与图片不会下载。")}</p>
     <div className="form-grid">
-      {([['body', t("正文目标字段（必选）")], ['title', t("文档标题")], ['source', t("来源文件名")], ['index', t("片段序号")]] as const).map(([key, label]) => <label key={key}>{label}<select value={mapping[key]} onChange={e => { setMapping({ ...mapping, [key]: e.target.value }); onSource(""); setConfirmed(false); }}>
+      {([['body', t("正文目标字段（必选）")], ['title', t("文档标题")], ['source', t("来源文件名")], ['index', t("片段序号")]] as const).map(([key, label]) => <label key={key}>{label}<select aria-label={label} value={mapping[key]} onChange={e => { setMapping({ ...mapping, [key]: e.target.value }); onSource(""); setConfirmed(false); }}>
         <option value="">{key === 'body' ? t("请选择") : t("不保存")}</option>
         {(key === 'index' ? collection.schema.filter(f => f.field_type === 'Int' && !f.index_vector) : textFields).map(f => <option key={f.field} value={f.field}>{f.field}</option>)}
       </select></label>)}
@@ -52,7 +53,7 @@ export function MarkdownImport({ collection, onSource, onReading }: {
         <p className="field-help">{chunk.section || chunk.title}</p><pre>{chunk.content}</pre>
       </details>)}</div>
       <button type="button" className="secondary" onClick={() => {
-        try { onSource(JSON.stringify(markdownDocuments(chunks, mapping)), mapping.body); setConfirmed(true); setError(""); }
+        try { onSource(JSON.stringify(markdownDocuments(chunks, mapping))); setConfirmed(true); setError(""); }
         catch (e) { onSource(""); setConfirmed(false); setError(message(e)); }
       }}>{t("确认字段与分块预览")}</button>
       {confirmed && <p className="field-help">{t("预览已确认，可以写入集合。")}</p>}

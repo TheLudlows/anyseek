@@ -14,6 +14,13 @@ const operation = () => ({
   epoch: Math.floor(Date.now() / 86400000),
   nonce: randomBytes(16).toString("hex"),
 });
+const openImport = async (page: Page) => {
+  await page.getByRole("navigation", { name: "主导航" }).getByRole("button", { name: "数据", exact: true }).click();
+  await page.locator(".page-heading").getByRole("button", { name: "导入数据", exact: true }).click();
+};
+const closeImport = async (page: Page) => {
+  await page.getByRole("dialog").locator(".modal-actions").getByRole("button", { name: "关闭", exact: true }).click();
+};
 const call = async (path: string, body?: object) => {
   const response = await fetch("http://127.0.0.1:18180/api/v1/" + path, {
     method: body ? "POST" : "GET",
@@ -405,13 +412,14 @@ test("browser-only model configuration, embedded ingest and natural language vec
   await page.getByRole("button", { name: "测试连接", exact: true }).click();
   await expect(page.getByText("连接成功，返回 3 维向量。请保存配置后使用。", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "保存公共模型配置", exact: true }).click();
-  await page.getByRole("button", { name: "保存集合字段映射", exact: true }).click();
+  await expect(page.getByRole("button", { name: "保存集合字段映射", exact: true })).toHaveCount(0);
   expect(await page.evaluate(() => JSON.stringify(localStorage))).not.toContain(modelKey);
   await page.reload();
   await expect(page.getByLabel("模型 API Key（可选）", { exact: true })).toHaveValue(modelKey);
   await page.getByRole("navigation", { name: "主导航" }).getByRole("button", { name: "数据", exact: true }).click();
   await page.locator(".page-heading").filter({ has: page.getByRole("heading", { name: /^数据 · /, level: 1 }) }).getByRole("button", { name: "导入数据", exact: true }).click();
   await expect(page.getByLabel("自动生成缺失的向量", { exact: true })).toBeChecked();
+  await page.getByRole("button", { name: "保存集合字段映射", exact: true }).click();
   const source = "[" + Array.from({ length: 11 }, (_, i) => `{"body":"embedding document ${i}","large":9223372036854775807}`).join(",") + "]";
   await page.getByLabel("导入 JSON", { exact: true }).fill(source);
   const ingests: string[] = [];
@@ -482,14 +490,87 @@ test("browser-only model configuration, embedded ingest and natural language vec
   await expect(page.getByText("当前查询向量 · 3 维", { exact: true })).toBeVisible();
   expect(modelCalls).toBe(4);
   expect(queryCalls).toBe(2);
-  await page.getByRole("button", { name: "连接与管理", exact: true }).click();
+  await openImport(page);
   await page.getByRole("button", { name: "清除集合字段映射", exact: true }).click();
+  await closeImport(page);
   // Collection cleanup must preserve the service and its shared credential.
   expect(await page.evaluate(() => Object.keys(localStorage).filter((key) => key.endsWith(".service")))).toHaveLength(1);
   expect(await page.evaluate(() => JSON.stringify(sessionStorage))).toContain(modelKey);
+  await page.getByRole("button", { name: "连接与管理", exact: true }).click();
   await page.getByRole("button", { name: "清除公共模型配置", exact: true }).click();
   expect(await page.evaluate(() => Object.keys(localStorage).filter((key) => key.startsWith("anyseek.embedding.")))).toEqual([]);
   expect(await page.evaluate(() => JSON.stringify(sessionStorage))).not.toContain(modelKey);
+});
+
+test("Markdown maps and remembers embedding fields inside the import dialog", async ({ page }) => {
+  const id = "markdown_import_mapping";
+  const endpoint = "https://markdown-model.example.test/v1/embeddings";
+  await call("index", {
+    operation_id: operation(), collection_id: id,
+    config: { index_name: id, schema: [
+      { field: "body", field_type: "String" },
+      { field: "content", field_type: "String" },
+      { field: "vector", field_type: "Json", index_vector: true },
+    ], vector: { dimensions: 3 } },
+  });
+  let modelCalls = 0;
+  await page.route(endpoint, async route => {
+    if (route.request().method() === "OPTIONS") {
+      await route.fulfill({ status: 204, headers: { "access-control-allow-origin": "*", "access-control-allow-headers": "content-type", "access-control-allow-methods": "POST" } });
+      return;
+    }
+    const body = route.request().postDataJSON();
+    expect(body.model).toBe("markdown-model");
+    expect(body.input[0]).toContain("Import from Markdown");
+    modelCalls++;
+    await route.fulfill({ contentType: "application/json", headers: { "access-control-allow-origin": "*" }, body: JSON.stringify({ data: body.input.map((_: string, index: number) => ({ index, embedding: [1, 0, 0] })) }) });
+  });
+  await login(page);
+  await page.getByLabel("当前集合", { exact: true }).selectOption(id);
+  await openImport(page);
+  await expect(page.getByLabel("自动生成缺失的向量", { exact: true })).toBeDisabled();
+  await expect(page.getByLabel("向量目标字段", { exact: true })).toHaveCount(0);
+  await closeImport(page);
+  await page.getByRole("button", { name: "连接与管理", exact: true }).click();
+  await page.getByLabel("Embeddings API 地址", { exact: true }).fill(endpoint);
+  await page.getByLabel("模型名称", { exact: true }).fill("markdown-model");
+  await page.getByRole("button", { name: "保存公共模型配置", exact: true }).click();
+  await expect(page.getByRole("button", { name: "保存集合字段映射", exact: true })).toHaveCount(0);
+  await openImport(page);
+  await page.getByRole("button", { name: "Markdown 文档", exact: true }).click();
+  await expect(page.getByLabel("body", { exact: true })).toBeChecked();
+  await page.getByLabel("正文目标字段（必选）", { exact: true }).selectOption("content");
+  await expect(page.getByLabel("content", { exact: true })).toBeChecked();
+  await page.getByLabel("body", { exact: true }).uncheck();
+  await page.getByLabel("选择 Markdown 文档", { exact: true }).setInputFiles({
+    name: "guide.md", mimeType: "text/markdown", buffer: Buffer.from("# Guide\n\nImport from Markdown"),
+  });
+  await page.getByRole("button", { name: "确认字段与分块预览", exact: true }).click();
+  await page.getByLabel("自动生成缺失的向量", { exact: true }).uncheck();
+  await page.getByRole("button", { name: "写入集合", exact: true }).click();
+  await expect(page.getByRole("alert").filter({ hasText: "请配置下方集合字段映射" })).toBeVisible();
+  expect(modelCalls).toBe(0);
+  await page.getByLabel("自动生成缺失的向量", { exact: true }).check();
+  // No separate save is needed before writing.
+  await page.getByRole("button", { name: "写入集合", exact: true }).click();
+  await expect(page.getByText("已确认提交 1 条，索引正在异步更新。", { exact: true })).toBeVisible();
+  expect(modelCalls).toBe(1);
+  await closeImport(page);
+  await page.reload();
+  await openImport(page);
+  await expect(page.getByLabel("自动生成缺失的向量", { exact: true })).toBeChecked();
+  await expect(page.getByLabel("content", { exact: true })).toBeChecked();
+  await expect(page.getByLabel("body", { exact: true })).not.toBeChecked();
+  await expect(page.getByLabel("向量目标字段", { exact: true })).toHaveValue("vector");
+  await mkdir("test-results/screenshots", { recursive: true });
+  await page.screenshot({ path: "test-results/screenshots/import-embedding-mapping.png", fullPage: true, animations: "disabled" });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(page.getByRole("dialog")).toBeVisible();
+  await page.screenshot({ path: "test-results/screenshots/mobile-import-embedding-mapping.png", fullPage: true, animations: "disabled" });
+  const overflow = await page.evaluate(() => Array.from(document.querySelectorAll("dialog, .import-embedding-mapping, .import-embedding-mapping *"))
+    .filter(element => element.getBoundingClientRect().right > innerWidth)
+    .map(element => ({ tag: element.tagName, class: element.className, width: element.getBoundingClientRect().width })));
+  expect(overflow).toEqual([]);
 });
 
 test("shared embedding service is configured once and reused with independent collection mappings", async ({ page }) => {
@@ -520,15 +601,25 @@ test("shared embedding service is configured once and reused with independent co
   await expect(page.getByText("连接成功，返回 3 维向量。请保存配置后使用。", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "保存公共模型配置", exact: true }).click();
   const mappings: Record<string, string[]> = { knowledge_base: ["body"], support_cases: ["title", "body"] };
+  // Shared model settings must not enable embeddings for a lexical collection.
+  await openImport(page);
+  await expect(page.getByLabel("自动生成缺失的向量", { exact: true })).toHaveCount(0);
+  await page.getByLabel("导入 JSON", { exact: true }).fill('[{"title":"Lexical import","body":"Uses shared settings without embeddings"}]');
+  await page.getByRole("button", { name: "写入集合", exact: true }).click();
+  await expect(page.getByText("已确认写入 1 条，已持久化且可见。", { exact: true })).toBeVisible();
+  expect(modelCalls).toBe(1);
+  await closeImport(page);
   for (const [id, fields] of Object.entries(mappings)) {
     await page.getByLabel("当前集合", { exact: true }).selectOption(id);
     await page.getByRole("button", { name: "连接与管理", exact: true }).click();
     await expect(page.getByLabel("Embeddings API 地址", { exact: true })).toHaveValue(endpoint);
     await expect(page.getByLabel("模型名称", { exact: true })).toHaveValue("shared-model");
     await expect(page.getByLabel("模型 API Key（可选）", { exact: true })).toHaveValue(modelKey);
+    await openImport(page);
     for (const field of ["title", "body", "url"])
       await page.getByLabel(field, { exact: true }).setChecked(fields.includes(field));
     await page.getByRole("button", { name: "保存集合字段映射", exact: true }).click();
+    await closeImport(page);
     await page.getByRole("navigation", { name: "主导航" }).getByRole("button", { name: "检索调试", exact: true }).click();
     await page.getByRole("button", { name: "向量", exact: true }).click();
     await page.getByLabel("检索内容", { exact: true }).fill("shared service query");
@@ -539,6 +630,7 @@ test("shared embedding service is configured once and reused with independent co
   await page.getByRole("button", { name: "连接与管理", exact: true }).click();
   await page.getByLabel("模型名称", { exact: true }).fill("replacement-model");
   await page.getByRole("button", { name: "保存公共模型配置", exact: true }).click();
+  await openImport(page);
   await expect(page.getByText(`当前集合使用：shared-model · ${endpoint}`, { exact: true })).toBeVisible();
   const configs = await page.evaluate(() => Object.entries(localStorage)
     .filter(([key]) => key.startsWith("anyseek.embedding.")).map(([, value]) => JSON.parse(value)));
@@ -547,13 +639,23 @@ test("shared embedding service is configured once and reused with independent co
   expect(configs.filter(c => c.vectorField).map(c => c.model)).toEqual(["shared-model", "shared-model"]);
   expect(configs.find(c => !c.vectorField)?.model).toBe("replacement-model");
   await page.getByRole("button", { name: "清除集合字段映射", exact: true }).click();
+  await closeImport(page);
   await page.getByLabel("当前集合", { exact: true }).selectOption("knowledge_base");
-  await page.getByRole("button", { name: "连接与管理", exact: true }).click();
+  await openImport(page);
   await expect(page.getByText(`当前集合使用：shared-model · ${endpoint}`, { exact: true })).toBeVisible();
   await mkdir("test-results/screenshots", { recursive: true });
   await page.screenshot({ path: "test-results/screenshots/shared-embeddings.png", fullPage: true, animations: "disabled" });
   await page.reload();
-  await expect(page.getByLabel("模型名称", { exact: true })).toHaveValue("replacement-model");
+  await openImport(page);
   await expect(page.getByText(`当前集合使用：shared-model · ${endpoint}`, { exact: true })).toBeVisible();
+  await expect(page.getByLabel("body", { exact: true })).toBeChecked();
+  await expect(page.getByLabel("title", { exact: true })).not.toBeChecked();
+  await expect(page.getByRole("button", { name: "使用当前公共模型", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "使用当前公共模型", exact: true }).click();
+  await expect(page.getByText(`当前集合使用：replacement-model · ${endpoint}`, { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "保存集合字段映射", exact: true }).click();
+  await closeImport(page);
+  await page.getByRole("button", { name: "连接与管理", exact: true }).click();
+  await expect(page.getByLabel("模型名称", { exact: true })).toHaveValue("replacement-model");
   expect(await page.evaluate(() => JSON.stringify(localStorage))).not.toContain(modelKey);
 });

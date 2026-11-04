@@ -1,6 +1,6 @@
 import { t, getLocale } from "./i18n.ts";
 import { RuntimeStatus } from "./RuntimeStatus.tsx";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ArrowDownToLine,
   ArrowLeft,
@@ -25,7 +25,8 @@ import {
   type PendingWrites,
 } from "./writes.ts";
 import { loadPendingWrites, savePendingWrites, clearPendingWrites } from "./pending-writes.ts";
-import { loadEmbeddingConfig } from "./embeddings.ts";
+import { saveEmbeddingMapping } from "./embeddings.ts";
+import { ImportEmbeddingMapping, importEmbeddingConfig } from "./ImportEmbeddingMapping.tsx";
 import { generatePendingEmbeddings, prepareEmbeddedWrites } from "./embedding-writes.ts";
 import { SchemaTable } from "./SchemaTable.tsx";
 import { MarkdownImport } from "./MarkdownImport.tsx";
@@ -268,8 +269,13 @@ function ImportData({
   const [format, setFormat] = useState<"json" | "markdown">("json");
   const [source, setSource] = useState(""),
     [envelope, setEnvelope] = useState(false);
-  const [modelConfig] = useState(() => loadEmbeddingConfig(owner, collection.id));
+  const [modelConfig, setModelConfig] = useState(() => importEmbeddingConfig(owner, collection));
   const [autoEmbed, setAutoEmbed] = useState(!!modelConfig);
+  const bodyFieldChanged = useCallback((body: string) => {
+    setMarkdownBody(body);
+    if (body) setModelConfig(config => config && !config.textFields.includes(body)
+      ? { ...config, textFields: [...config.textFields, body] } : config);
+  }, []);
   const generation = useRef<AbortController | null>(null);
   useEffect(() => () => generation.current?.abort(), []);
   const [pending, setPending] = useState<PendingWrites | null>(() =>
@@ -291,12 +297,13 @@ function ImportData({
     try {
       if (!request) {
         if (format === "markdown" && collection.schema.some(f => f.index_vector)) {
-          if (!autoEmbed || !modelConfig) throw new Error(t("向量集合导入 Markdown 需要先配置并启用浏览器嵌入服务。"));
+          if (!autoEmbed || !modelConfig) throw new Error(t("请配置下方集合字段映射，并启用自动生成缺失的向量。"));
           if (!modelConfig.textFields.includes(markdownBody)) throw new Error(t("请在嵌入配置中选择正文目标字段，确保为正文片段生成向量。"));
           const docs = JSON.parse(source);
           if (docs.some((doc: Record<string, unknown>) => !modelConfig.textFields.some(field => typeof doc[field] === "string" && String(doc[field]).trim())))
             throw new Error(t("嵌入文本字段没有映射内容，请检查字段映射与嵌入配置。"));
         }
+        if (autoEmbed && !envelope && modelConfig) saveEmbeddingMapping(owner, collection, modelConfig);
         request = autoEmbed && !envelope && modelConfig
           ? prepareEmbeddedWrites(source, owner, collection, modelConfig)
           : {
@@ -354,7 +361,7 @@ function ImportData({
             <button type="button" className={format === "json" ? "active" : ""} onClick={() => { setFormat("json"); setSource(""); setError(""); }}>{t("JSON 数据")}</button>
             <button type="button" className={format === "markdown" ? "active" : ""} onClick={() => { setFormat("markdown"); setEnvelope(false); setSource(""); setError(""); }}>{t("Markdown 文档")}</button>
           </div>
-          {format === "markdown" && <MarkdownImport key={markdownRevision} collection={collection} onSource={(value, body) => { setSource(value); setMarkdownBody(body || ""); }} onReading={setBusy} />}
+          {format === "markdown" && <MarkdownImport key={markdownRevision} collection={collection} onSource={setSource} onBodyFieldChange={bodyFieldChanged} onReading={setBusy} />}
           {format === "json" && <div className="editor-toolbar">
             <label className="checkbox">
               <input
@@ -387,9 +394,9 @@ function ImportData({
           </div>}
           {collection.schema.some((f) => f.index_vector) && <div className="embedding-choice">
             <label className="checkbox"><input type="checkbox" checked={autoEmbed && !envelope} disabled={!modelConfig || envelope} onChange={(e) => setAutoEmbed(e.target.checked)} />{t("自动生成缺失的向量")}</label>
-            <p className="field-help">{envelope ? t("Record envelope 使用原始请求，不自动生成向量。") : modelConfig
-              ? t("{0} → {1} · {2}。所选文本将发送至 {3}，已有向量会保留。", modelConfig.textFields.join(" + "), modelConfig.vectorField, modelConfig.model, modelConfig.endpoint)
-              : t("在连接与管理中配置本集合的浏览器嵌入服务后，可直接导入文本。")}</p>
+            {(envelope || modelConfig) && <p className="field-help">{envelope ? t("Record envelope 使用原始请求，不自动生成向量。")
+              : t("所选文本和自然语言查询将发送至本集合保存的模型服务。")}</p>}
+            {!envelope && <ImportEmbeddingMapping owner={owner} collection={collection} config={modelConfig} onChange={setModelConfig} />}
           </div>}
           {format === "json" && <><label className="sr-only" htmlFor="document-json">
             {t("导入 JSON")}</label>

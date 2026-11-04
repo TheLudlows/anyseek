@@ -1990,6 +1990,9 @@ th {
 .embedding-fields { margin: 16px 0; }
 .embedding-choice { margin: 16px 0; padding: 14px; border: 1px solid var(--line); border-radius: 10px; }
 .embedding-choice p { overflow-wrap: anywhere; }
+.import-embedding-mapping { border-top: 1px solid var(--line); margin-top: 14px; padding-top: 14px; }
+.import-embedding-mapping h3 { margin: 0 0 10px; }
+.import-embedding-mapping .inline-actions { flex-wrap: wrap; margin-top: 12px; }
 
 .schema-summary .data-table td { white-space: nowrap; }
 

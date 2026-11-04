@@ -1,4 +1,11 @@
 export const english: Record<string, string> = {
+  "写入时自动记住字段映射，下次导入自动回填，向量检索复用同一模型。": "Field mappings are remembered when writing and restored for future imports. Vector search reuses the same model.",
+  "修改公共模型不会切换已有集合的模型。需要切换时，请在导入界面选择使用当前公共模型，并自行重新生成已有向量。": "Changing the shared model preserves existing collection models. To switch, select the current shared model in the import dialog and regenerate existing vectors.",
+  "公共模型已变更，本集合继续使用原模型。切换模型后需自行重新生成已有向量。": "The shared model has changed. This collection keeps its original model. Regenerate existing vectors if you switch models.",
+  "使用当前公共模型": "Use current shared model",
+  "请配置下方集合字段映射，并启用自动生成缺失的向量。": "Configure the collection field mapping below and enable automatic generation of missing vectors.",
+  "公共模型配置已保存。请在导入界面设置各集合的文本字段和向量字段。": "Shared model settings saved. Configure each collection's text and vector fields in the import dialog.",
+  "请先在连接与管理中保存公共模型配置，再回到导入界面设置字段映射。": "Save shared model settings in Connection & management, then return to the import dialog to map fields.",
   "控制台需要浏览器安全上下文，请使用 HTTPS 或本机 http://localhost / http://127.0.0.1 访问。": "The console requires a browser secure context. Use HTTPS or local http://localhost / http://127.0.0.1.",
   "来源与分块信息应作为 document 普通字段保存。": "Store source and chunk information as ordinary document fields.",
   "未提供": "Not provided",
