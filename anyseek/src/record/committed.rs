@@ -1,4 +1,4 @@
-//! Non-atomic committed ingestion; derived indexes remain asynchronous.
+//! Ordered non-atomic commits with synchronous or asynchronous index publication.
 use super::write::IndexDelivery;
 use super::*;
 
@@ -55,11 +55,12 @@ impl RecordPartition {
     ) -> Result<CommittedBatch, RecordError> {
         // The caller retains its requests for an unattempted-input fallback.
         // Admit this owned copy before cloning, using the document expansion
-        // bound. Execute retains the same charge after caller cancellation.
+        // bound. Transfer the lease with the copy so caller cancellation cannot
+        // release its charge while the owned executions are still queued.
         let bytes = request_bytes(requests)?;
-        let _copy = crate::storage::build_budget::reserve_memory((bytes as u64) * 32)
+        let copy_memory = crate::storage::build_budget::reserve_memory((bytes as u64) * 32)
             .map_err(|_| RecordError::Busy)?;
-        execute_with_delivery(self.clone(), requests.to_vec(), IndexDelivery::SynchronousBatch).await
+        execute_with_delivery(self.clone(), requests.to_vec(), IndexDelivery::SynchronousBatch, Some(copy_memory)).await
     }
     /// Inspect progress without advancing time or waiting for indexes.
     pub async fn committed_progress(&self) -> CommittedProgress {
@@ -283,18 +284,20 @@ pub(super) async fn execute(
     partition: RecordPartition,
     requests: Vec<RecordWrite>,
 ) -> Result<CommittedBatch, RecordError> {
-    execute_with_delivery(partition, requests, IndexDelivery::Asynchronous).await
+    execute_with_delivery(partition, requests, IndexDelivery::Asynchronous, None).await
 }
 async fn execute_with_delivery(
     partition: RecordPartition,
     requests: Vec<RecordWrite>,
     delivery: IndexDelivery,
+    copy_memory: Option<crate::storage::build_budget::MemoryLease>,
 ) -> Result<CommittedBatch, RecordError> {
     let bytes = request_bytes(&requests)?;
     let memory = crate::storage::build_budget::reserve_memory((bytes as u64)
         * if matches!(delivery, IndexDelivery::SynchronousBatch) { 32 } else { 1 })
         .map_err(|_| RecordError::Busy)?;
     crate::resources::spawn(async move {
+        let _copy_memory = copy_memory;
         let _memory = memory;
         let mut batch = CommittedBatch {
             results: requests
@@ -443,6 +446,16 @@ mod tests {
 
     #[tokio::test]
     async fn synchronous_batch_cancelled_waiter_keeps_publication_owned() {
+        // Memory accounting is process-wide; keep this check isolated from
+        // unrelated tests without adding another cancellation scenario.
+        if std::env::var_os("ANYSEEK_SYNC_BATCH_CANCEL_CHILD").is_none() {
+            let output=std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact","record::committed::tests::synchronous_batch_cancelled_waiter_keeps_publication_owned","--nocapture"])
+                .env("ANYSEEK_SYNC_BATCH_CANCEL_CHILD","1").output().unwrap();
+            assert!(output.status.success() && String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"),"{}\n{}",String::from_utf8_lossy(&output.stdout),String::from_utf8_lossy(&output.stderr));
+            return;
+        }
+        let initial_used = crate::storage::build_budget::used_memory_for_test();
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().join("records");
         let p = RecordPartition::create(&root, config()).await.unwrap();
@@ -451,14 +464,27 @@ mod tests {
         std::fs::write(&pause, b"pause").unwrap();
         let requests = vec![write("a", "a", "alpha", ExpectedVersion::Absent),
             write("b", "b", "alpha", ExpectedVersion::Absent)];
+        let bytes = request_bytes(&requests).unwrap() as u64;
+        let writer = p.writer.lock().await;
+        let used = crate::storage::build_budget::used_memory_for_test();
         let owner = p.clone();
         let commands = requests.clone();
         let task = tokio::spawn(async move { owner.write_batch(&commands).await });
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            while !root.join(".test-lexical-consumer-started").exists() { tokio::task::yield_now().await; }
+            // Partition, caller, outer execution and inner queued execution.
+            while Arc::strong_count(&p.inner) != 4 { tokio::task::yield_now().await; }
         }).await.unwrap();
+        let queued = crate::storage::build_budget::used_memory_for_test();
         task.abort();
         assert!(task.await.unwrap_err().is_cancelled());
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while Arc::strong_count(&p.inner) != 3 { tokio::task::yield_now().await; }
+        }).await.unwrap();
+        let cancelled = crate::storage::build_budget::used_memory_for_test();
+        drop(writer);
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !root.join(".test-lexical-consumer-started").exists() { tokio::task::yield_now().await; }
+        }).await.unwrap();
         assert!(p.writer.try_lock().is_err(), "owned writer must include index publication");
         assert!(matches!(output.deliver(|| ()), Err(RecordError::RecoveryRequired)));
         std::fs::remove_file(pause).unwrap();
@@ -469,6 +495,11 @@ mod tests {
             while Arc::strong_count(&p.inner) != 1 { tokio::task::yield_now().await; }
         }).await.unwrap();
         p.finish_service_shutdown().await.unwrap();
+        assert!(queued > used, "queued copies must be admitted");
+        assert_eq!(cancelled, queued, "cancelling a waiter must not release an owned request copy's lease (wire bytes: {bytes})");
+        drop(p);
+        assert_eq!(crate::storage::build_budget::used_memory_for_test(), initial_used,
+            "completed owners must return their memory leases");
     }
 
     #[tokio::test]

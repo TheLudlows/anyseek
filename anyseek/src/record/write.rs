@@ -385,8 +385,8 @@ impl RecordPartition {
                     partition.indexes.immediate(inner.state.seq);
                     return interrupted.map_or(Ok(batch), Err);
                 }
-                // Both index consumers proceed independently after canonical
-                // Record materialization releases its guard.
+                // Consumers do not acquire Inner. Synchronous batches join them
+                // under this guard; asynchronous ingestion returns after submission.
                 inner
                     .output
                     .write()
