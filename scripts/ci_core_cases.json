@@ -192,5 +192,8 @@
   "record::write::tests::planning_requires_the_same_partition_writer",
   "record::write::tests::planning_excludes_history_install_but_allows_read_time",
   "record::history::retention_tests::two_day_retention_keeps_active_epochs_and_requires_authenticated_floor",
-  "record::write::planning::tests::local_prefix_matches_full_state_counts_replays_and_wire_budget"
+  "record::write::planning::tests::local_prefix_matches_full_state_counts_replays_and_wire_budget",
+  "record::committed::tests::synchronous_batch_keeps_same_id_conditions_vector_patch_and_recovery",
+  "record::committed::tests::synchronous_batch_consumer_failure_keeps_unknown_scope_and_output_fence",
+  "record::committed::tests::synchronous_batch_cancelled_waiter_keeps_publication_owned"
 ]

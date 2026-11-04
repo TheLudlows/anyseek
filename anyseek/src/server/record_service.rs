@@ -20,7 +20,7 @@ use anyseek::{
     index::Clustering,
     record::{
         OperationId, RecordConfig, RecordCursor, RecordError, RecordPartition, RecordQuery,
-        RecordWrite, DataOutputPermit, S3CompatibleRecordConfig,
+        RecordWrite, DataOutputPermit, S3CompatibleRecordConfig, CommittedItem,
     },
     vector::Inference,
 };
@@ -1059,6 +1059,10 @@ async fn iterate(
 struct BatchRequest {
     writes: Vec<RecordWrite>,
 }
+fn stops_batch(error: &RecordError) -> bool {
+    matches!(error, RecordError::OutcomeUnknown(_) | RecordError::DurablePending(_)
+        | RecordError::RecoveryRequired | RecordError::Storage(_))
+}
 async fn batch(
     State(s): State<Arc<Service>>,
     headers: HeaderMap,
@@ -1090,17 +1094,59 @@ async fn batch(
         pause_authorized_for_test(&pause_collection).await?;
         let mut rows = Vec::new();
         let mut stopped = false;
-        for write in request.writes {
-            let operation_id = write.operation_id.clone();
-            if stopped { rows.push(json!({"operation_id":operation_id,"code":"not_attempted"})); continue; }
-            match p.write(write).await {
-                Ok(receipt) => rows.push(json!({"operation_id":operation_id,"receipt":receipt,"code":"applied","expires_at":operation_id.expires_at_unix_seconds()})),
-                Err(error) => {
-                    stopped = matches!(error, RecordError::OutcomeUnknown(_) | RecordError::DurablePending(_) | RecordError::RecoveryRequired | RecordError::Storage(_));
-                    let error = Error::from(error);
-                    rows.push(json!({"operation_id":operation_id,"code":error.1,"message":error.2,"status":error.0.as_u16()}));
+        let mut writes = request.writes.into_iter();
+        loop {
+            // Keep the public 100-input limit and use the existing 64-input
+            // kernel bound. This is still independent, non-atomic execution.
+            let chunk: Vec<_> = writes.by_ref().take(64).collect();
+            if chunk.is_empty() { break; }
+            if stopped {
+                for write in chunk { rows.push(json!({"operation_id":write.operation_id,"code":"not_attempted"})); }
+                continue;
+            }
+            let (items, stop) = if chunk.len() == 1 {
+                // Preserve the existing single-write path without queue overhead.
+                (vec![CommittedItem::NotAttempted], None)
+            } else { match p.write_batch(&chunk).await {
+                Ok(batch) => (batch.results, batch.stop),
+                // Group admission/size rejection did not attempt publication.
+                // Fall back to independent writes, preserving their own limits.
+                Err(error @ (RecordError::Busy | RecordError::Rejected(_))) => (
+                    chunk.iter().map(|_| CommittedItem::NotAttempted).collect(), Some(error)),
+                Err(error) => (chunk.iter().map(|_| CommittedItem::OutcomeUnknown).collect(), Some(error)),
+            }};
+            let interrupted = stop.as_ref().is_some_and(stops_batch);
+            let mut stop_reported = false;
+            for (write, item) in chunk.into_iter().zip(items) {
+                let operation_id = write.operation_id.clone();
+                let result = match item {
+                    CommittedItem::Committed(receipt) => Some(Ok(receipt)),
+                    CommittedItem::Rejected(error) => Some(Err(error)),
+                    CommittedItem::OutcomeUnknown => {
+                        stop_reported = true;
+                        Some(Err(stop.clone().unwrap_or_else(|| RecordError::OutcomeUnknown("batch execution exited".into()))))
+                    }
+                    CommittedItem::NotAttempted if interrupted && !stop_reported => {
+                        stop_reported = true;
+                        Some(Err(stop.clone().unwrap()))
+                    }
+                    CommittedItem::NotAttempted if stopped || interrupted => None,
+                    // A bounded Busy prefix must not prevent later independent
+                    // writes (e.g. deletion) from receiving their own decisions.
+                    // Only inputs known not to have attempted publication retry.
+                    CommittedItem::NotAttempted => Some(p.write(write).await),
+                };
+                match result {
+                    Some(Ok(receipt)) => rows.push(json!({"operation_id":operation_id,"receipt":receipt,"code":"applied","expires_at":operation_id.expires_at_unix_seconds()})),
+                    Some(Err(error)) => {
+                        stopped |= stops_batch(&error);
+                        let error = Error::from(error);
+                        rows.push(json!({"operation_id":operation_id,"code":error.1,"message":error.2,"status":error.0.as_u16()}));
+                    }
+                    None => rows.push(json!({"operation_id":operation_id,"code":"not_attempted"})),
                 }
             }
+            stopped |= interrupted;
         }
         Ok::<_, RecordError>(json!({"atomic":false,"results":rows}))
     }).await?;
@@ -2317,6 +2363,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn synchronous_http_batch_keeps_100_limit_rejections_and_visibility() {
+        let (service,path,headers)=setup().await;
+        let app=router(service.clone());
+        let key=headers["apikey"].to_str().unwrap();
+        let mut writes:Vec<_>=(0..100).map(|i|json!({"operation_id":OperationId::new(format!("sync-{i}")),
+            "record_id":format!("r{i}"),"expected":"Absent","document":{"body":"alpha"}})).collect();
+        writes[1]["record_id"]=json!("r0");
+        writes[2]["record_id"]=json!("r0");
+        writes[2]["expected"]=json!({"Match":1});
+        writes[2]["document"]=json!({"body":"beta"});
+        let body=json!({"writes":writes});
+        let (code,result)=tenant_api(&app,"POST","/api/v1/index/c/batch",key,Some(body.clone())).await;
+        assert_eq!(code,StatusCode::OK);
+        assert_eq!(result["results"].as_array().unwrap().len(),100);
+        assert_eq!(result["results"][1]["code"],"conflict");
+        for (i,row) in result["results"].as_array().unwrap().iter().enumerate() {
+            if i!=1 {assert_eq!(row["code"],"applied");}
+        }
+        assert_eq!(result["results"][2]["receipt"]["version"],2);
+        let (code,found)=tenant_api(&app,"POST","/api/v1/index/c/query",key,Some(json!({"query":"beta","length":10}))).await;
+        assert_eq!(code,StatusCode::OK);
+        assert_eq!(found["hits"].as_array().unwrap().len(),1);
+        let (_,progress)=tenant_api(&app,"GET","/api/v1/index/c/ingest",key,None).await;
+        assert_eq!((progress["committed_seq"].as_u64(),progress["lexical_seq"].as_u64(),progress["vector_seq"].as_u64()),(Some(99),Some(99),Some(99)));
+        let (_,replay)=tenant_api(&app,"POST","/api/v1/index/c/batch",key,Some(body)).await;
+        for i in 0..100 {
+            if i!=1 {assert_eq!(replay["results"][i]["receipt"],result["results"][i]["receipt"]);}
+        }
+        drop(app);
+        let mut shutdown=service.shutdown();
+        tokio::time::timeout(std::time::Duration::from_secs(15),shutdown.wait()).await.unwrap().unwrap();
+        std::fs::remove_dir_all(path).unwrap();
+    }
+    #[tokio::test]
     async fn committed_ingest_http_receipts_rejections_and_lookup() {
         use tower::ServiceExt;
         let (service,path,headers)=setup().await; let app=router(service.clone());
@@ -2410,7 +2490,7 @@ mod tests {
             assert!(output.status.success() && String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"),"{output:?}");
             return;
         }
-        let (service,path,_headers)=setup().await;
+        let (service,path,headers)=setup().await;
         let record=service.record("tenant","c").await.unwrap();
         let data=record.output_permit().unwrap();
         assert!(data.deliver(||()).is_ok());
@@ -2418,9 +2498,14 @@ mod tests {
             protected_data(Ok(json!({"body":"must not escape"})),Some(data.clone())).unwrap().into_body(),
             protected_data::<Value>(Err(bad("ordinary error")),Some(data.clone())).unwrap().into_body(),
         ];
-        let request=serde_json::from_value(json!({"operation_id":OperationId::new("service-fence-failure".into()),
-            "record_id":"r","expected":"Absent","document":{"body":"alpha"}})).unwrap();
-        assert_eq!(record.write(request).await.unwrap_err(),RecordError::DurablePending(1));
+        let request=json!({"writes":[
+            {"operation_id":OperationId::new("service-fence-failure".into()),"record_id":"r","expected":"Absent","document":{"body":"alpha"}},
+            {"operation_id":OperationId::new("service-fence-tail".into()),"record_id":"s","expected":"Absent","document":{"body":"beta"}}
+        ]});
+        let response=batch(State(service.clone()),headers,Path("c".into()),serde_json::to_vec(&request).unwrap().into()).await.unwrap();
+        let value:Value=serde_json::from_slice(&axum::body::to_bytes(response.into_body(),4096).await.unwrap()).unwrap();
+        assert_eq!(value["results"].as_array().unwrap().len(),2);
+        assert!(value["results"].as_array().unwrap().iter().all(|r|r["code"]=="durable_pending"));
         assert_eq!(data.deliver(||()),Err(RecordError::RecoveryRequired));
         assert!(matches!(record.output_permit(),Err(RecordError::RecoveryRequired)));
         assert!(protected_data(Ok(json!({"body":"must not escape"})),Some(data.clone())).is_err());
@@ -2428,7 +2513,7 @@ mod tests {
         for mut body in prepared_bodies {
             assert!(matches!(std::future::poll_fn(|cx|Pin::new(&mut body).poll_frame(cx)).await,Some(Err(_))));
         }
-        for error in [RecordError::DurablePending(1),RecordError::OutcomeUnknown("injected".into())] {
+        for error in [RecordError::DurablePending(2),RecordError::OutcomeUnknown("injected".into())] {
             let response=protected_data::<Value>(Err(error.clone().into()),Some(data.clone())).unwrap();
             assert_eq!(response.status(),StatusCode::SERVICE_UNAVAILABLE);
             let value:Value=serde_json::from_slice(&axum::body::to_bytes(response.into_body(),4096).await.unwrap()).unwrap();

@@ -127,7 +127,9 @@ jobs:
         run: cargo build -p anyseek --locked
       - name: Committed asynchronous-index HTTP and authorization regressions
         if: matrix.lane == 'core'
-        run: cargo test -p anyseek --locked --bin anyseek_server committed_ingest_
+        run: |
+          cargo test -p anyseek --locked --bin anyseek_server committed_ingest_
+          cargo test -p anyseek --locked --bin anyseek_server record_service::tests::synchronous_http_batch_keeps_100_limit_rejections_and_visibility -- --exact
       - name: Service persistence fences and shutdown ownership
         if: matrix.lane == 'core'
         shell: bash
