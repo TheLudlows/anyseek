@@ -37,6 +37,7 @@ use std::{
 use tokio::sync::{Mutex, RwLock, Semaphore};
 
 tokio::task_local! { static AUTHENTICATED: String; }
+tokio::task_local! { static REQUEST_DEADLINE: tokio::time::Instant; }
 #[derive(Clone)]
 struct Principal(String);
 
@@ -153,30 +154,66 @@ async fn owned<T: Send + 'static>(
 struct DataBody {
     bytes: Option<Bytes>,
     data: Option<DataOutputPermit>,
+    pending: Option<(anyseek::resources::Task<Result<(), Error>>, futures::future::AbortHandle)>,
+    deadline: Option<tokio::time::Instant>,
+}
+impl Drop for DataBody {
+    fn drop(&mut self) {
+        if let Some((_, abort)) = &self.pending { abort.abort(); }
+    }
 }
 impl http_body::Body for DataBody {
     type Data = Bytes;
     type Error = std::io::Error;
     fn poll_frame(
         mut self: Pin<&mut Self>,
-        _: &mut Context<'_>,
+        cx: &mut Context<'_>,
     ) -> Poll<Option<Result<http_body::Frame<Bytes>, std::io::Error>>> {
-        if self.bytes.is_none() {
-            return Poll::Ready(None);
-        }
-        let data = self.data.clone();
-        Poll::Ready(
-            match deliver( data.as_ref(), || self.bytes.take().map(http_body::Frame::data)) {
-                Ok(frame) => frame.map(Ok),
-                Err(e) => {
+        loop {
+            if let Some((waiter, _)) = self.pending.as_mut() {
+                let result = std::task::ready!(Pin::new(waiter).poll(cx));
+                self.pending = None;
+                if let Err(error) = result.map_err(storage).and_then(|result| result) {
                     self.bytes = None;
-                    Some(Err(std::io::Error::new(
-                        std::io::ErrorKind::PermissionDenied,
-                        e.2,
-                    )))
+                    let kind = if error.1 == "output_timeout" { std::io::ErrorKind::TimedOut } else { std::io::ErrorKind::PermissionDenied };
+                    return Poll::Ready(Some(Err(std::io::Error::new(kind, error.2))));
                 }
-            },
-        )
+            }
+            if self.bytes.is_none() { return Poll::Ready(None); }
+            let data = self.data.clone();
+            match deliver(data.as_ref(), || self.bytes.take().map(http_body::Frame::data)) {
+                Ok(frame) => return Poll::Ready(frame.map(Ok)),
+                Err(_) => {
+                    // A ready waiter can race the next publication. Bound the
+                    // entire retry loop, not just each individual mutex wait.
+                    if self.deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline) {
+                        self.bytes = None;
+                        return Poll::Ready(Some(Err(std::io::Error::new(std::io::ErrorKind::TimedOut,
+                            "output publication deadline exceeded"))));
+                    }
+                    // A body may not be polled again until the client is ready.
+                    // An independently polled waiter releases the mutex promptly;
+                    // never leave its reserved permit in a backpressured body.
+                    // Recheck the fence above at actual frame handoff, since a
+                    // later publication may start after this waiter completes.
+                    let (abort, registration) = futures::future::AbortHandle::new_pair();
+                    let deadline = self.deadline;
+                    let waiter = anyseek::resources::spawn_owned(async move {
+                        let wait = async {
+                            let publication = deliver_after_publication(data.as_ref(), || ());
+                            match deadline {
+                                Some(deadline) => tokio::time::timeout_at(deadline, publication).await
+                                    .unwrap_or_else(|_| Err(Error(StatusCode::SERVICE_UNAVAILABLE, "output_timeout", "output publication deadline exceeded".into()))),
+                                None => publication.await,
+                            }
+                        };
+                        futures::future::Abortable::new(wait, registration)
+                            .await.unwrap_or_else(|_| Err(storage("output wait cancelled")))
+                    });
+                    self.pending = Some((waiter, abort));
+                }
+            }
+        }
     }
 }
 fn response<T: Serialize>(value: T) -> Result<Response, Error> {
@@ -185,10 +222,20 @@ fn response<T: Serialize>(value: T) -> Result<Response, Error> {
 fn deliver<T>(data: Option<&DataOutputPermit>, handoff: impl FnOnce() -> T) -> Result<T, Error> {
     match data { Some(data)=>data.deliver(handoff).map_err(Error::from),None=>Ok(handoff()) }
 }
+async fn deliver_after_publication<T>(data: Option<&DataOutputPermit>, handoff: impl FnOnce() -> T) -> Result<T, Error> {
+    match data { Some(data)=>data.deliver_after_publication(handoff).await.map_err(Error::from),None=>Ok(handoff()) }
+}
 fn protected<T: Serialize>(result: Result<T, Error>) -> Result<Response, Error> {
     protected_data(result, None)
 }
 fn protected_data<T: Serialize>(
+    result: Result<T, Error>, data: Option<DataOutputPermit>,
+) -> Result<Response, Error> {
+    let response = encode_data_response(result, data)?;
+    let data = response.extensions().get::<DataOutputPermit>().cloned();
+    deliver(data.as_ref(), || response)
+}
+fn encode_data_response<T: Serialize>(
     result: Result<T, Error>, data: Option<DataOutputPermit>,
 ) -> Result<Response, Error> {
     // Persistence outcome errors contain no result body. Preserve their retry
@@ -216,7 +263,6 @@ fn protected_data<T: Serialize>(
                 .into_bytes(),
         ),
     };
-    deliver( data.as_ref(), || ())?;
     // The response may be produced by an owned task after the HTTP waiter has
     // gone away. Charge its bytes immediately, before the task-local is dropped.
     let bytes: Bytes = bytes.into();
@@ -231,6 +277,8 @@ fn protected_data<T: Serialize>(
         .body(Body::new(DataBody {
             bytes: Some(bytes),
             data: data.clone(),
+            pending: None,
+            deadline: REQUEST_DEADLINE.try_with(|deadline| *deadline).ok(),
         }))
         .unwrap();
     if let Some(data) = data { response.extensions_mut().insert(data); }
@@ -1727,7 +1775,7 @@ async fn query(
     let request: SearchRequestObject = parse(&bytes)?;
     let key = s.authenticate(&headers).await?;
     let p = s.record(&key, &id).await?;
-    let data = p.output_permit()?;
+    let data = p.output_permit_after_publication().await?;
     let mode = request.search_mode(s.default_nprobe).map_err(bad)?;
     if request.query_vector.is_none() && request.similarity_threshold.is_some() {
         return Err(bad("similarity_threshold requires query_vector"));
@@ -1750,7 +1798,8 @@ async fn query(
             evaluation_time_ms:result.evaluation_time_ms, statistics:result.statistics,
         })
     }).await?;
-    protected_data(result, Some(data))
+    let response = encode_data_response(result, Some(data.clone()))?;
+    deliver_after_publication(Some(&data), || response).await
 }
 
 #[derive(Serialize)]
@@ -1773,7 +1822,7 @@ struct QueryResponse {
 async fn delivery_gate(request: axum::extract::Request, next: axum::middleware::Next) -> Response {
     let response = next.run(request).await;
     let data = response.extensions().get::<DataOutputPermit>().cloned();
-    match deliver(data.as_ref(), || response) { Ok(response)=>response, Err(error)=>error.into_response() }
+    match deliver_after_publication(data.as_ref(), || response).await { Ok(response)=>response, Err(error)=>error.into_response() }
 
 }
 struct AdmissionBody {
@@ -1790,7 +1839,15 @@ impl http_body::Body for AdmissionBody {
     ) -> Poll<Option<Result<http_body::Frame<Bytes>, Self::Error>>> {
         let scope = self.scope.clone();
         let activity = self._activity.clone();
-        Pin::new(&mut self.inner).poll_frame(cx).map(|frame| frame.map(|frame| frame.map(|frame| frame.map_data(|bytes| {
+        // A publication waiter spawned by DataBody must inherit the admitted
+        // activity and budget even when hyper polls outside the handler task.
+        let frame = {
+            let polling = std::future::poll_fn(|cx| Pin::new(&mut self.inner).poll_frame(cx));
+            let contextual = activity.clone().run(scope.clone().run(polling));
+            tokio::pin!(contextual);
+            contextual.poll(cx)
+        };
+        frame.map(|frame| frame.map(|frame| frame.map(|frame| frame.map_data(|bytes| {
             Bytes::from_owner(admission::OutputBytes { bytes, _scope: scope, _activity: Some(activity) })
         }))))
     }
@@ -1846,7 +1903,7 @@ async fn request_admitted(
         }
     };
     let response =
-        match tokio::time::timeout_at(deadline, scope.clone().run(run)).await {
+        match tokio::time::timeout_at(deadline, scope.clone().run(REQUEST_DEADLINE.scope(deadline, run))).await {
             Ok(response) => response,
             Err(_) => Error(
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -1901,13 +1958,19 @@ pub(crate) fn router(service: Arc<Service>) -> Router {
             "/api/v1/catalog/operation/{epoch}/{nonce}",
             get(catalog_operation),
         );
-    app.fallback(|| async { not_found() })
+    service_layers(app.fallback(|| async { not_found() }), service)
+}
+
+fn service_layers(app: Router<Arc<Service>>, service: Arc<Service>) -> Router {
+    app
         .layer(DefaultBodyLimit::max(MAX_BODY))
+        // Header publication waiting belongs to the admitted request's original
+        // deadline, resource scope and lifecycle, not an unbounded outer layer.
+        .layer(axum::middleware::from_fn(delivery_gate))
         .layer(axum::middleware::from_fn_with_state(
             service.clone(),
             request_guard,
         ))
-        .layer(axum::middleware::from_fn(delivery_gate))
         .with_state(service)
 }
 
@@ -2513,7 +2576,7 @@ mod tests {
         assert!(matches!(count,1|2));
         let (service,path,headers)=setup().await;
         let record=service.record("tenant","c").await.unwrap();
-        let data=record.output_permit().unwrap();
+        let data=record.output_permit_after_publication().await.unwrap();
         assert!(data.deliver(||()).is_ok());
         let prepared_bodies=[
             protected_data(Ok(json!({"body":"must not escape"})),Some(data.clone())).unwrap().into_body(),
@@ -2529,6 +2592,8 @@ mod tests {
         assert_eq!(value["results"].as_array().unwrap().len(),count);
         assert!(value["results"].as_array().unwrap().iter().all(|r|r["code"]=="durable_pending"));
         assert_eq!(data.deliver(||()),Err(RecordError::RecoveryRequired));
+        assert!(matches!(record.output_permit_after_publication().await,Err(RecordError::RecoveryRequired)));
+        assert_eq!(data.deliver_after_publication(||()).await,Err(RecordError::RecoveryRequired));
         assert!(matches!(record.output_permit(),Err(RecordError::RecoveryRequired)));
         assert!(protected_data(Ok(json!({"body":"must not escape"})),Some(data.clone())).is_err());
         assert!(protected_data::<Value>(Err(bad("ordinary error")),Some(data.clone())).is_err());
@@ -2544,6 +2609,145 @@ mod tests {
             assert!(matches!(std::future::poll_fn(|cx|Pin::new(&mut body).poll_frame(cx)).await,Some(Ok(_))));
         }
         drop(record);drop(service);std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[cfg(feature = "fault-injection")]
+    #[tokio::test]
+    async fn service_query_headers_and_body_wait_for_publication() {
+        use tower::ServiceExt;
+        use http_body::Body as _;
+        let (service, path, headers) = setup().await;
+        let entry = service.catalog.collection_entry("tenant", "c").await.unwrap();
+        let root = path.join(entry.directory());
+        let record = service.record("tenant", "c").await.unwrap();
+        let app = router(service.clone());
+        let make_query = || axum::http::Request::builder().method("POST").uri("/api/v1/index/c/query")
+            .header("apikey", headers["apikey"].clone()).header("content-type", "application/json")
+            .body(Body::from(r#"{"query":"alpha"}"#)).unwrap();
+        let prepared = app.clone().oneshot(make_query()).await.unwrap();
+        let mut body = prepared.into_body();
+        let mut abandoned = app.clone().oneshot(make_query()).await.unwrap().into_body();
+        let pause = root.join(".test-lexical-consumer-pause");
+        std::fs::write(&pause, b"pause").unwrap();
+        let owner = record.clone();
+        let writer = tokio::spawn(async move {
+            owner.write_batch(&serde_json::from_value::<Vec<RecordWrite>>(json!([
+                {"operation_id":OperationId::new("wait-a".into()),"record_id":"a","expected":"Absent","document":{"body":"alpha"}},
+                {"operation_id":OperationId::new("wait-b".into()),"record_id":"b","expected":"Absent","document":{"body":"alpha"}}
+            ])).unwrap()).await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !root.join(".test-lexical-consumer-started").exists() { tokio::task::yield_now().await; }
+        }).await.unwrap();
+        assert!(tokio::time::timeout(std::time::Duration::from_millis(20),
+            std::future::poll_fn(|cx|Pin::new(&mut body).poll_frame(cx))).await.is_err());
+        assert!(tokio::time::timeout(std::time::Duration::from_millis(20),
+            std::future::poll_fn(|cx|Pin::new(&mut abandoned).poll_frame(cx))).await.is_err());
+        drop(abandoned);
+        assert!(!writer.is_finished());
+        let mut reader = tokio::spawn(app.oneshot(make_query()));
+        assert!(tokio::time::timeout(std::time::Duration::from_millis(20), &mut reader).await.is_err());
+        std::fs::remove_file(pause).unwrap();
+        assert!(tokio::time::timeout(std::time::Duration::from_secs(5), writer).await.unwrap().unwrap().unwrap().stop.is_none(),
+            "an unpolled body must not retain the publication mutex");
+        // The old complete response is allowed after successful publication;
+        // a new response observes the two newly published records.
+        assert!(std::future::poll_fn(|cx|Pin::new(&mut body).poll_frame(cx)).await.unwrap().is_ok());
+        assert!(std::future::poll_fn(|cx|Pin::new(&mut body).poll_frame(cx)).await.is_none());
+        let response = reader.await.unwrap().unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let value: Value = serde_json::from_slice(&axum::body::to_bytes(response.into_body(), MAX_RESPONSE).await.unwrap()).unwrap();
+        assert_eq!(value["count"], 2);
+        drop(body); drop(record);
+        service.shutdown().wait().await.unwrap();
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[cfg(feature = "fault-injection")]
+    #[tokio::test]
+    async fn service_publication_waits_share_original_request_deadline() {
+        use tower::ServiceExt;
+        use http_body::Body as _;
+        use std::error::Error as _;
+        use std::time::Duration;
+        for stage in ["header", "body", "late-body"] {
+            let (mut service, path, headers) = setup().await;
+            Arc::get_mut(&mut service).unwrap().request_timeout = Duration::from_millis(50);
+            let entry = service.catalog.collection_entry("tenant", "c").await.unwrap();
+            let root = path.join(entry.directory());
+            let record = service.record("tenant", "c").await.unwrap();
+            let data = record.output_permit_after_publication().await.unwrap();
+            let entered = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let app = if stage == "header" {
+                let entered = entered.clone();
+                // Return an already captured result while publication is paused.
+                // This isolates the header gate from handler/engine waiting and
+                // uses exactly the production middleware stack.
+                service_layers(Router::new().route("/api/v1/index/{id}/query", post(move || {
+                    let data = data.clone();
+                    let entered = entered.clone();
+                    async move {
+                        entered.store(true, std::sync::atomic::Ordering::Release);
+                        encode_data_response(Ok(json!({"body":"must not escape"})), Some(data)).unwrap()
+                    }
+                })), service.clone())
+            } else { router(service.clone()) };
+            let make_query = || axum::http::Request::builder().method("POST").uri("/api/v1/index/c/query")
+                .header("apikey", headers["apikey"].clone()).header("content-type", "application/json")
+                .body(Body::from(r#"{"query":"alpha"}"#)).unwrap();
+            let mut body = if stage != "header" {
+                Some(app.clone().oneshot(make_query()).await.unwrap().into_body())
+            } else { None };
+            let pause = root.join(".test-lexical-consumer-pause");
+            std::fs::write(&pause, b"pause").unwrap();
+            let owner = record.clone();
+            let writer = tokio::spawn(async move {
+                owner.write_batch(&serde_json::from_value::<Vec<RecordWrite>>(json!([
+                    {"operation_id":OperationId::new("deadline-a".into()),"record_id":"a","expected":"Absent","document":{"body":"alpha"}},
+                    {"operation_id":OperationId::new("deadline-b".into()),"record_id":"b","expected":"Absent","document":{"body":"alpha"}}
+                ])).unwrap()).await
+            });
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while !root.join(".test-lexical-consumer-started").exists() { tokio::task::yield_now().await; }
+            }).await.unwrap();
+            if stage == "header" {
+                let response = tokio::time::timeout(Duration::from_millis(500), app.clone().oneshot(make_query())).await.unwrap().unwrap();
+                assert!(entered.load(std::sync::atomic::Ordering::Acquire));
+                assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+                let value: Value = serde_json::from_slice(&axum::body::to_bytes(response.into_body(), MAX_RESPONSE).await.unwrap()).unwrap();
+                assert_eq!(value["code"], "outcome_unknown");
+            } else {
+                let body = body.as_mut().unwrap();
+                let error = if stage == "late-body" {
+                    tokio::time::sleep(Duration::from_millis(60)).await;
+                    // No new budget may start when hyper first polls the body.
+                    match futures::poll!(std::future::poll_fn(|cx| Pin::new(&mut *body).poll_frame(cx))) {
+                        Poll::Ready(Some(Err(error))) => error,
+                        _ => panic!("expired publication wait must fail on the first poll"),
+                    }
+                } else {
+                    tokio::time::timeout(Duration::from_millis(500),
+                        std::future::poll_fn(|cx| Pin::new(&mut *body).poll_frame(cx))).await.unwrap().unwrap().unwrap_err()
+                };
+                let mut source: &(dyn std::error::Error + 'static) = &error;
+                let io_error = loop {
+                    if let Some(error) = source.downcast_ref::<std::io::Error>() { break error; }
+                    source = source.source().expect("transport error must retain its I/O cause");
+                };
+                assert_eq!(io_error.kind(), std::io::ErrorKind::TimedOut);
+                assert!(std::future::poll_fn(|cx| Pin::new(&mut *body).poll_frame(cx)).await.is_none());
+            }
+            drop(body);
+            assert!(!writer.is_finished(), "response timeout must not cancel the durable writer");
+            std::fs::remove_file(pause).unwrap();
+            assert!(tokio::time::timeout(Duration::from_secs(5), writer).await.unwrap().unwrap().unwrap().stop.is_none());
+            let progress = record.committed_progress().await;
+            assert_eq!(progress.committed_seq, Some(2));
+            assert!(!progress.recovery_required && progress.index_error.is_none());
+            drop(record); drop(app);
+            tokio::time::timeout(Duration::from_secs(5), service.shutdown().wait()).await.unwrap().unwrap();
+            std::fs::remove_dir_all(path).unwrap();
+        }
     }
 
     #[tokio::test]

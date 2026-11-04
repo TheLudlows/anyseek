@@ -1,4 +1,6 @@
 [
+  "record::output::tests::transport_output_waits_for_publication_and_cancellation_does_not_cancel_writer",
+  "record::output::tests::transport_output_rejects_failed_publication_and_old_permit_after_recovery",
   "resources::lifecycle::tests::stopping_keeps_required_children_and_detached_output_owned",
   "resources::lifecycle::tests::cancelled_waiter_does_not_release_blocking_work",
   "record::maintenance::pending::tests::shutdown_stops_deferred_maintenance_without_releasing_an_active_owner",
