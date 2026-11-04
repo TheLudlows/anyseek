@@ -10,10 +10,24 @@ def operation():
     return {'epoch':int(time.time()//86400),'nonce':uuid.uuid4().hex}
 
 def main():
-    parser=argparse.ArgumentParser();parser.add_argument('--server',required=True);parser.add_argument('--startup-timeout',type=float,default=15.0,help='local service readiness deadline in seconds (cold S3 uses at least 120)');parser.add_argument('--faults',action='store_true');parser.add_argument('--cold-restarts',action='store_true');parser.add_argument('--section',choices=['base','temporal','history','indexer','authorization','ingest']);args=parser.parse_args()
+    parser=argparse.ArgumentParser();parser.add_argument('--server',required=True);parser.add_argument('--startup-timeout',type=float,default=15.0,help='local service readiness deadline in seconds (cold S3 uses at least 120)');parser.add_argument('--faults',action='store_true');parser.add_argument('--cold-restarts',action='store_true');parser.add_argument('--section',choices=['startup','base','temporal','history','indexer','authorization','ingest']);args=parser.parse_args()
+    if args.section == 'startup':
+        os.environ['ANYSEEK_STORAGE_BACKEND'] = 'local'
     binary=str(pathlib.Path(args.server).resolve())
     with tempfile.TemporaryDirectory(prefix='anyseek-service-', dir=os.environ.get('ANYSEEK_TEST_ROOT')) as tmp:
         root=pathlib.Path(tmp)/'data'
+        if args.section == 'startup':
+            clean_env = {k:v for k,v in os.environ.items() if k != 'MASTER_KEY_SECRET'}
+            for secret in [None, '', ' \t\n']:
+                env = clean_env if secret is None else {**clean_env, 'MASTER_KEY_SECRET':secret}
+                result = subprocess.run([binary, f'index_path={root}'], env=env, capture_output=True, text=True, timeout=15)
+                assert result.returncode == 2 and 'MASTER_KEY_SECRET' in result.stderr
+                assert not root.exists(), 'invalid configuration created storage'
+            for secret in ['1234', ' legacy secret ', 'private-startup-secret']:
+                result = subprocess.run([binary, f'index_path={root}', 'print_master_key=true'], env={**clean_env, 'MASTER_KEY_SECRET':secret}, capture_output=True, text=True, timeout=15)
+                assert result.returncode == 0 and not result.stderr
+                assert result.stdout.strip() == base64.b64encode(hashlib.sha256(secret.encode()).digest()).decode()
+                assert not root.exists(), 'credential command opened storage'
         sock=socket.socket();sock.bind(('127.0.0.1',0));port=sock.getsockname()[1];sock.close()
         base=f'http://127.0.0.1:{port}'
         master=base64.b64encode(hashlib.sha256(b'issue57-service-test').digest()).decode()
@@ -96,6 +110,15 @@ def main():
             start()
             call('POST','/api/v1/tenants',{'operation_id':operation(),'tenant_id':'test'})
             call('POST','/api/v1/apikey',{'operation_id':operation(),'key_id':'tenant-default','tenant_id':'test','apikey_base64':tenant_key})
+            if args.section == 'startup':
+                call('GET','/api/v1/apikey')
+                restart()
+                call('GET','/api/v1/apikey')
+                log.flush(); log.seek(0); startup_log = log.read()
+                for sensitive in ['issue57-service-test', master, tenant_key, 'Master API key:']:
+                    assert sensitive not in startup_log, 'startup log exposed credentials'
+                print('PASS startup rejects missing/blank secrets, explicit derivation, silent credentials, tenant key after restart', flush=True)
+                return
             if args.section and args.section!='base':
                 section(args.section)
                 return
