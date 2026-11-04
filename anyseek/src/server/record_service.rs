@@ -1159,11 +1159,11 @@ async fn batch(
         pause_authorized_for_test(&pause_collection).await?;
         let mut rows = Vec::new();
         let mut stopped = false;
-        let mut writes = request.writes.into_iter();
+        let mut writes = std::collections::VecDeque::from(request.writes);
         loop {
             // Keep the public 100-input limit and use the existing 64-input
             // kernel bound. This is still independent, non-atomic execution.
-            let chunk: Vec<_> = writes.by_ref().take(64).collect();
+            let chunk: Vec<_> = writes.drain(..writes.len().min(64)).collect();
             if chunk.is_empty() { break; }
             if stopped {
                 for write in chunk { rows.push(json!({"operation_id":write.operation_id,"code":"not_attempted"})); }
@@ -1181,9 +1181,12 @@ async fn batch(
                 Err(error) => (chunk.iter().map(|_| CommittedItem::OutcomeUnknown).collect(), Some(error)),
             }};
             let interrupted = stop.as_ref().is_some_and(stops_batch);
+            let regroup = matches!(stop, Some(RecordError::Busy));
             let mut stop_reported = false;
-            for (write, item) in chunk.into_iter().zip(items) {
+            let mut remaining: std::collections::VecDeque<_> = chunk.into_iter().zip(items).collect();
+            while let Some((write, item)) = remaining.pop_front() {
                 let operation_id = write.operation_id.clone();
+                let fallback = matches!(item, CommittedItem::NotAttempted);
                 let result = match item {
                     CommittedItem::Committed(receipt) => Some(Ok(receipt)),
                     CommittedItem::Rejected(error) => Some(Err(error)),
@@ -1201,6 +1204,7 @@ async fn batch(
                     // Only inputs known not to have attempted publication retry.
                     CommittedItem::NotAttempted => Some(p.write(write).await),
                 };
+                let progressed = result.as_ref().is_some_and(|result| result.is_ok());
                 match result {
                     Some(Ok(receipt)) => rows.push(json!({"operation_id":operation_id,"receipt":receipt,"code":"applied","expires_at":operation_id.expires_at_unix_seconds()})),
                     Some(Err(error)) => {
@@ -1209,6 +1213,15 @@ async fn batch(
                         rows.push(json!({"operation_id":operation_id,"code":error.1,"message":error.2,"status":error.0.as_u16()}));
                     }
                     None => rows.push(json!({"operation_id":operation_id,"code":"not_attempted"})),
+                }
+                // Crossing a native-tail boundary may admit only a prefix.
+                // One scalar decision guarantees forward progress; regroup only
+                // the explicitly unattempted suffix, preserving its order/IDs.
+                // Never resubmit unknown or already committed inputs.
+                if regroup && fallback && progressed && !stopped && !interrupted
+                    && remaining.iter().all(|(_, item)| matches!(item, CommittedItem::NotAttempted)) {
+                    for (write, _) in remaining.into_iter().rev() { writes.push_front(write); }
+                    break;
                 }
             }
             stopped |= interrupted;
@@ -2471,6 +2484,28 @@ mod tests {
         for i in 0..100 {
             if i!=1 {assert_eq!(replay["results"][i]["receipt"],result["results"][i]["receipt"]);}
         }
+        // Cross multiple native-tail boundaries while later inputs depend on
+        // earlier versions of the same identity. Regrouping must keep order and
+        // original receipts, including after both indexes publish the suffix.
+        let updates:Vec<_>=(0..100).map(|i|json!({"operation_id":OperationId::new(format!("boundary-{i}")),
+            "record_id":"boundary","expected":if i==0 {json!("Absent")} else {json!({"Match":i})},
+            "document":{"body":if i==99 {"terminal"} else {"superseded"}}})).collect();
+        let body=json!({"writes":updates});
+        let (code,updated)=tenant_api(&app,"POST","/api/v1/index/c/batch",key,Some(body.clone())).await;
+        assert_eq!(code,StatusCode::OK);
+        for (i,row) in updated["results"].as_array().unwrap().iter().enumerate() {
+            assert_eq!(row["code"],"applied");
+            assert_eq!(row["receipt"]["version"],i+1);
+            assert_eq!(row["receipt"]["seq"],100+i);
+        }
+        let (_,replayed)=tenant_api(&app,"POST","/api/v1/index/c/batch",key,Some(body)).await;
+        assert_eq!(replayed,updated);
+        for (query,count) in [("terminal",1),("superseded",0)] {
+            let (code,found)=tenant_api(&app,"POST","/api/v1/index/c/query",key,Some(json!({"query":query,"length":10,"count":true}))).await;
+            assert_eq!(code,StatusCode::OK);assert_eq!(found["count_total"],count);
+        }
+        let (_,progress)=tenant_api(&app,"GET","/api/v1/index/c/ingest",key,None).await;
+        assert_eq!((progress["committed_seq"].as_u64(),progress["lexical_seq"].as_u64(),progress["vector_seq"].as_u64()),(Some(199),Some(199),Some(199)));
         drop(app);
         let mut shutdown=service.shutdown();
         tokio::time::timeout(std::time::Duration::from_secs(15),shutdown.wait()).await.unwrap().unwrap();
