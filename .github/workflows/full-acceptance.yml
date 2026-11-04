@@ -16,7 +16,8 @@ concurrency:
 
 jobs:
   build-and-smoke:
-    runs-on: ubuntu-latest
+    # This job also installs the console's pinned Playwright 1.56.1 browsers.
+    runs-on: ubuntu-24.04
     timeout-minutes: 120
     env:
       CARGO_TERM_COLOR: always
