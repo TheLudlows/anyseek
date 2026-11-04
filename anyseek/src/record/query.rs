@@ -601,7 +601,12 @@ mod tests {
             })
         };
         entered(&root, gate).await;
-        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        // Check the mutex directly: durable commit/native flush time is not a
+        // mutex latency assertion. Initial consumers have already been drained.
+        drop(p.inner.try_lock().expect("paused scoring must not own the Record mutex"));
+        // Publication must still complete within the existing 20-second query
+        // pause window, before releasing the query or checking its newer view.
+        tokio::time::timeout(std::time::Duration::from_secs(20), async {
             p
                 .commit_writes(vec![write("second", "b", "alpha", ExpectedVersion::Absent)])
                 .await
@@ -609,7 +614,7 @@ mod tests {
             p.inner.lock().await.index.drain_indexes().await.unwrap();
         })
         .await
-        .expect("scoring must not own the Record mutex");
+        .expect("write and index publication must finish while scoring is paused");
         std::fs::remove_file(root.join(gate)).unwrap();
         let result = pending.await.unwrap().unwrap();
         assert_eq!(result.visible_seq, 2);
