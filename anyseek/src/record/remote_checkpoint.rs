@@ -169,12 +169,11 @@ impl RemotePersistence {
         }
         let mut cut=head.clone();cut.committed_seq=index.indexed_seq;cut.indexed_seq=index.checkpoint_seq;cut.wal_tip=index.wal_tip.clone();
         let tail=crate::storage::object_log::load_committed_entries_after(&self.store.uncached(),&cut,index.checkpoint_seq,self.max_tail_blocks,self.max_tail_bytes).await.map_err(storage)?;
-        let mut state=base.try_clone()?;let mut admitted=state_proof::length(&state)?;
+        let mut state=base.try_clone()?;
         for entry in tail {
             if <[u8;32]>::from(Sha256::digest(&entry.payload))!=entry.request_sha256 {return Err(storage("index-only WAL digest mismatch"));}
             let _decode=crate::storage::build_budget::reserve_memory((entry.payload.len() as u64).checked_mul(32).ok_or_else(||storage("index replay decode overflow"))?).map_err(storage)?;
-            admitted=admitted.checked_add(entry.payload.len().checked_mul(3).ok_or_else(||storage("index replay size overflow"))?).ok_or_else(||storage("index replay size overflow"))?;
-            state.admit_bytes(admitted)?;
+            state.admit_replay_frame(entry.payload.len())?;
             match serde_json::from_slice::<Entry>(&entry.payload).map_err(storage)? {
                 Entry::Applied(op)=>apply(&mut state,&op)?,
                 Entry::Expired(event)=>temporal::apply(&mut state,&event)?,

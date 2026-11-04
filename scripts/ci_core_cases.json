@@ -55,6 +55,7 @@
   "record::lexical::runtime::tests::successor_writer_rejection_leaves_predecessor_writable",
   "record::state_proof::tests::shared_proof_matches_wire_and_detects_independent_same_size_changes",
   "record::state_proof::tests::proof_preserves_order_same_sequence_metadata_and_lookup",
+  "record::maintenance::tests::source_proof_budget_tracks_live_metadata_not_accumulated_payload_slack",
   "record::anchor::tests::automatic_seal_leaves_checkpoint_unchanged_and_replays_complete_suffix",
   "record::anchor::tests::checkpoint_proof_rejects_old_closure_or_semantic_wal_damage_after_cache_rotation",
   "record::anchor::tests::journal_pressure_checkpoints_before_append_and_preserves_unknown_outcome",

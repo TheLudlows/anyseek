@@ -73,15 +73,10 @@ impl Image {
         if checkpoint_codec::json_digest(delta.config())? != checkpoint_codec::json_digest(config)? {
             return Err(storage("delta analyzer/config identity mismatch"));
         }
-        let mut admitted_bytes = checkpoint_codec::json_length(state)?;
         delta.visit(path, pool, authority, |entry| {
             // Pre-admit metadata before replay. Actual immutable record/history
             // values obtain their own full leases in the existing apply path.
-            let growth = checkpoint_codec::json_length(&entry)?.checked_mul(3)
-                .ok_or_else(|| storage("delta replay growth overflow"))?;
-            admitted_bytes = admitted_bytes.checked_add(growth)
-                .ok_or_else(|| storage("delta replay size overflow"))?;
-            state.admit_bytes(admitted_bytes)?;
+            state.admit_replay_frame(checkpoint_codec::json_length(&entry)?)?;
             match entry {
                 Entry::Applied(applied) => apply(state, &applied),
                 Entry::Expired(event) => temporal::apply(state, &event),
