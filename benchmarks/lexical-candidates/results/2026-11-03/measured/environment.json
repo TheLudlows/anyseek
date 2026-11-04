@@ -1,0 +1,61 @@
+{
+  "cpus": [
+    0,
+    1
+  ],
+  "uname": [
+    "Linux",
+    "6a112f30d5b6",
+    "6.18.57",
+    "#1 SMP Tue Oct 20 21:56:04 UTC 2026",
+    "x86_64"
+  ],
+  "cpu_max": "800000 100000\n",
+  "memory_max": "8589934592\n",
+  "binary_sha256": {
+    "before": "83bf6fbd4bfb365ad46cea31bc890b1ca0dea9de9ea6941119b03f42a6c28420",
+    "after": "2b33ae5093dd77bf37f9b2fe33426a0c7016241c3b4491fd4571e56118988d1d"
+  },
+  "rounds": 4,
+  "requests_per_phase": 200,
+  "workloads": {
+    "score": {
+      "query": "common",
+      "length": 32,
+      "count": true
+    },
+    "ties": {
+      "query": "tied",
+      "length": 32,
+      "count": true
+    },
+    "field_page": {
+      "query": "common",
+      "offset": 16,
+      "length": 16,
+      "count": true,
+      "sort": [
+        {
+          "field": "priority",
+          "order": "Descending"
+        }
+      ]
+    },
+    "hybrid": {
+      "query": "common",
+      "query_vector": [
+        1,
+        0
+      ],
+      "all": true,
+      "length": 16,
+      "count": true,
+      "rrf": {
+        "constant": 60.0,
+        "keyword_candidates": 32,
+        "vector_candidates": 48
+      }
+    }
+  },
+  "mode": "uninstrumented closed-loop HTTP"
+}
