@@ -43,7 +43,13 @@ def main():
                     assert summary[kind]['successful'] == measured
                     errors = collections.Counter(r.get('transport_error', f"{r.get('status')} {r.get('body')}") for r in selected if r not in successful)
                     assert dict(errors) == summary[kind]['errors']
-                    item[kind] = {'success': len(successful), 'count': len(selected), 'errors': dict(errors), 'successful': measured}
+                    timeout_count = sum('timed out' in r.get('transport_error', '').lower()
+                        or 'timeout' in r.get('transport_error', '').lower()
+                        or (r.get('status', 200) != 200 and 'deadline exceeded' in r.get('body', '').lower())
+                        for r in selected)
+                    item[kind] = {'success': len(successful), 'count': len(selected), 'errors': dict(errors),
+                        'all': quantiles([r['ms'] for r in selected]), 'successful': measured,
+                        'identified_timeouts': timeout_count, 'transport_errors': sum('transport_error' in r for r in selected)}
                     if kind == 'write':
                         assert len(successful) == 40
                         for r in successful:

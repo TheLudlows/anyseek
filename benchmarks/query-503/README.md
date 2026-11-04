@@ -25,7 +25,14 @@ use weak partition owners, so an unpolled response cannot preserve an old owner
 across reopen. Internal callers and other endpoint permits retain their existing
 fail-fast checks. No WAL, indexing, write ownership or consistency barrier was removed.
 
-Every observed HTTP error body is retained. All measured 503s were exactly
+[Independent review](REVIEW.md) found an unbounded publication-wait path in the
+initial candidate. The final build places header waiting inside the original request
+deadline and captures that same deadline for all body waits/retries. Late first polls
+do not get a fresh budget. Expired publication waits discard undelivered bytes and
+return TimedOut; normal unconsumed responses retain their existing transport-owner
+quota/lifecycle semantics. The production request budget remains 30 seconds.
+
+Every load-probe HTTP error body is retained. All measured 503s were exactly
 `{"code":"recovery_required","message":"RecoveryRequired"}`. There were no measured
 429s, storage errors, unknown outcomes or connection errors. All final-matrix write receipts,
 final indexed counts and terminal health checks succeeded. Deterministic paused
@@ -44,74 +51,114 @@ lexical + batch, hybrid + batch, and lexical + ingest. The shared performance lo
 and visible-process check exclude simultaneous builds/servers. Server CPUs 0/1,
 client CPUs 2/3; Tokio/Rayon each 2 workers. Linux overlay filesystem, 4-CPU cgroup
 quota, 16 GiB memory limit; release/default features, LTO, target-cpu=native.
+No query warmup is performed. All final numbers below use the deadline-fixed build.
 
-| Workload | Baseline success / 640 | Candidate success / 640 | Baseline 503 | Candidate 503 |
+Each count below covers two runs (640 queries/version/workload). Timeout and
+transport columns show baseline / candidate; body-stage timeout root causes cannot
+always be identified from a connection failure, so both categories are retained.
+
+| Workload | Baseline success | Candidate success | 503 baseline / candidate | Identified timeouts | Transport failures |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| batch + lexical | 54/640 | 640/640 | 586 / 0 | 0 / 0 | 0 / 0 |
+| batch + hybrid | 77/640 | 640/640 | 563 / 0 | 0 / 0 | 0 / 0 |
+| ingest + lexical | 159/640 | 640/640 | 481 / 0 | 0 / 0 | 0 / 0 |
+| Total | 290/1,920 | 1,920/1,920 | 1,630 / 0 | 0 / 0 | 0 / 0 |
+
+Latency is in milliseconds. Each cell is **run 0 / run 1**; quantiles are not
+pooled. Each run has only 40 writes, so write P99 is its maximum. Sparse successful
+baseline query samples are not stable tail estimates.
+
+**Successful query requests only:**
+
+| Workload | Baseline P95 | Baseline P99 | Candidate P95 | Candidate P99 |
 | --- | ---: | ---: | ---: | ---: |
-| batch + lexical | 33 | 640 | 607 | 0 |
-| batch + hybrid | 30 | 640 | 610 | 0 |
-| ingest + lexical | 193 | 640 | 447 | 0 |
-| Total | 256 / 1,920 | 1,920 / 1,920 | 1,664 | 0 |
+| batch + lexical | 68.05 / 40.38 | 68.05 / 51.31 | 51.89 / 56.38 | 64.94 / 81.63 |
+| batch + hybrid | 45.73 / 44.94 | 53.79 / 53.11 | 58.13 / 48.28 | 83.50 / 62.35 |
+| ingest + lexical | 166.90 / 130.64 | 174.82 / 137.06 | 31.39 / 27.36 | 161.68 / 168.17 |
 
-Latency in milliseconds; each cell lists **run 0 / run 1**, not pooled quantiles.
-Query tails below include successful requests only. The sparse successful baseline
-batch samples are not stable tail estimates. Fast failures remain in the raw data
-and `all` quantiles. Each process has 40 write samples, so write P99 is the maximum.
+**All query requests, including fast failures:**
 
-| Workload | Baseline query P95 | Baseline query P99 | Candidate query P95 | Candidate query P99 |
+| Workload | Baseline P95 | Baseline P99 | Candidate P95 | Candidate P99 |
 | --- | ---: | ---: | ---: | ---: |
-| batch + lexical | 94.08 / 45.18 | 94.08 / 45.18 | 88.02 / 63.66 | 111.97 / 95.38 |
-| batch + hybrid | 67.07 / 53.85 | 67.07 / 57.98 | 66.10 / 63.14 | 96.86 / 79.88 |
-| ingest + lexical | 31.19 / 30.60 | 180.64 / 177.25 | 34.22 / 36.68 | 175.80 / 196.12 |
+| batch + lexical | 4.19 / 27.03 | 34.82 / 40.31 | 51.89 / 56.38 | 64.94 / 81.63 |
+| batch + hybrid | 27.96 / 20.78 | 45.21 / 39.09 | 58.13 / 48.28 | 83.50 / 62.35 |
+| ingest + lexical | 25.67 / 21.12 | 166.90 / 135.03 | 31.39 / 27.36 | 161.68 / 168.17 |
 
-| Workload | Baseline write P95 | Baseline write P99 | Candidate write P95 | Candidate write P99 |
+**Write HTTP latency (all requests succeeded):**
+
+| Workload | Baseline P95 | Baseline P99 | Candidate P95 | Candidate P99 |
 | --- | ---: | ---: | ---: | ---: |
-| batch + lexical | 82.66 / 43.64 | 112.05 / 62.74 | 85.95 / 60.47 | 91.22 / 93.73 |
-| batch + hybrid | 52.81 / 46.31 | 62.03 / 50.22 | 63.48 / 60.44 | 76.89 / 63.53 |
-| ingest + lexical | 179.81 / 140.40 | 228.14 / 167.39 | 163.75 / 163.17 | 178.00 / 202.61 |
+| batch + lexical | 44.32 / 40.24 | 53.67 / 43.18 | 47.29 / 54.75 | 57.43 / 61.55 |
+| batch + hybrid | 43.16 / 38.17 | 58.75 / 45.50 | 48.79 / 46.72 | 88.18 / 59.42 |
+| ingest + lexical | 144.09 / 123.37 | 169.06 / 134.21 | 145.21 / 147.85 | 162.56 / 174.64 |
 
 All 480 write HTTP requests (240/version) succeeded, with all 16 items acknowledged.
-Every process ended at committed/lexical/vector sequence 1,640, with 640 new records,
-no index error and no recovery requirement. CPU/RSS and post-load catch-up observations
-are retained per process. Increased server work and some write-tail cost are expected:
-the candidate actually executes the queries previously rejected. This is an
-availability correction, not evidence of improved throughput or lower latency.
+There were zero write timeouts, transport errors or failed items. Every process ended
+at committed/lexical/vector sequence 1,640, with 640 new records, no index error and
+no recovery requirement. CPU/RSS and post-load catch-up observations remain in the
+per-process summaries.
 
-The fixed-total closed-loop runs have unequal temporal overlap. Baseline 297–320
-queries/process started before the last write finished; candidate 95–163 did.
-Success rates therefore describe the fixed workload, not a sustained-QPS production
-SLA. The phased variant synchronizes each batch with eight queries to check repeated
-interleaving separately; it is not pooled with the fixed-total matrix.
+Queries starting before the final write finished: baseline 316–320,
+candidate 107–161 per process. This closed-loop fixed-total
+comparison has unequal temporal overlap, motivating the repeated-interleaving matrix.
+It does not establish a sustained-QPS SLA.
 
 ## Repeated interleaving results
 
-The `phased-*` matrix uses the same binaries, seed, counts, order and CPU placement.
-Each of 40 phases starts one batch writer with four readers making two queries each,
-then joins them before starting the next phase. This limits the idle-query tail of
-the fixed-total run; it is not a sustained open-loop workload. There is no query warmup
-in either matrix.
+The same binaries, seed, counts, CPU placement and run order are used. Each of
+40 phases starts one writer with four readers making two queries each, then joins
+them before the next phase. This limits the idle-query tail; it is not an open-loop
+saturation workload. These results are kept separate from the fixed-total matrix.
 
-| Workload | Baseline success / 640 | Candidate success / 640 | Baseline 503 | Candidate 503 |
+Each count below covers two runs (640 queries/version/workload). Timeout and
+transport columns show baseline / candidate; body-stage timeout root causes cannot
+always be identified from a connection failure, so both categories are retained.
+
+| Workload | Baseline success | Candidate success | 503 baseline / candidate | Identified timeouts | Transport failures |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| batch + lexical | 467/640 | 640/640 | 173 / 0 | 0 / 0 | 0 / 0 |
+| batch + hybrid | 522/640 | 640/640 | 118 / 0 | 0 / 0 | 0 / 0 |
+| ingest + lexical | 543/640 | 640/640 | 97 / 0 | 0 / 0 | 0 / 0 |
+| Total | 1,532/1,920 | 1,920/1,920 | 388 / 0 | 0 / 0 | 0 / 0 |
+
+Latency is in milliseconds. Each cell is **run 0 / run 1**; quantiles are not
+pooled. Each run has only 40 writes, so write P99 is its maximum. Sparse successful
+baseline query samples are not stable tail estimates.
+
+**Successful query requests only:**
+
+| Workload | Baseline P95 | Baseline P99 | Candidate P95 | Candidate P99 |
 | --- | ---: | ---: | ---: | ---: |
-| batch + lexical | 491 | 640 | 149 | 0 |
-| batch + hybrid | 529 | 640 | 111 | 0 |
-| ingest + lexical | 534 | 640 | 106 | 0 |
-| Total | 1,554 / 1,920 | 1,920 / 1,920 | 366 | 0 |
+| batch + lexical | 40.23 / 43.93 | 44.46 / 51.84 | 44.05 / 48.10 | 60.07 / 54.02 |
+| batch + hybrid | 42.69 / 48.27 | 45.49 / 70.66 | 51.01 / 43.46 | 93.15 / 53.08 |
+| ingest + lexical | 91.31 / 20.93 | 132.94 / 106.33 | 29.62 / 29.68 | 101.68 / 112.32 |
 
-| Workload | Baseline query P95 | Baseline query P99 | Candidate query P95 | Candidate query P99 |
+**All query requests, including fast failures:**
+
+| Workload | Baseline P95 | Baseline P99 | Candidate P95 | Candidate P99 |
 | --- | ---: | ---: | ---: | ---: |
-| batch + lexical | 41.38 / 51.93 | 49.34 / 167.99 | 39.08 / 72.01 | 45.12 / 130.81 |
-| batch + hybrid | 49.34 / 49.61 | 52.58 / 60.49 | 41.67 / 50.12 | 56.21 / 58.67 |
-| ingest + lexical | 17.31 / 21.15 | 107.02 / 95.69 | 32.14 / 32.44 | 118.76 / 157.37 |
+| batch + lexical | 35.95 / 41.84 | 44.16 / 51.82 | 44.05 / 48.10 | 60.07 / 54.02 |
+| batch + hybrid | 41.54 / 47.46 | 44.80 / 60.95 | 51.01 / 43.46 | 93.15 / 53.08 |
+| ingest + lexical | 25.76 / 23.72 | 132.71 / 106.94 | 29.62 / 29.68 | 101.68 / 112.32 |
 
-| Workload | Baseline write P95 | Baseline write P99 | Candidate write P95 | Candidate write P99 |
+**Write HTTP latency (all requests succeeded):**
+
+| Workload | Baseline P95 | Baseline P99 | Candidate P95 | Candidate P99 |
 | --- | ---: | ---: | ---: | ---: |
-| batch + lexical | 47.26 / 57.03 | 48.87 / 167.99 | 45.59 / 97.49 | 57.28 / 131.48 |
-| batch + hybrid | 50.77 / 59.99 | 55.05 / 66.55 | 42.66 / 52.37 | 56.74 / 60.64 |
-| ingest + lexical | 93.76 / 93.32 | 110.67 / 123.43 | 93.03 / 122.11 | 121.61 / 160.66 |
+| batch + lexical | 43.13 / 51.87 | 45.01 / 57.11 | 57.52 / 53.47 | 72.68 / 56.85 |
+| batch + hybrid | 45.93 / 60.05 | 54.13 / 71.17 | 62.27 / 48.13 | 94.21 / 57.50 |
+| ingest + lexical | 103.49 / 106.19 | 138.17 / 109.75 | 100.54 / 106.92 | 102.16 / 115.48 |
 
-All 480 additional write requests and final counts/watermarks passed. Across both
-final matrices the candidate had 3,840 successful queries, no 503, no transport error
-and no budget refusal. Keep per-process tails and the two workload modes separate.
+All 480 write HTTP requests (240/version) succeeded, with all 16 items acknowledged.
+There were zero write timeouts, transport errors or failed items. Every process ended
+at committed/lexical/vector sequence 1,640, with 640 new records, no index error and
+no recovery requirement. CPU/RSS and post-load catch-up observations remain in the
+per-process summaries.
+
+Across both final matrices, the candidate completed 3,840/3,840 queries and 480/480
+write requests. Some write tails increased: successful searches perform work that
+the baseline rejected. This is an availability fix, not a claim of uniformly lower
+latency or improved saturated throughput. Do not pool the two workload modes.
 
 ## Reproduce and inspect
 
@@ -126,7 +173,7 @@ python benchmarks/query-503/measure.py --binary /absolute/candidate \
   --out /absolute/candidate-run --seed /absolute/seed-run/seed-1000 \
   --endpoint batch --mode lexical
 # Add --phased to synchronize every batch with eight reader requests.
-python benchmarks/query-503/summarize.py /absolute/evidence --prefix paired
+python benchmarks/query-503/summarize.py /absolute/evidence --prefix deadline-paired
 ```
 
 The summarizer requires the complete 12-process matrix named
@@ -135,7 +182,7 @@ checks all per-item write receipts and final watermarks, and verifies the common
 and binary fingerprints. Assertions must be enabled. It does not silently omit failures.
 
 Baseline binary SHA256: `114e91fc77f883c74b94f9a064e0a6cefe4d6b56cca71f03f9f20e3abc9a6093`.
-Candidate binary SHA256: `895264b25288db193f02f88147322860b57aba56a50b8f61407c6a287b983a2c`.
+Candidate binary SHA256: `50a08e5825c926f9910d17ecda38e2e741d41a69e877719c23e2aa2a83b9c593`.
 Seed file-manifest digest: `6f51b24898946f8cf86fc5f6ec337732e2efb69e7feab61174af0af614b5a82d`.
 
 Preliminary `before-*` runs are separate from the paired matrix. In particular,
@@ -150,10 +197,11 @@ Other HTTP read endpoints still use fail-fast permits and are outside this query
 
 ## Correctness and retained failures
 
-59 relevant release/fault-injection tests passed: 2 new output-wait tests, 6 committed
+60 relevant release/fault-injection tests passed: 2 new output-wait tests, 6 committed
 batch tests, 8 independent-query tests, 8 write tests, 3 publication/checkpoint recovery
-tests, and all 32 server tests. The latter include the new actual-router body/header
-wait and cancellation test, persistence-error body rejection, admission retention,
+tests, and all 33 server tests. The latter include the new actual-router body/header
+wait and cancellation test, the three-case shared-deadline test, persistence-error
+body rejection, admission retention,
 collection generation behavior and shutdown. The full repository/CI suite was not run.
 
 The first candidate passed fixed-total HTTP load but retained a queued mutex waiter
@@ -170,3 +218,8 @@ matrices, environment and verification metadata, measured harnesses, source diff
 SHA256 manifest. Databases and binaries remain in `/workspace/query503-evidence` on
 the task environment; they are not included in the repository archive. The preliminary
 ingest driver failure and discarded-candidate timeout database are retained there too.
+
+The reviewed `bba809f` candidate remains in `paired-*` / `phased-*`, separate from
+the final `deadline-paired-*` / `deadline-phased-*` data. Its original report and
+binary fingerprint are archived. The independent finding, follow-up review, scope
+limits and timeout test outcome are documented in [REVIEW.md](REVIEW.md).
