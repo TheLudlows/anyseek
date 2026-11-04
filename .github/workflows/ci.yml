@@ -86,7 +86,9 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest]
         lane: [core, lexical]
-    runs-on: ${{ matrix.os }}
+    # Playwright 1.56.1 supports Ubuntu 24.04; pin the Linux browser lane.
+    # Preserve the existing feedback check names while ubuntu-latest advances.
+    runs-on: ${{ matrix.os == 'ubuntu-latest' && matrix.lane == 'core' && 'ubuntu-24.04' || matrix.os }}
     # Keep the existing job budget; long-suffix recovery runs in manual acceptance.
     timeout-minutes: ${{ matrix.os == 'windows-latest' && matrix.lane == 'core' && 45 || 30 }}
     env:
@@ -127,7 +129,9 @@ jobs:
         run: cargo build -p anyseek --locked
       - name: Committed asynchronous-index HTTP and authorization regressions
         if: matrix.lane == 'core'
-        run: cargo test -p anyseek --locked --bin anyseek_server committed_ingest_
+        run: |
+          cargo test -p anyseek --locked --bin anyseek_server committed_ingest_
+          cargo test -p anyseek --locked --bin anyseek_server record_service::tests::synchronous_http_batch_keeps_100_limit_rejections_and_visibility -- --exact
       - name: Service persistence fences and shutdown ownership
         if: matrix.lane == 'core'
         shell: bash

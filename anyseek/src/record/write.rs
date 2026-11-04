@@ -55,6 +55,7 @@ const MAX_BATCH_BYTES: usize = 4 * 1024 * 1024;
 #[derive(Clone, Copy)]
 pub(super) enum IndexDelivery {
     Synchronous,
+    SynchronousBatch,
     Asynchronous,
 }
 
@@ -294,14 +295,16 @@ impl RecordPartition {
                     return Err(RecordError::RecoveryRequired);
                 }
                 inner.observe_time()?;
-                let asynchronous = matches!(delivery, IndexDelivery::Asynchronous);
-                if asynchronous {
+                let buffered = !matches!(delivery, IndexDelivery::Synchronous);
+                let synchronous = !matches!(delivery, IndexDelivery::Asynchronous);
+                if synchronous {
+                    inner.index.drain_indexes().await?;
+                }
+                if buffered {
                     inner
                         .index
                         .begin_batch(partition.indexes.clone(), Arc::downgrade(&partition.inner))
                         .await?;
-                } else {
-                    inner.index.drain_indexes().await?;
                 }
                 drop(inner);
                 let prepared = partition.prepare_batch(&writer, requests).await;
@@ -360,7 +363,7 @@ impl RecordPartition {
                     inner.fence_failed_write();
                 }
                 if !inner.healthy {
-                    if asynchronous {
+                    if buffered {
                         inner.index.abort_batch();
                     }
                     return Err(match result {
@@ -378,23 +381,28 @@ impl RecordPartition {
                         stop: Some(error),
                     },
                 };
-                if !asynchronous {
+                if !buffered {
                     partition.indexes.immediate(inner.state.seq);
                     return interrupted.map_or(Ok(batch), Err);
                 }
-                // Both index consumers proceed independently after canonical
-                // Record materialization releases its guard.
+                // Consumers do not acquire Inner. Synchronous batches join them
+                // under this guard; asynchronous ingestion returns after submission.
                 inner
                     .output
                     .write()
                     .map_err(|_| RecordError::RecoveryRequired)?
                     .fenced = true;
                 let sequence = inner.state.seq;
-                if let Err(error) = inner
-                    .index
-                    .finish_batch(sequence, partition.indexes.clone())
-                    .await
-                {
+                let publication = async {
+                    inner.index.finish_batch(sequence, partition.indexes.clone()).await?;
+                    if synchronous {
+                        // The owned writer and output fence survive cancellation
+                        // and remain held until both consumers have published.
+                        inner.index.drain_indexes().await?;
+                    }
+                    Ok::<_, RecordError>(())
+                }.await;
+                if let Err(error) = publication {
                     inner.healthy = false;
                     log::error!(
                         "Record batch publication failed at sequence {}: {:?}",

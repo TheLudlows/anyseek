@@ -1,4 +1,4 @@
-//! Non-atomic committed ingestion; derived indexes remain asynchronous.
+//! Ordered non-atomic commits with synchronous or asynchronous index publication.
 use super::write::IndexDelivery;
 use super::*;
 
@@ -44,6 +44,23 @@ impl RecordPartition {
         requests: Vec<RecordWrite>,
     ) -> Result<CommittedBatch, RecordError> {
         enqueue(self.clone(), requests).await
+    }
+    /// Commit up to 64 independent commands and publish both indexes before
+    /// confirming new receipts. Definite rejections do not end the batch;
+    /// interrupted inputs retain their unknown/not-attempted classification.
+    /// Dropping the caller does not cancel the admitted owned execution.
+    pub async fn write_batch(
+        &self,
+        requests: &[RecordWrite],
+    ) -> Result<CommittedBatch, RecordError> {
+        // The caller retains its requests for an unattempted-input fallback.
+        // Admit this owned copy before cloning, using the document expansion
+        // bound. Transfer the lease with the copy so caller cancellation cannot
+        // release its charge while the owned executions are still queued.
+        let bytes = request_bytes(requests)?;
+        let copy_memory = crate::storage::build_budget::reserve_memory((bytes as u64) * 32)
+            .map_err(|_| RecordError::Busy)?;
+        execute_with_delivery(self.clone(), requests.to_vec(), IndexDelivery::SynchronousBatch, Some(copy_memory)).await
     }
     /// Inspect progress without advancing time or waiting for indexes.
     pub async fn committed_progress(&self) -> CommittedProgress {
@@ -267,10 +284,20 @@ pub(super) async fn execute(
     partition: RecordPartition,
     requests: Vec<RecordWrite>,
 ) -> Result<CommittedBatch, RecordError> {
+    execute_with_delivery(partition, requests, IndexDelivery::Asynchronous, None).await
+}
+async fn execute_with_delivery(
+    partition: RecordPartition,
+    requests: Vec<RecordWrite>,
+    delivery: IndexDelivery,
+    copy_memory: Option<crate::storage::build_budget::MemoryLease>,
+) -> Result<CommittedBatch, RecordError> {
     let bytes = request_bytes(&requests)?;
-    let memory = crate::storage::build_budget::reserve_memory(bytes as u64)
+    let memory = crate::storage::build_budget::reserve_memory((bytes as u64)
+        * if matches!(delivery, IndexDelivery::SynchronousBatch) { 32 } else { 1 })
         .map_err(|_| RecordError::Busy)?;
     crate::resources::spawn(async move {
+        let _copy_memory = copy_memory;
         let _memory = memory;
         let mut batch = CommittedBatch {
             results: requests
@@ -285,7 +312,7 @@ pub(super) async fn execute(
             match partition
                 .execute_writes_detailed(
                     requests[offset..end].to_vec(),
-                    IndexDelivery::Asynchronous,
+                    delivery,
                 )
                 .await
             {
@@ -335,6 +362,146 @@ pub(super) async fn execute(
 mod tests {
     use super::*;
     use crate::record::tests::{config, write};
+    #[tokio::test]
+    async fn synchronous_batch_keeps_same_id_conditions_vector_patch_and_recovery() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("records");
+        let p = RecordPartition::create(&root, config()).await.unwrap();
+        let mut stale = write("stale", "same", "unused", ExpectedVersion::Match(1));
+        stale.document = None;
+        stale.vector_patch = Some(serde_json::from_value(serde_json::json!({"vector":[0.0,2.0]})).unwrap());
+        let mut patch = stale.clone();
+        patch.operation_id = OperationId::new("patch".into());
+        patch.expected = ExpectedVersion::Match(2);
+        let mut delete = write("delete", "same", "unused", ExpectedVersion::Match(2));
+        delete.document = None;
+        let mut second = write("second", "same", "beta", ExpectedVersion::Match(1));
+        second.document.as_mut().unwrap().remove("vector");
+        let requests = vec![
+            write("first", "same", "alpha", ExpectedVersion::Absent),
+            second,
+            stale, patch,
+            write("other", "other", "gamma", ExpectedVersion::Absent),
+            delete,
+        ];
+        let batch = p.write_batch(&requests).await.unwrap();
+        assert!(batch.stop.is_none());
+        assert!(matches!(batch.results[2], CommittedItem::Rejected(RecordError::Conflict(_))));
+        let receipts: Vec<_> = batch.results.iter().map(|item| match item {
+            CommittedItem::Committed(receipt) => Some(receipt.clone()),
+            CommittedItem::Rejected(_) => None,
+            other => panic!("unexpected result: {other:?}"),
+        }).collect();
+        assert_eq!(receipts.iter().flatten().map(|r|r.seq).collect::<Vec<_>>(), vec![1,2,3,4,5]);
+        assert_eq!(receipts[3].as_ref().unwrap().version, 2);
+        assert!(p.get("same").await.unwrap().is_none());
+        for word in ["alpha", "beta"] {
+            assert!(p.search(word.into(), None, SearchMode::Lexical, vec![], 10).await.unwrap().hits.is_empty());
+        }
+        assert_eq!(p.search("gamma".into(), None, SearchMode::Lexical, vec![], 10).await.unwrap().hits.len(), 1);
+        let progress = p.committed_progress().await;
+        assert_eq!((progress.committed_seq,progress.lexical_seq,progress.vector_seq),(Some(5),5,5));
+        p.finish_service_shutdown().await.unwrap();
+        drop(p);
+        let p = RecordPartition::open(&root, 1024 * 1024).await.unwrap();
+        let replay = p.write_batch(&requests).await.unwrap();
+        assert!(replay.stop.is_none());
+        for (item, expected) in replay.results.iter().zip(receipts) {
+            if let Some(receipt) = expected {
+                assert!(matches!(item, CommittedItem::Committed(actual) if *actual == receipt));
+            } else { assert!(matches!(item, CommittedItem::Rejected(RecordError::Conflict(_)))); }
+        }
+        assert_eq!(p.committed_progress().await.committed_seq, Some(5));
+        p.finish_service_shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn synchronous_batch_consumer_failure_keeps_unknown_scope_and_output_fence() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("records");
+        let p = RecordPartition::create(&root, config()).await.unwrap();
+        let old = write("old", "old", "alpha", ExpectedVersion::Absent);
+        let receipt = p.write(old.clone()).await.unwrap();
+        let output = p.output_permit().unwrap();
+        std::fs::write(root.join(".test-lexical-consumer-fail"), b"fail").unwrap();
+        let requests = vec![old, write("a", "a", "beta", ExpectedVersion::Absent),
+            write("b", "b", "beta", ExpectedVersion::Absent)];
+        let batch = p.write_batch(&requests).await.unwrap();
+        assert!(matches!(batch.stop, Some(RecordError::DurablePending(3))));
+        assert!(matches!(&batch.results[0], CommittedItem::Committed(actual) if *actual == receipt));
+        assert!(batch.results[1..].iter().all(|r|matches!(r,CommittedItem::OutcomeUnknown)));
+        assert!(matches!(output.deliver(|| ()), Err(RecordError::RecoveryRequired)));
+        assert!(p.committed_progress().await.recovery_required);
+        p.finish_service_shutdown().await.unwrap();
+        drop(p);
+        std::fs::remove_file(root.join(".test-lexical-consumer-fail")).unwrap();
+        let p = RecordPartition::open(&root, 1024 * 1024).await.unwrap();
+        let replay = p.write_batch(&requests).await.unwrap();
+        assert!(replay.stop.is_none());
+        assert!(replay.results.iter().all(|r|matches!(r,CommittedItem::Committed(_))));
+        assert_eq!(p.committed_progress().await.committed_seq, Some(3));
+        assert_eq!(p.search("beta".into(), None, SearchMode::Lexical, vec![], 10).await.unwrap().hits.len(), 2);
+        p.finish_service_shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn synchronous_batch_cancelled_waiter_keeps_publication_owned() {
+        // Memory accounting is process-wide; keep this check isolated from
+        // unrelated tests without adding another cancellation scenario.
+        if std::env::var_os("ANYSEEK_SYNC_BATCH_CANCEL_CHILD").is_none() {
+            let output=std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact","record::committed::tests::synchronous_batch_cancelled_waiter_keeps_publication_owned","--nocapture"])
+                .env("ANYSEEK_SYNC_BATCH_CANCEL_CHILD","1").output().unwrap();
+            assert!(output.status.success() && String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"),"{}\n{}",String::from_utf8_lossy(&output.stdout),String::from_utf8_lossy(&output.stderr));
+            return;
+        }
+        let initial_used = crate::storage::build_budget::used_memory_for_test();
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("records");
+        let p = RecordPartition::create(&root, config()).await.unwrap();
+        let output = p.output_permit().unwrap();
+        let pause = root.join(".test-lexical-consumer-pause");
+        std::fs::write(&pause, b"pause").unwrap();
+        let requests = vec![write("a", "a", "alpha", ExpectedVersion::Absent),
+            write("b", "b", "alpha", ExpectedVersion::Absent)];
+        let bytes = request_bytes(&requests).unwrap() as u64;
+        let writer = p.writer.lock().await;
+        let used = crate::storage::build_budget::used_memory_for_test();
+        let owner = p.clone();
+        let commands = requests.clone();
+        let task = tokio::spawn(async move { owner.write_batch(&commands).await });
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            // Partition, caller, outer execution and inner queued execution.
+            while Arc::strong_count(&p.inner) != 4 { tokio::task::yield_now().await; }
+        }).await.unwrap();
+        let queued = crate::storage::build_budget::used_memory_for_test();
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while Arc::strong_count(&p.inner) != 3 { tokio::task::yield_now().await; }
+        }).await.unwrap();
+        let cancelled = crate::storage::build_budget::used_memory_for_test();
+        drop(writer);
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !root.join(".test-lexical-consumer-started").exists() { tokio::task::yield_now().await; }
+        }).await.unwrap();
+        assert!(p.writer.try_lock().is_err(), "owned writer must include index publication");
+        assert!(matches!(output.deliver(|| ()), Err(RecordError::RecoveryRequired)));
+        std::fs::remove_file(pause).unwrap();
+        let receipt = tokio::time::timeout(std::time::Duration::from_secs(10),p.operation(&requests[1].operation_id)).await.unwrap().unwrap().unwrap();
+        assert_eq!(receipt.seq, 2);
+        assert_eq!(p.search("alpha".into(), None, SearchMode::Lexical, vec![], 10).await.unwrap().hits.len(), 2);
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while Arc::strong_count(&p.inner) != 1 { tokio::task::yield_now().await; }
+        }).await.unwrap();
+        p.finish_service_shutdown().await.unwrap();
+        assert!(queued > used, "queued copies must be admitted");
+        assert_eq!(cancelled, queued, "cancelling a waiter must not release an owned request copy's lease (wire bytes: {bytes})");
+        drop(p);
+        assert_eq!(crate::storage::build_budget::used_memory_for_test(), initial_used,
+            "completed owners must return their memory leases");
+    }
+
     #[tokio::test]
     async fn committed_queue_bounds_include_inflight_and_cancelled_requests() {
         let dir = tempfile::tempdir().unwrap();
