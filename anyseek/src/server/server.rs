@@ -1,9 +1,7 @@
-use base64::{Engine, engine::general_purpose};
 use anyseek::index::{IS_AVX2, IS_NEON};
-use sha2::{Digest, Sha256};
 use std::{collections::HashMap, env::current_exe, path::Path};
 
-use crate::{MASTER_KEY_SECRET, VERSION};
+use crate::VERSION;
 
 pub(crate) async fn initialize(params: HashMap<String, String>) {
     let default_nprobe = params
@@ -34,8 +32,6 @@ pub(crate) async fn initialize(params: HashMap<String, String>) {
         .get("local_port")
         .map(|port| port.parse().expect("validated port"))
         .unwrap_or(8080);
-    let master_apikey =
-        general_purpose::STANDARD.encode(Sha256::digest(MASTER_KEY_SECRET.as_bytes()));
     let simd = if *IS_AVX2 {
         "AVX2"
     } else if *IS_NEON {
@@ -50,7 +46,6 @@ pub(crate) async fn initialize(params: HashMap<String, String>) {
         num_cpus::get_physical()
     );
     log::info!("REST API: http://{local_ip}:{local_port}; Ctrl-C to shut down");
-    println!("Master API key: {master_apikey}");
 
     let service = crate::record_service::Service::open(&index_path, default_nprobe)
         .await
