@@ -718,7 +718,15 @@ impl Inner {
     fn statistics(&self) -> RecordStatistics {
         RecordStatistics {
             evaluation_time_ms: self.evaluation_time_ms,            visible_seq: self.state.seq,
-            active_records: if self.state.records.live_ttl_count()==0 {self.locations.len()} else {self.locations.keys().filter(|id|self.state.records.get(id).is_some_and(|r|temporal::visible(r,self.evaluation_time_ms))).count()},
+            // The conservative deadline bound can be early after an extension
+            // or deletion, never late. Only a definitely future bound skips the
+            // scan; due/uncertain TTL still uses the current visibility oracle.
+            active_records: if self.state.records.live_ttl_count() == 0
+                || !self.state.records.may_have_due_ttl(self.evaluation_time_ms)
+            { self.locations.len() } else {
+                self.locations.keys().filter(|id| self.state.records.get(id)
+                    .is_some_and(|r| temporal::visible(r, self.evaluation_time_ms))).count()
+            },
             retained_identities: self.state.records.len(),
             retained_operations: self.state.operations.len(),
             physical_versions: self.ordinals.iter().filter(|id|!id.is_empty()).count(),
