@@ -3,6 +3,7 @@
 import argparse
 import csv
 import gzip
+import itertools
 import json
 import math
 from pathlib import Path
@@ -18,13 +19,39 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('root', type=Path)
     args = parser.parse_args()
+    if not __debug__:
+        parser.error('verification requires assertions; do not use python -O')
+    environment = json.loads((args.root/'environment.json').read_text())
+    configuration = environment['argv']
+    sizes = [int(n) for n in configuration['sizes'].split(',')]
+    batches = [int(n) for n in configuration['batches'].split(',')]
+    versions = list(environment['binaries'])
+    assert sizes and batches and versions, 'empty planned matrix'
+    assert len(set(sizes)) == len(sizes) and len(set(batches)) == len(batches), 'duplicate matrix dimensions'
+    assert all(n > 0 for n in sizes + batches), 'non-positive matrix dimensions'
+    assert environment['orders'] == [versions, versions[::-1]], 'unexpected process orders'
+    planned = {
+        f'{version}-{n}-{endpoint}-b{batch}-r{rep}': (version, n, endpoint, batch, rep)
+        for version, n, endpoint, batch, rep in itertools.product(versions, sizes, ('batch', 'ingest'), batches, range(2))
+    }
+    paths = {path.parent.name: path for path in args.root.glob('*/summary.json')}
+    assert set(paths) == set(planned), (
+        'incomplete process matrix', 'missing', sorted(set(planned)-set(paths)),
+        'unexpected', sorted(set(paths)-set(planned)))
     rows, strata, aggregated = [], [], {}
-    for path in sorted(args.root.glob('*/summary.json')):
+    for name, path in sorted(paths.items()):
         summary = json.loads(path.read_text())
         assert summary['status'] == 'passed', path
+        assert summary['run'] == name
+        assert tuple(summary[k] for k in ('version', 'n', 'endpoint', 'batch', 'rep')) == planned[name], name
+        assert summary['allocation_run'] == configuration['allocation'], name
+        assert summary['binary_sha256'] == environment['binaries'][summary['version']]['sha256'], name
+        assert [group['kind'] for group in summary['groups']] == ['insert', 'patch', 'update', 'delete'], name
+        calls = 4 if configuration['short'] else (128 if summary['batch'] == 1 else 40)
         with gzip.open(path.parent/'requests.jsonl.gz', 'rt') as file:
             raw = [json.loads(line) for line in file]
         for group in summary['groups']:
+            assert group['calls'] == calls and group['records'] == calls*summary['batch'], (name, group['kind'])
             samples = [r for r in raw if r['kind'] == group['kind'] and not r['warmup']]
             assert len(samples) == group['calls']
             assert sum(r['busy'] for r in samples) == group['busy']

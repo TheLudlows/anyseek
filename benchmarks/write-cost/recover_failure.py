@@ -21,6 +21,8 @@ def main():
     parser.add_argument('--out', type=Path, required=True)
     parser.add_argument('--binary', type=Path, required=True)
     args = parser.parse_args()
+    if not __debug__:
+        parser.error('recovery checks require assertions; do not use python -O')
     args.out = args.out.resolve()
     args.out.mkdir(parents=True, exist_ok=False)
     summary = json.loads((args.source/'summary.json').read_text())

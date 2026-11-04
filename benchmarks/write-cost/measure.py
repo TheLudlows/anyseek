@@ -452,6 +452,8 @@ def main():
     parser.add_argument('--allocation', action='store_true')
     parser.add_argument('--short', action='store_true', help='smoke only, never performance evidence')
     args = parser.parse_args()
+    if not __debug__:
+        parser.error('correctness checks require assertions; do not use python -O')
     os.sched_setaffinity(0, set(map(int, args.client_cpus.split(','))))
     binaries = dict(item.split('=', 1) for item in args.binary)
     binaries = {k: Path(v).resolve() for k,v in binaries.items()}

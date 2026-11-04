@@ -32,7 +32,7 @@ python benchmarks/write-cost/measure.py \
 python benchmarks/write-cost/summarize.py /dev/shm/write-cost-allocation
 ```
 
-输出目录必须不存在。`--short --sizes 256 --batches 1` 仅验证驱动，不能作为性能证据。Linux/glibc；server CPU 0/1、client CPU 2/3，均可显式改参；Tokio/Rayon 各 2 worker。脚本取得 `/tmp/anyseek-performance.lock` 并检查可见的构建/服务进程，发现干扰立即终止；同资源上的其他任务须先结束，锁不能约束不遵守锁的任务，也不能证明不可见宿主机绝对空闲。
+输出目录必须不存在。`--short --sizes 256 --batches 1` 仅验证驱动，不能作为性能证据。测量、恢复和汇总入口均拒绝 `python -O`，不能禁用其正确性断言。Linux/glibc；server CPU 0/1、client CPU 2/3，均可显式改参；Tokio/Rayon 各 2 worker。脚本取得 `/tmp/anyseek-performance.lock` 并检查可见的构建/服务进程，发现干扰立即终止；同资源上的其他任务须先结束，锁不能约束不遵守锁的任务，也不能证明不可见宿主机绝对空闲。
 
 ## 测量与验证口径
 
@@ -65,6 +65,8 @@ python benchmarks/write-cost/summarize.py /dev/shm/write-cost-allocation
 
 `evidence.tar.gz`（约 7 MiB）仅包含 JSON/CSV、逐请求 gzip、过滤后的维护日志、源码/环境指纹及失败证据，没有数据库或构建产物。`timing/`、`allocation/` 是最终 tmpfs 矩阵；`excluded-driver-v1/`、`excluded-overlay/` 是未混算的早期轮次。每目录的 `summary.json` 与逐请求记录对应，归档 `SHA256SUMS.json` 可逐文件核对。恢复结果见 `recovery.json`。
 
+汇总器从该轮 `environment.json` 的规模、批量、版本和正反进程顺序还原完整计划，检查每个进程及四种操作恰好出现一次、样本数和二进制指纹与配置一致；缺少进程/操作、重复身份、未通过的结果或损坏分位数均拒绝，不输出部分矩阵冒充完整对照。
+
 ```bash
 mkdir /tmp/write-cost-evidence
 tar -xzf benchmarks/write-cost/evidence.tar.gz -C /tmp/write-cost-evidence
@@ -72,7 +74,7 @@ python benchmarks/write-cost/summarize.py /tmp/write-cost-evidence/timing
 python benchmarks/write-cost/summarize.py /tmp/write-cost-evidence/allocation
 ```
 
-不要对 excluded 目录调用要求全部成功的汇总器。归档 `measured-harness.py` 是实际最终测量代码；交付版仅增加未执行的 `--resume` 完整目录终态检查，差异为 `post-measurement-resume-guard.patch`，默认测量路径未变。`driver-correction.patch` 记录最初逐项 Busy 修正。正式测量结束后，交付的恢复助手在原失败库副本上另行通过全部 720 条记录检查；若新测量发生同类补向量 durable_pending，保留 db 后可运行：
+不要对 excluded 目录调用要求全部成功的汇总器。归档 `measured-harness.py` 是实际最终测量代码；`post-measurement-resume-guard.patch` 记录此前收尾增加的 `--resume` 完整目录终态检查。本次另补完整矩阵校验及三个工具的 `python -O` 拒绝保护；没有重新测量或改写归档、CSV 及性能数字，默认测量算法未变。`driver-correction.patch` 记录最初逐项 Busy 修正。正式测量结束后，交付的恢复助手在原失败库副本上另行通过全部 720 条记录检查；若新测量发生同类补向量 durable_pending，保留 db 后可运行：
 
 ```bash
 python benchmarks/write-cost/recover_failure.py   --source /absolute/failed-run --out /dev/shm/recovery-check   --binary /absolute/binaries/before
