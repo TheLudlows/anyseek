@@ -137,6 +137,8 @@ jobs:
         shell: bash
         run: |
           cargo test -p anyseek --locked --features fault-injection --bin anyseek_server record_service::tests::service_data_fence_preserves_persistence_errors -- --exact
+          cargo test -p anyseek --locked --features fault-injection --bin anyseek_server record_service::tests::service_query_headers_and_body_wait_for_publication -- --exact
+          cargo test -p anyseek --locked --features fault-injection --bin anyseek_server record_service::tests::service_publication_waits_share_original_request_deadline -- --exact
           cargo test -p anyseek --locked --features fault-injection --bin anyseek_server record_service::tests::shutdown_
       - name: Real SIGTERM drains owned work and releases the root
         if: matrix.lane == 'core' && runner.os == 'Linux'
