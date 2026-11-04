@@ -1089,6 +1089,23 @@ async fn batch(
     let p = s.record(&key, &id).await?;
     #[cfg(feature = "fault-injection")]
     let pause_collection = id.clone();
+    if request.writes.len() == 1 {
+        let write = request.writes.into_iter().next().unwrap();
+        let result = s.catalog.authorized_generation(key, id, p.generation, move |_| async move {
+            #[cfg(feature = "fault-injection")]
+            pause_authorized_for_test(&pause_collection).await?;
+            let operation_id = write.operation_id.clone();
+            let row = match p.write(write).await {
+                Ok(receipt) => json!({"operation_id":operation_id,"receipt":receipt,"code":"applied","expires_at":operation_id.expires_at_unix_seconds()}),
+                Err(error) => {
+                    let error = Error::from(error);
+                    json!({"operation_id":operation_id,"code":error.1,"message":error.2,"status":error.0.as_u16()})
+                }
+            };
+            Ok::<_, RecordError>(json!({"atomic":false,"results":[row]}))
+        }).await?;
+        return response(result.map_err(Error::from)?);
+    }
     let result = s.catalog.authorized_generation(key, id, p.generation, move |_| async move {
         #[cfg(feature = "fault-injection")]
         pause_authorized_for_test(&pause_collection).await?;
@@ -2481,15 +2498,19 @@ mod tests {
         use http_body::Body as _;
         // Isolate the existing fault environment from parallel service tests.
         if std::env::var_os("ANYSEEK_SERVICE_FENCE_CHILD").is_none() {
-            let output=std::process::Command::new(std::env::current_exe().unwrap())
-                .args(["--exact","record_service::tests::service_data_fence_preserves_persistence_errors","--nocapture"])
-                .env("ANYSEEK_SERVICE_FENCE_CHILD","1")
-                .env("ANYSEEK_RECORD_FAULT_NONCE","service-fence-failure")
-                .env("ANYSEEK_RECORD_FAULT","after_durable")
-                .output().unwrap();
-            assert!(output.status.success() && String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"),"{output:?}");
+            for count in [1,2] {
+                let output=std::process::Command::new(std::env::current_exe().unwrap())
+                    .args(["--exact","record_service::tests::service_data_fence_preserves_persistence_errors","--nocapture"])
+                    .env("ANYSEEK_SERVICE_FENCE_CHILD",count.to_string())
+                    .env("ANYSEEK_RECORD_FAULT_NONCE","service-fence-failure")
+                    .env("ANYSEEK_RECORD_FAULT","after_durable")
+                    .output().unwrap();
+                assert!(output.status.success() && String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"),"{output:?}");
+            }
             return;
         }
+        let count:usize=std::env::var("ANYSEEK_SERVICE_FENCE_CHILD").unwrap().parse().unwrap();
+        assert!(matches!(count,1|2));
         let (service,path,headers)=setup().await;
         let record=service.record("tenant","c").await.unwrap();
         let data=record.output_permit().unwrap();
@@ -2498,13 +2519,14 @@ mod tests {
             protected_data(Ok(json!({"body":"must not escape"})),Some(data.clone())).unwrap().into_body(),
             protected_data::<Value>(Err(bad("ordinary error")),Some(data.clone())).unwrap().into_body(),
         ];
-        let request=json!({"writes":[
+        let mut request=json!({"writes":[
             {"operation_id":OperationId::new("service-fence-failure".into()),"record_id":"r","expected":"Absent","document":{"body":"alpha"}},
             {"operation_id":OperationId::new("service-fence-tail".into()),"record_id":"s","expected":"Absent","document":{"body":"beta"}}
         ]});
+        request["writes"].as_array_mut().unwrap().truncate(count);
         let response=batch(State(service.clone()),headers,Path("c".into()),serde_json::to_vec(&request).unwrap().into()).await.unwrap();
         let value:Value=serde_json::from_slice(&axum::body::to_bytes(response.into_body(),4096).await.unwrap()).unwrap();
-        assert_eq!(value["results"].as_array().unwrap().len(),2);
+        assert_eq!(value["results"].as_array().unwrap().len(),count);
         assert!(value["results"].as_array().unwrap().iter().all(|r|r["code"]=="durable_pending"));
         assert_eq!(data.deliver(||()),Err(RecordError::RecoveryRequired));
         assert!(matches!(record.output_permit(),Err(RecordError::RecoveryRequired)));
@@ -2513,7 +2535,7 @@ mod tests {
         for mut body in prepared_bodies {
             assert!(matches!(std::future::poll_fn(|cx|Pin::new(&mut body).poll_frame(cx)).await,Some(Err(_))));
         }
-        for error in [RecordError::DurablePending(2),RecordError::OutcomeUnknown("injected".into())] {
+        for error in [RecordError::DurablePending(count as u64),RecordError::OutcomeUnknown("injected".into())] {
             let response=protected_data::<Value>(Err(error.clone().into()),Some(data.clone())).unwrap();
             assert_eq!(response.status(),StatusCode::SERVICE_UNAVAILABLE);
             let value:Value=serde_json::from_slice(&axum::body::to_bytes(response.into_body(),4096).await.unwrap()).unwrap();
