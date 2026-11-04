@@ -1,0 +1,19 @@
+{
+  "allocation/environment.json": "9266945c62474ef4398b0dc771a386adb3069c1c67e7d56067ebce0788807c76",
+  "allocation/expected-10000.json.gz": "cbed5ac7daa6e823723e561ea45990e4c32f029039ebf320751b93a56eace73b",
+  "allocation/expected-20000.json.gz": "1fcf339a2b9634c49c757b964fb2601a68d4b3e0987894520b04778554bf422f",
+  "allocation/requests.jsonl.gz": "1f33765b5822929ca8ad1cde19304c260875654e7bf66e7e64c6984a9692a2b2",
+  "allocation/seed-10000.json": "473fa22f740d3d2d46342e581e3e204292712ce8a5609f8195785ee7d9fb4592",
+  "allocation/seed-20000.json": "2a252f020e471b8fac5937eed8b5f66eb6032a809ee7014d38e244f90f295f15",
+  "allocation/summary.json": "c85c531c02e272b4b0ea098fe5317770b3e93cd03df8c6d018eb996141d3e100",
+  "allocation-comparison.csv": "c810b04e20e2f2dd6288bc9ca50a62d6e68c6a61ca92068858d93c28bfa9cdb0",
+  "build-provenance.json": "2b268d4c479fdbdfa3bb9d5e2f66c0b2797d8acc44bec74f3779b00ab4ea3820",
+  "comparison.csv": "cd498bacf40bf3cd14fe0cfff3f5d4ff76218e6ea2bd1705895caf7e81d6a5cc",
+  "measured/environment.json": "a69fb33a9f8a9f9dcdd835a07d2b51c2244c686780f55c5fd5b15faf24d4c638",
+  "measured/expected-10000.json.gz": "cbed5ac7daa6e823723e561ea45990e4c32f029039ebf320751b93a56eace73b",
+  "measured/expected-20000.json.gz": "1fcf339a2b9634c49c757b964fb2601a68d4b3e0987894520b04778554bf422f",
+  "measured/requests.jsonl.gz": "ff4ab076f928190e150a10cff924a69f5fa4117daca21da22353ac51173b90c1",
+  "measured/seed-10000.json": "473fa22f740d3d2d46342e581e3e204292712ce8a5609f8195785ee7d9fb4592",
+  "measured/seed-20000.json": "2a252f020e471b8fac5937eed8b5f66eb6032a809ee7014d38e244f90f295f15",
+  "measured/summary.json": "104378abc4f341079327bf89eca63e547c6f5c15fe71e8104e22f24cf5240907"
+}
