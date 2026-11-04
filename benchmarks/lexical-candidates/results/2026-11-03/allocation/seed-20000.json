@@ -1,0 +1,49 @@
+{
+  "n": 20000,
+  "sha256": "0dfab50515b3dd9bc0f7fe40d8a74ebb97326097a8bdabd5f643360157d9a3c0",
+  "config": {
+    "index_name": "Issue 153",
+    "tokenizer": "TantivySimpleV1",
+    "schema": [
+      {
+        "field": "body",
+        "field_type": "Text",
+        "store": true,
+        "index_lexical": true
+      },
+      {
+        "field": "priority",
+        "field_type": "Int",
+        "store": true,
+        "filterable": true,
+        "index_lexical": false
+      },
+      {
+        "field": "vector",
+        "field_type": "Json",
+        "store": true,
+        "index_lexical": false,
+        "index_vector": true
+      }
+    ],
+    "vector": {
+      "dimensions": 2
+    }
+  },
+  "capacity_profile": "bounded_100k",
+  "checkpoint": {
+    "visible_seq": 20000,
+    "indexed_seq": 20000
+  },
+  "statistics": {
+    "evaluation_time_ms": 1793704546910,
+    "visible_seq": 20000,
+    "active_records": 20000,
+    "retained_identities": 20000,
+    "retained_operations": 20000,
+    "retained_source_revisions": 0,
+    "physical_versions": 20000,
+    "evidence_quarantined": false,
+    "checkpoint_bytes": 13747880
+  }
+}
