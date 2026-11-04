@@ -115,7 +115,6 @@ pub(crate) async fn search(
     }
     let mut selected = BTreeSet::new();
     let mut locations = BTreeMap::new();
-    let mut allowed = BTreeSet::new();
     let n = shards.len();
     // Components expose stable logical identities. Native and vector rows can
     // be reordered or merged independently; local ordinals are only addresses
@@ -141,8 +140,10 @@ pub(crate) async fn search(
         for identity in snapshot.identities.iter() {
             if let Some(&(address, accepts)) = vectors.get(identity) {
                 selected.insert(identity.clone());
-                locations.insert(identity.clone(), address);
-                if accepts { allowed.insert(identity.clone()); }
+                // Only accepted identities can become hits. This map is both
+                // the metadata gate and address lookup; corpus selection above
+                // still includes filtered rows for unchanged global statistics.
+                if accepts { locations.insert(identity.clone(), address); }
             }
         }
     }
@@ -218,7 +219,7 @@ pub(crate) async fn search(
     // its channel counts, threshold evaluation and existing fusion contract.
     if !hybrid && result_type == ResultType::Count {
         super::scoring::validate_bounds(&plan.scores, &boosts, snapshots[0].fields.len(), MAX_POPULATION)?;
-        let count = corpus.count(plan.predicate.as_ref(), |id| allowed.contains(id))?;
+        let count = corpus.count(plan.predicate.as_ref(), |id| locations.contains_key(id))?;
         return Ok(ResultObject {
             original_query: text.clone(),
             query: text,
@@ -241,8 +242,8 @@ pub(crate) async fn search(
         plan.predicate.as_ref(), &plan.scores, &boosts,
         config.index.field_length_normalization.clone(),
         |id| {
-            if !allowed.contains(id) { return false; }
-            lexical_counts.borrow_mut()[locations[id] % n] += 1;
+            let Some(&address) = locations.get(id) else { return false; };
+            lexical_counts.borrow_mut()[address % n] += 1;
             true
         },
         |identity, score| {
