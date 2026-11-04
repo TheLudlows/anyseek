@@ -1,4 +1,5 @@
 export const english: Record<string, string> = {
+  "控制台需要浏览器安全上下文，请使用 HTTPS 或本机 http://localhost / http://127.0.0.1 访问。": "The console requires a browser secure context. Use HTTPS or local http://localhost / http://127.0.0.1.",
   "来源与分块信息应作为 document 普通字段保存。": "Store source and chunk information as ordinary document fields.",
   "未提供": "Not provided",
   "运行统计": "Runtime statistics",

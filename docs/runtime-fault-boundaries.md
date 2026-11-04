@@ -113,6 +113,49 @@ API. Process-wide executors and native memory limits remain shared and fixed by
 their existing initialization. Per-service admission stays separate from those
 budgets; zero governor slots alone does not prove that all owners have exited.
 
+The HTTP Tokio runtime must stay alive until `Shutdown::wait()` returns `Ok(())`.
+The coordinator is spawned on that runtime; dropping the runtime while close is
+pending is outside graceful shutdown, even if a waiter was previously cancelled
+or timed out. Dropping every external completion handle does not cancel the
+coordinator while the runtime remains alive. A stop/drain notification, HTTP
+server completion, or an `Err` result alone does not permit immediate reopen or
+directory removal. The partition's `finish_service_shutdown()` is an internal
+post-drain barrier: its caller must already have stopped producers and released
+partition clones; it does not itself stop admission or close an arbitrary library
+instance. The service root barrier is the final successful completion above.
+
+### Resource ownership and configuration
+
+| Resource | Scope and configuration lifetime | Effect of service close |
+| --- | --- | --- |
+| HTTP Tokio executor | Owned by the executable; kept alive through shutdown | No runtime destruction before successful close |
+| `INDEX_RUNTIME`, maintenance `WORKERS` | Process-wide lazy runtime and two-worker semaphore | Join this service's tracked work; do not destroy/reset shared executors or wait for unrelated owners |
+| Build `MEMORY` / `MEMORY_LIMITS` | Process-wide accounting; `ANYSEEK_BUILD_MEMORY_BYTES` and `ANYSEEK_BUILD_SHARED_MEMORY_BYTES` parsed once by `LazyLock`, including invalid configuration | Release actual leases; reopening does not reread these variables or reset limits/accounting |
+| Service `Governor` | One governor shared by this service's collections; `Governor::from_env()` snapshots lane settings on each service open | Release retained task/buffer/I/O leases; this is separate from process-wide build limits |
+
+Set environment configuration before starting the service. Runtime environment
+mutation is not a supported reconfiguration mechanism. A new governor can read
+new lane settings on a later open; this does not reconfigure the process-wide
+build budget. These limits account for explicit reservations, not all allocations
+or a process RSS cap. Independent embedded instances with isolated runtimes or
+budgets remain outside the supported service contract; no `EngineContext` or
+multi-instance isolation claim follows from this shutdown barrier.
+
+### Issue #167 acceptance boundary
+
+| Acceptance item | Existing implementation / regression and remaining scope |
+| --- | --- |
+| Shared versus isolated instances; stable budget configuration | Shared process model above is intentional for the single-owner service. Build limits are parsed once; governor settings are snapshots. Configurable embedded isolation is deferred, not implemented or tested by service close. |
+| Stop, drain, timeout, unresolved persistence | `shutdown_refuses_new_roots_but_finishes_admitted_ingest_and_consumers` and `shutdown_keeps_cancelled_owned_write_and_allows_wait_retry` cover refusal before body reads, retained accepted work, timeout/retry and same-ID receipt recovery. Timeout never means rollback. |
+| Reopen and safe reclamation | `shutdown_waits_for_transport_owners_and_reuses_completion`, `shutdown_waits_for_transport_frames_after_body_drop` and `shutdown_failed_owner_keeps_root_until_process_exit` cover completion ownership, immediate reopen/removal and terminal failure retention. Crash recovery remains a separate contract. |
+| Minimal lifecycle interface | `stop_accepting()` establishes admission stop; `shutdown()` transfers the owner and returns repeatable completion; only successful `wait()` permits root reuse. #189 already implements this sequence. |
+
+Under this service boundary, #167 can remain concluded after review of these
+clarifications. Its original configurable embedded isolation item is explicitly
+deferred, not an additional capability delivered by #189. POSIX signal execution,
+Windows ownership tests and historical CI results remain distinct evidence;
+the table names regressions, not a claim that every platform was rerun here.
+
 The bounded shutdown tests run in the existing core CI lane. Linux additionally
 runs `scripts/record_shutdown_smoke.py` against a fault-injection executable: an
 accepted write loses its HTTP caller, SIGTERM arrives while it is paused, both

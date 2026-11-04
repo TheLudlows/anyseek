@@ -145,8 +145,10 @@ jobs:
         run: |
           if [ "${{ runner.os }}" = "Windows" ]; then
             target/debug/anyseek_server.exe generate_openapi=true
+            python scripts/record_service_smoke.py --server target/debug/anyseek_server.exe --section startup
           else
             target/debug/anyseek_server generate_openapi=true
+            python scripts/record_service_smoke.py --server target/debug/anyseek_server --section startup
           fi
       - uses: actions/setup-node@v4
         if: matrix.lane == 'core' && runner.os == 'Linux'
@@ -161,6 +163,7 @@ jobs:
           npm ci
           npx playwright install --with-deps chromium
           npm run test:browser
+          npx playwright test --config playwright.bootstrap.config.ts
       - uses: actions/upload-artifact@v4
         if: always() && matrix.lane == 'core' && runner.os == 'Linux'
         with:

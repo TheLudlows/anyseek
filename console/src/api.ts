@@ -62,6 +62,7 @@ export const storage = {
   },
 };
 export async function ownerFor(key: string) {
+  requireSecureContext();
   const bytes = await crypto.subtle.digest(
     "SHA-256",
     new TextEncoder().encode(key),
@@ -69,6 +70,10 @@ export async function ownerFor(key: string) {
   return Array.from(new Uint8Array(bytes), (n) =>
     n.toString(16).padStart(2, "0"),
   ).join("");
+}
+export function requireSecureContext() {
+  if (!globalThis.crypto?.subtle || !globalThis.crypto?.getRandomValues)
+    throw new ApiError(t("控制台需要浏览器安全上下文，请使用 HTTPS 或本机 http://localhost / http://127.0.0.1 访问。"), 0, "insecure_context");
 }
 export const newIdentity = () =>
   Array.from(crypto.getRandomValues(new Uint8Array(16)), (x) =>

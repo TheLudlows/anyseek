@@ -19,6 +19,8 @@ class SemanticSections(unittest.TestCase):
                        and call.args[0].value == '--section'
                        for keyword in call.keywords if keyword.arg == 'choices')
         fault_only = {'indexer', 'authorization'}
+        # Startup configuration checks deliberately use disposable local storage.
+        semantic_sections = set(choices) - {'startup'}
         with tempfile.TemporaryDirectory() as directory:
             binary = Path(directory) / 'server'
             binary.write_bytes(b'test binary')
@@ -32,7 +34,7 @@ class SemanticSections(unittest.TestCase):
                 commands = [call.args[0] for call in run.call_args_list]
                 sections = [command[command.index('--section') + 1] for command in commands]
                 self.assertEqual(len(sections), len(set(sections)))
-                self.assertEqual(set(sections), set(choices) if faults else set(choices) - fault_only)
+                self.assertEqual(set(sections), semantic_sections if faults else semantic_sections - fault_only)
                 for command in commands:
                     self.assertIn('--cold-restarts', command)
                     self.assertEqual('--faults' in command, faults)
