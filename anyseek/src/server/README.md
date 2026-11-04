@@ -12,7 +12,15 @@ export MASTER_KEY_SECRET='replace-with-your-private-secret'
 target/debug/anyseek_server local_ip=127.0.0.1 local_port=8080
 ```
 
-启动日志中的 `Master API key` 只用于管理 Tenant 和普通 API Key，以及现有服务备份管理；不能用于集合数据接口。先 POST `/api/v1/tenants` 提交 `{operation_id,tenant_id}`，再由 master POST `/api/v1/apikey` 提交 `{operation_id,tenant_id,key_id,apikey_base64}`，签发普通 Key。按[控制台指南](../../../console/README.md)启动独立前端后使用该 Tenant Key 连接。API 默认端口为 8080，根路径不提供页面。Tenant ID 与 Collection ID 均须匹配 `^[a-z][a-z0-9_-]{0,62}$`，不转换大小写，Tenant 不支持改名或删除。首次 `index_path` 必须不存在且父目录存在；重启必须指向可恢复的 catalog 根，并保持 `MASTER_KEY_SECRET` 一致。旧按 key 组织的目录、已有空目录和不完整权威状态不会被当成空数据库导入。没有旧格式升级或迁移接口。
+`MASTER_KEY_SECRET` 必须显式设置且不能全为空白；缺失或无效时在创建数据目录、监听端口前报错退出。新部署请使用随机生成并妥善保存的私密值（例如 `python3 -c "import secrets; print(secrets.token_hex(32))"`），不要使用示例占位符。普通启动日志不输出 secret 或 Master Key。需要初始化时，在同一环境下单独运行：
+
+```sh
+target/debug/anyseek_server print_master_key=true
+```
+
+Windows PowerShell 使用 `.\target\debug\anyseek_server.exe print_master_key=true`。此命令只向标准输出打印 `Base64(SHA-256(secret 的 UTF-8 字节))` 并退出，不打开数据目录、不启动服务；输出本身就是管理凭据，不要记录到共享日志。它不生成或轮换密钥。
+
+Master Key 只用于管理 Tenant 和普通 API Key，以及现有服务备份管理；不能用于集合数据接口。先 POST `/api/v1/tenants` 提交 `{operation_id,tenant_id}`，再由 master POST `/api/v1/apikey` 提交 `{operation_id,tenant_id,key_id,apikey_base64}`，签发普通 Key。按[控制台指南](../../../console/README.md)启动独立前端后使用该 Tenant Key 连接。API 默认端口为 8080，根路径不提供页面。Tenant ID 与 Collection ID 均须匹配 `^[a-z][a-z0-9_-]{0,62}$`，不转换大小写，Tenant 不支持改名或删除。首次 `index_path` 必须不存在且父目录存在；重启必须指向可恢复的 catalog 根，并保持 `MASTER_KEY_SECRET` 一致。旧按 key 组织的目录、已有空目录和不完整权威状态不会被当成空数据库导入。没有旧格式升级或迁移接口。
 
 | 参数 | 默认值与约束 |
 | --- | --- |
@@ -20,9 +28,10 @@ target/debug/anyseek_server local_ip=127.0.0.1 local_port=8080
 | `local_ip` | `0.0.0.0` |
 | `local_port` | `8080` |
 | `default_nprobe` | `200`；正整数，请求可覆盖 |
+| `print_master_key` | `false`；`true` 显式输出 Master Key 后退出，需要 secret；不能与 `generate_openapi=true` 同时使用 |
 | `generate_openapi` | `false`；`true` 输出实际路由的 JSON/YAML 后退出 |
 
-只接受 `name=value`；未知、重复、非法参数返回非零状态。服务使用 `log`，通过 `RUST_LOG` 配置日志。Ctrl-C/SIGINT/SIGTERM 停止接收请求并等待连接结束；成功写入已持久，不依靠退出时提交派生索引才成立。默认 secret 不适合部署，必须配置自己的值。
+只接受 `name=value`；未知、重复、非法参数返回非零状态。服务使用 `log`，通过 `RUST_LOG` 配置日志。Ctrl-C/SIGINT/SIGTERM 停止接收请求并等待连接结束；成功写入已持久，不依靠退出时提交派生索引才成立。不再提供默认 secret。已有部署必须继续显式配置原值，不能为消除报错而重新生成；若此前省略配置使用了历史默认值 `1234`，需暂时显式设置该原值以恢复兼容，密钥迁移另行安排。secret 不裁剪空白，派生算法和普通 Tenant Key 认证未变。
 
 ## 启动 Web UI
 
@@ -125,7 +134,7 @@ curl "$BASE/api/v1/index/demo/ingest" -H "apikey: $API_KEY"
 
 ## 可直接执行的 HTTP 示例
 
-将日志中的 key 填入 `API_KEY`。在新目录准备请求文件一次；超时后重发文件，不要重新运行身份生成步骤。
+将管理员签发的 Tenant Key 填入 `API_KEY`。在新目录准备请求文件一次；超时后重发文件，不要重新运行身份生成步骤。
 
 ```sh
 BASE='http://127.0.0.1:8080'
