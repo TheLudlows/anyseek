@@ -56,7 +56,9 @@ $env:MASTER_KEY_SECRET = 'replace-with-your-private-secret'
 .\target\debug\anyseek_server.exe local_ip=127.0.0.1 local_port=8080
 ```
 
-访问 `http://127.0.0.1:8080/api/v1/live` 可查看服务版本。使用启动日志中的 `Master API key` 按[服务指南](anyseek/src/server/README.md)创建 Tenant 并签发普通 Tenant API Key，供 UI 连接使用。
+访问 `http://127.0.0.1:8080/api/v1/live` 可查看服务版本。首次初始化前，在相同环境中运行 `target/debug/anyseek_server print_master_key=true`（PowerShell 使用 `.\target\debug\anyseek_server.exe print_master_key=true`），按需获取 Master Key；普通启动不打印密钥。用该 Key 按[服务指南](anyseek/src/server/README.md)创建 Tenant 并签发普通 Tenant API Key，供 UI 连接使用。
+
+首次启动必须显式配置非空 `MASTER_KEY_SECRET`，不要使用示例占位符；生成、保存和已有部署兼容要求见[服务指南](anyseek/src/server/README.md#构建与启动)。
 
 默认数据目录为可执行文件旁的 `anyseek_index`；首次目录必须不存在。重启保留原目录和 `MASTER_KEY_SECRET`，已有部署应显式设置原 `index_path`。其他启动参数见[服务指南](anyseek/src/server/README.md)。
 
