@@ -26,6 +26,57 @@ impl Drop for Phase {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn source_proof_budget_tracks_live_metadata_not_accumulated_payload_slack() {
+        const CHILD:&str="ANYSEEK_SOURCE_PROOF_BUDGET_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let output=std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact","record::maintenance::tests::source_proof_budget_tracks_live_metadata_not_accumulated_payload_slack","--nocapture"])
+                .env(CHILD,"1").output().unwrap();
+            assert!(output.status.success(),"{}\n{}",String::from_utf8_lossy(&output.stdout),String::from_utf8_lossy(&output.stderr));
+            return;
+        }
+        use crate::storage::build_budget::{fill_memory_except_for_test,fill_memory_for_test,used_memory_for_test};
+        let mut outcomes=Vec::new();
+        for anchored in [false,true] {
+            let root=tempfile::tempdir().unwrap();let path=root.path().join("records");
+            let mut settings=super::super::tests::config();settings.max_records=256;settings.max_operations=512;
+            settings.max_record_bytes=16*1024;settings.max_journal_bytes=32*1024*1024;
+            let p=RecordPartition::create(&path,settings.clone()).await.unwrap();
+            let mut shared_prefix=0;
+            for i in 0..128 {
+                p.write(super::super::tests::write(&format!("op-{i}"),&format!("r\\\"中-{i}"),
+                    &"payload ".repeat(1024),ExpectedVersion::Absent)).await.unwrap();
+                if anchored && i==15 {
+                    p.compact_journal().await.unwrap();
+                    shared_prefix=p.inner.lock().await.state.value_bytes().unwrap();
+                }
+            }
+            let (proof,expected)={let mut inner=p.inner.lock().await;
+                assert_eq!(inner.anchor.is_some(),anchored);
+                (SourceProof::capture(&mut inner).unwrap(),inner.state.try_clone().unwrap())};
+            // Independent full serialization is the oracle for metadata. The
+            // allowance pays every newly replayed value, current metadata, one
+            // worst-case frame's 3x growth, and temporary decode/planning owners.
+            let exact=checkpoint_codec::json_length(&expected).unwrap();
+            let metadata=expected.container_bytes(exact).unwrap();
+            let frame=proof.frames.iter().map(Vec::len).max().unwrap();
+            let allowance=((expected.value_bytes().unwrap()-shared_prefix+metadata+3*frame) as u64)*32+4*1024*1024;
+            let pressure=fill_memory_except_for_test(allowance);
+            let before=used_memory_for_test();
+            let result=proof.verify(&path,&settings,&expected);
+            assert_eq!(used_memory_for_test(),before,"proof must release all temporary ownership");
+            outcomes.push((anchored,result));
+            drop(pressure);
+            assert!(proof.verify(&path,&settings,&expected).is_ok());
+            let full=fill_memory_for_test();
+            assert!(proof.verify(&path,&settings,&expected).is_err(),"real admission must remain enforced");
+            drop(full);
+            assert_eq!(expected.seq,128);assert_eq!(expected.operations.len(),128);
+            drop(proof);drop(expected);drop(p);
+        }
+        assert!(outcomes.iter().all(|(_,r)|r.is_ok()),"{outcomes:?}");
+    }
     struct Timings;
     impl log::Log for Timings {
         fn enabled(&self,metadata:&log::Metadata<'_>)->bool {metadata.level()<=log::Level::Debug}
@@ -390,23 +441,19 @@ impl SourceProof {
         let _phase=Phase::new("background_source_proof",expected.seq);
         if let Some(anchor)=&self.anchor {return anchor.verify_captured_suffix(root,config,expected,&self.frames,&self.pending);}
         let mut replayed=None;
-        let mut admitted=0usize;
         for frame in &self.frames {
             let _decode=crate::storage::build_budget::reserve_memory((frame.len() as u64).checked_mul(32).ok_or_else(||storage("source proof decode overflow"))?).map_err(storage)?;
             let entry:Entry=serde_json::from_slice(frame).map_err(storage)?;
             if replayed.is_none() {
                 let Entry::Checkpoint{config:source,mut state}=entry else{return Err(storage("missing captured bootstrap authority"));};
                 if checkpoint_codec::json_digest(&source)?!=checkpoint_codec::json_digest(config)?{return Err(storage("captured bootstrap configuration mismatch"));}
-                admitted=checkpoint_codec::json_length(&state)?;
-                state.admit_bytes(admitted)?;
+                state.admit_bytes(checkpoint_codec::json_length(&state)?)?;
                 restore_operation_lookup(&mut state)?;
                 state.admit_bytes(checkpoint_codec::json_length(&state)?)?;
                 replayed=Some(state);continue;
             }
             let state=replayed.as_mut().unwrap();
-            let growth=checkpoint_codec::json_length(&entry)?.checked_mul(3).ok_or_else(||storage("source proof growth overflow"))?;
-            admitted=admitted.checked_add(growth).ok_or_else(||storage("source proof size overflow"))?;
-            state.admit_bytes(admitted)?;
+            state.admit_replay_frame(checkpoint_codec::json_length(&entry)?)?;
             match entry {
                 Entry::Applied(op)=>apply(state,&op)?,
                 Entry::Expired(event)=>temporal::apply(state,&event)?,

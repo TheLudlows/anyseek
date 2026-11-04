@@ -405,7 +405,6 @@ impl Reference {
         for package in self.segments.iter().chain(pending) {package.verify(root,closure_limit(config.max_journal_bytes)?)?;}
         if state_proof::length(live)? as u64>config.max_journal_bytes {return Err(storage("live State proof exceeds authority budget"));}
         let mut replayed=captured.try_clone()?;
-        let mut admitted=state_proof::length(&replayed)?;
         let expected=checkpoint_codec::json_digest(self)?;
         let mut first=true;
         visit(&mut |bytes| {
@@ -417,9 +416,7 @@ impl Reference {
                     first=false;
                     return match entry {Entry::Anchor(reference) if checkpoint_codec::json_digest(&reference)?==expected=>Ok(()),_=>Err(storage("WAL proof authority mismatch"))};
                 }
-                let growth=checkpoint_codec::json_length(&entry)?.checked_mul(3).ok_or_else(||storage("WAL proof growth overflow"))?;
-                admitted=admitted.checked_add(growth).ok_or_else(||storage("WAL proof size overflow"))?;
-                replayed.admit_bytes(admitted)?;
+                replayed.admit_replay_frame(checkpoint_codec::json_length(&entry)?)?;
                 match entry {
                     Entry::Applied(op)=>apply(&mut replayed,&op),
                     Entry::Expired(event)=>temporal::apply(&mut replayed,&event),

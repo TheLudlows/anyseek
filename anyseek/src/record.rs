@@ -13,7 +13,7 @@ use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
     sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::{Mutex, Semaphore};
 
@@ -889,8 +889,12 @@ async fn build_records_at(path:&Path,cache:&Path,config:&RecordConfig,sequence:u
             .await
             .map_err(storage)?;
     }
+    let finish_started=Instant::now();
+    log::info!("record_build stage=inputs_appended records={}",records.len());
     native.finish_build().await?;
+    log::info!("record_build stage=lexical_finished records={} elapsed_ms={}",records.len(),finish_started.elapsed().as_millis());
     index.commit().await.map_err(storage)?;
+    log::info!("record_build stage=component_committed records={} elapsed_ms={}",records.len(),finish_started.elapsed().as_millis());
     index.read().await.segments[0].vector.write().await.build_input_covered=false;
     Ok((
         index,
@@ -1349,12 +1353,17 @@ impl RecordPartition {
         drop(first_decode);
         restore_operation_lookup(&mut state)?;
         state.admit_bytes(checkpoint_codec::json_length(&state)?)?;
+        let recovery_started=Instant::now();
+        let mut recovery_measure_us=0u128;
+        let mut recovery_apply_us=0u128;
         for bytes in entries {
             let _entry_decode = crate::storage::build_budget::reserve_memory((bytes.len() as u64).checked_mul(32).ok_or_else(||storage("tail decode estimate overflow"))?).map_err(storage)?;
             if selected.is_none() {
-                let size=checkpoint_codec::json_length(&state)?.checked_add(bytes.len().checked_mul(3).ok_or_else(||storage("tail growth overflow"))?).ok_or_else(||storage("tail growth overflow"))?;
-                state.admit_bytes(size)?;
+                let measure=Instant::now();
+                state.admit_replay_frame(bytes.len())?;
+                recovery_measure_us+=measure.elapsed().as_micros();
             }
+            let apply_started=Instant::now();
             let entry=serde_json::from_slice(&bytes).map_err(storage)?;
             if selected.is_some(){pending_decode.push(_entry_decode);pending.push(entry);continue;}
             match entry {
@@ -1365,16 +1374,23 @@ impl RecordPartition {
                     return Err(storage("unexpected checkpoint in operation stream"));
                 }
             }
+            recovery_apply_us+=apply_started.elapsed().as_micros();
+            if state.seq%1024==0 {
+                log::info!("record_recovery stage=decode_apply seq={} elapsed_ms={} measure_us={recovery_measure_us} apply_us={recovery_apply_us}",state.seq,recovery_started.elapsed().as_millis());
+            }
         }
+        log::info!("record_recovery stage=decoded seq={} elapsed_ms={} measure_us={recovery_measure_us} apply_us={recovery_apply_us}",state.seq,recovery_started.elapsed().as_millis());
         validate_restored_state(&config,&state)?;
         let snapshot_bytes = checkpoint_codec::length(&config, &state)?;
         history::validate_state(&state)?;
+        log::info!("record_recovery stage=validated seq={} elapsed_ms={}",state.seq,recovery_started.elapsed().as_millis());
         let (mut index,mut ordinals,mut locations)=match prepared {
             Some((index,ordinals,locations))=>(view::RetrievalView::single(index),ordinals,locations),
             None=>{let (index,ordinals)=build(path,&config,&state).await?;
                 let locations=ordinals.iter().enumerate().map(|(i,key)|(key.clone(),i)).collect();
                 (index,ordinals,locations)},
         };
+        log::info!("record_recovery stage=index_built seq={} elapsed_ms={}",state.seq,recovery_started.elapsed().as_millis());
         if let Some(reference)=selected.as_ref(){
             reference.reclaim_unselected_segments(path)?;
             let target=path.join(format!("segment-{:032x}",rand::random::<u128>()));

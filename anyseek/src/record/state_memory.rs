@@ -90,6 +90,15 @@ impl std::fmt::Debug for Charge {
     }
 }
 impl State {
+    /// Admit one replay step against the current exact wire length. Shared
+    /// values own their full leases separately. Carrying the previous step's
+    /// speculative 3x growth forward would mischarge old payload slack as live
+    /// container metadata. The container lease itself remains a high-water mark.
+    pub(super) fn admit_replay_frame(&mut self, encoded_bytes:usize)->Result<(),RecordError> {
+        let growth=encoded_bytes.checked_mul(3).ok_or_else(||storage("replay growth overflow"))?;
+        let size=state_proof::length(self)?.checked_add(growth).ok_or_else(||storage("replay size overflow"))?;
+        self.admit_bytes(size)
+    }
     pub(super) fn admit_bytes(&mut self, bytes: usize) -> Result<(), RecordError> {
         let needed = self.container_bytes(bytes)?;
         self.admit_containers(needed)
