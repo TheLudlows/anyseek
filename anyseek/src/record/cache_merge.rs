@@ -275,8 +275,10 @@ mod tests {
     async fn derived_merge_catches_concurrent_update_delete_and_recovers_without_certificate() {
         let temporary=tempfile::tempdir().unwrap();let root=temporary.path().join("records");
         let p=fixture(&root).await;
-        let held={let inner=p.inner.lock().await;inner.index.test_index().read().await.segments[1].lexical.clone()};
-        let held=held.snapshot().await.unwrap();
+        let held={
+            let native={let inner=p.inner.lock().await;inner.index.test_index().read().await.segments[1].lexical.clone()};
+            native.snapshot().await.unwrap()
+        };
         std::fs::write(root.join(".test-cache-merge-pause"),b"pause").unwrap();
         let job=p.start_cache_merge_job(Duration::from_secs(20)).unwrap();started(&root).await;
         p.write(write("update","a","beta",ExpectedVersion::Match(1))).await.unwrap();
@@ -289,7 +291,7 @@ mod tests {
         assert_eq!(held.identities.len(),1);
         assert_eq!(p.search("alpha".into(),None,SearchMode::Lexical,vec![],10).await.unwrap().count_total,2);
         assert_eq!(p.get("a").await.unwrap().unwrap().version,2);
-        drop(p);
+        drop(held);p.finish_service_shutdown().await.unwrap();drop(p);
         let p=RecordPartition::open(&root,config().max_journal_bytes).await.unwrap();
         assert!(p.get("b").await.unwrap().is_none());
         assert_eq!(p.search("alpha".into(),None,SearchMode::Lexical,vec![],10).await.unwrap().count_total,2);

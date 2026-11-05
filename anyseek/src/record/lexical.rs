@@ -421,6 +421,7 @@ impl Candidate {
             _memory:Arc::new(memory),
             _buffer:buffer.map(Arc::new),
             _pin: None,
+            _directory_owner: None,
         })
     }
 }
@@ -444,6 +445,7 @@ pub(super) struct Snapshot {
     _memory: Arc<crate::storage::build_budget::MemoryLease>,
     _buffer: Option<Arc<crate::resources::Lease>>,
     _pin: Option<Arc<super::package_pins::Pin>>,
+    _directory_owner: Option<directory::DirectoryOwner>,
 }
 
 pub(super) struct ActiveView<'a> {

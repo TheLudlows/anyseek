@@ -47,7 +47,13 @@ struct Budget {
     // the reservation while an internal worker still owns the candidate.
     _memory: crate::storage::build_budget::MemoryLease,
     _buffer: Option<resources::Lease>,
+    // Directory clones retain the OS owner lock after a public handle drops.
+    partition_owner: Mutex<Option<Arc<std::fs::File>>>,
 }
+// Snapshot keeps this after its Searcher: Tantivy drops Index before its mmap
+// readers, so the Index's Directory alone is not a sufficient lifetime barrier.
+#[derive(Clone)]
+pub(super) struct DirectoryOwner { _budget: Arc<Budget> }
 impl Budget {
     fn charge(&self, path: &Path, bytes: u64) -> io::Result<()> {
         #[cfg(test)]
@@ -103,6 +109,8 @@ impl fmt::Debug for BudgetDirectory {
     }
 }
 impl BudgetDirectory {
+    pub(super) fn owner_token(&self) -> DirectoryOwner { DirectoryOwner { _budget: self.budget.clone() } }
+
     pub(super) fn cancel_io_waiters(&self) {
         if let Some(scope) = &self.budget.scope { scope.cancel_native_io(&self.budget.cancelled); }
         else { self.budget.cancelled.store(true, std::sync::atomic::Ordering::Release); }
@@ -190,6 +198,13 @@ impl BudgetDirectory {
     }
     // Directory clones outlive Runtime on a failed worker join. They must retain
     // the same GC pin as the worker's bytes, until the last worker/reader drops.
+    pub(super) fn retain_partition_owner(&self, owner: Arc<std::fs::File>) -> Result<(), RecordError> {
+        let mut held = self.budget.partition_owner.lock().map_err(|_| storage("native partition owner poisoned"))?;
+        if let Some(existing) = held.as_ref() {
+            if !Arc::ptr_eq(existing, &owner) { return Err(storage("native partition owner changed")); }
+        } else { *held = Some(owner); }
+        Ok(())
+    }
     pub(super) fn retain_pin(&self,pin:Arc<crate::record::package_pins::Pin>)->Result<(),RecordError> {
         *self.budget.pin.lock().map_err(|_|storage("native pin ownership poisoned"))?=Some(pin);
         Ok(())
@@ -227,7 +242,7 @@ impl BudgetDirectory {
             cancelled: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)] fail_writes: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)] failed_writes: std::sync::atomic::AtomicUsize::new(0),
-            pin:Mutex::new(None),writer_memory:Mutex::new(None),pending_analysis:Mutex::new(Vec::new()),ledger:Mutex::new(Ledger {written:0,paths:BTreeSet::new()}),bytes:0,files:1,scope,
+            pin:Mutex::new(None),partition_owner:Mutex::new(None),writer_memory:Mutex::new(None),pending_analysis:Mutex::new(Vec::new()),ledger:Mutex::new(Ledger {written:0,paths:BTreeSet::new()}),bytes:0,files:1,scope,
             _memory:memory,_buffer:buffer,
         })})
     }
@@ -254,7 +269,7 @@ impl BudgetDirectory {
                 cancelled: std::sync::atomic::AtomicBool::new(false),
                 #[cfg(test)] fail_writes: std::sync::atomic::AtomicBool::new(false),
                 #[cfg(test)] failed_writes: std::sync::atomic::AtomicUsize::new(0),
-                pin:Mutex::new(None),writer_memory:Mutex::new(None),pending_analysis:Mutex::new(Vec::new()),
+                pin:Mutex::new(None),partition_owner:Mutex::new(None),writer_memory:Mutex::new(None),pending_analysis:Mutex::new(Vec::new()),
                 ledger: Mutex::new(Ledger {
                     written: 0,
                     paths: BTreeSet::new(),

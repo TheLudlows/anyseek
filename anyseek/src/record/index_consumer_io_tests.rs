@@ -201,7 +201,7 @@ async fn consumer_fault_matrix_keeps_authority_but_rejects_all_search_channels()
         }
         std::fs::remove_file(marker).unwrap();
         let owner = Arc::downgrade(&p.inner);
-        drop(p);
+        p.finish_service_shutdown().await.unwrap();drop(p);
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             while owner.strong_count() != 0 { tokio::task::yield_now().await; }
         }).await.unwrap();

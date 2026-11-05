@@ -323,8 +323,9 @@ struct Inner {
     fail_after_durable: bool,
     #[cfg(test)]
     fail_publication_stage: u8,
-    // Fields drop in declaration order: release all index/mmap handles before
-    // releasing the partition lock, so a concurrent opener can clean caches.
+    // Fields drop in declaration order: release owned index/mmap handles before
+    // this journal reference. Background native writers and their fixed readers
+    // retain the same owner lock independently until their handles are gone.
     journal: PartitionJournal,
 }
 // A permit may outlive the last partition handle. It must not survive owner
@@ -1734,7 +1735,7 @@ mod tests {
         let receipt = receipt.unwrap();
         assert_eq!(receipt.seq, 1);
         assert_eq!(query(&p, SearchMode::Lexical).await.hits.len(), 1);
-        drop(p);
+        p.finish_service_shutdown().await.unwrap();drop(p);
         let p = scope.clone().run(RecordPartition::open(&location, config().max_journal_bytes)).await.unwrap();
         assert_eq!(scope.run(p.write(request)).await.unwrap(), receipt);
         assert_eq!(p.get("a").await.unwrap().unwrap().version, 1);
@@ -1929,7 +1930,7 @@ mod tests {
         p.inner.lock().await.index.drain_indexes().await.unwrap();
         assert_eq!(Arc::strong_count(&p.inner),1,"consumer joins must release both owners");
         let owner=Arc::downgrade(&p.inner);
-        drop(p);
+        p.finish_service_shutdown().await.unwrap();drop(p);
         assert!(owner.upgrade().is_none(),"no partition owner remains before reopen");
         let p=RecordPartition::open(&root,config().max_journal_bytes).await.unwrap();
         assert_eq!(p.write(seed).await.unwrap(),receipt);
@@ -2089,7 +2090,7 @@ mod tests {
         {let _writer=p.writer.lock().await;let mut inner=p.inner.lock().await;
             assert!(matches!(inner.expire_due().await,Err(RecordError::DurablePending(2))));}
         assert!(matches!(p.get("plain").await,Err(RecordError::RecoveryRequired)));
-        drop(p); let p=RecordPartition::open(&root,config().max_journal_bytes).await.unwrap();
+        p.finish_service_shutdown().await.unwrap();drop(p); let p=RecordPartition::open(&root,config().max_journal_bytes).await.unwrap();
         let (clock,_)=test_clock(&p).await;
         assert!(p.get("plain").await.unwrap().is_none());
         assert_eq!(p.inner.lock().await.state.records["plain"].version,2);
@@ -2098,11 +2099,11 @@ mod tests {
         let reuse=write("reuse","plain","beta",ExpectedVersion::Absent);
         let receipt=p.write(reuse.clone()).await.unwrap();assert_eq!(receipt.version,3);
         assert_eq!(p.write(reuse.clone()).await.unwrap(),receipt);
-        p.compact_journal().await.unwrap();drop(p);
+        p.compact_journal().await.unwrap();p.finish_service_shutdown().await.unwrap();drop(p);
         let p=RecordPartition::open(&root,config().max_journal_bytes).await.unwrap();
         assert_eq!(p.write(reuse).await.unwrap(),receipt);
         assert_eq!(p.get("plain").await.unwrap().unwrap().document.unwrap()["body"],"beta");
-        drop(p); std::fs::remove_dir_all(root).unwrap();
+        p.finish_service_shutdown().await.unwrap();drop(p); std::fs::remove_dir_all(root).unwrap();
     }
     #[tokio::test]
     async fn ttl_backup_cut_is_immutable_and_long_identity_rejected() {
@@ -2687,7 +2688,7 @@ mod tests {
             .write(write("first", "id", "alpha", ExpectedVersion::Absent))
             .await
             .unwrap();
-        drop(partition);
+        partition.finish_service_shutdown().await.unwrap();drop(partition);
         let output = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
                 "--ignored",
@@ -3034,7 +3035,7 @@ mod tests {
             let partition = RecordPartition::create(&location, config()).await.unwrap();
             let first = write("first", "a", "alpha original", ExpectedVersion::Absent);
             let receipt = partition.write(first.clone()).await.unwrap();
-            drop(partition);
+            partition.finish_service_shutdown().await.unwrap();drop(partition);
             let output = std::process::Command::new(std::env::current_exe().unwrap())
                 .args([
                     "--ignored",
@@ -3072,7 +3073,7 @@ mod tests {
                 .unwrap();
             // Prove recovery did not keep writing an older generation which a
             // second recovery would ignore in favor of an uncertified directory.
-            drop(restored);
+            restored.finish_service_shutdown().await.unwrap();drop(restored);
             let restored = RecordPartition::open(&location, config().max_journal_bytes)
                 .await
                 .unwrap();
@@ -3082,7 +3083,7 @@ mod tests {
                 "{stage}"
             );
             assert_eq!(query(&restored, SearchMode::Lexical).await.hits.len(), 1);
-            drop(restored);
+            restored.finish_service_shutdown().await.unwrap();drop(restored);
             std::fs::remove_dir_all(location).unwrap();
         }
     }
@@ -3096,7 +3097,7 @@ mod tests {
                 .write(write("a", "a", "alpha", ExpectedVersion::Absent))
                 .await
                 .unwrap();
-            drop(partition);
+            partition.finish_service_shutdown().await.unwrap();drop(partition);
             let worker = || {
                 let mut command = std::process::Command::new(std::env::current_exe().unwrap());
                 command
@@ -3128,12 +3129,12 @@ mod tests {
                 .write(write("b", "a", "alpha new", ExpectedVersion::Match(1)))
                 .await
                 .unwrap();
-            drop(recovered);
+            recovered.finish_service_shutdown().await.unwrap();drop(recovered);
             let recovered = RecordPartition::open(&location, config().max_journal_bytes)
                 .await
                 .unwrap();
             assert_eq!(recovered.get("a").await.unwrap().unwrap().version, 2);
-            drop(recovered);
+            recovered.finish_service_shutdown().await.unwrap();drop(recovered);
             std::fs::remove_dir_all(location).unwrap();
         }
     }
@@ -3252,7 +3253,7 @@ mod tests {
             .write(write("a", "a", "alpha", ExpectedVersion::Absent))
             .await
             .unwrap();
-        drop(partition);
+        partition.finish_service_shutdown().await.unwrap();drop(partition);
         let worker = || {
             let mut command = std::process::Command::new(std::env::current_exe().unwrap());
             command
@@ -3302,12 +3303,12 @@ mod tests {
             .write(write("b", "a", "alpha new", ExpectedVersion::Match(1)))
             .await
             .unwrap();
-        drop(recovered);
+        recovered.finish_service_shutdown().await.unwrap();drop(recovered);
         let recovered = RecordPartition::open(&location, config().max_journal_bytes)
             .await
             .unwrap();
         assert_eq!(recovered.get("a").await.unwrap().unwrap().version, 2);
-        drop(recovered);
+        recovered.finish_service_shutdown().await.unwrap();drop(recovered);
         std::fs::remove_dir_all(location).unwrap();
     }
 

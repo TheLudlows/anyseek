@@ -12,9 +12,16 @@ def main():
     names = json.loads((root / "scripts/ci_write_path_cases.json").read_text())
     assert names and len(names) == len(set(names))
     with tempfile.TemporaryFile(mode="w+t", encoding="utf-8") as output:
-        subprocess.run(["cargo", "test", "-j", "1", "-p", "anyseek", "--lib", "--locked",
+        build = subprocess.run(["cargo", "test", "-j", "1", "-p", "anyseek", "--lib", "--locked",
                         "--features", "fault-injection", "--no-run", "--message-format=json"],
-                       cwd=root, stdout=output, check=True)
+                       cwd=root, stdout=output)
+        if build.returncode:
+            output.seek(0)
+            for line in output:
+                item = json.loads(line)
+                if item.get("reason") == "compiler-message":
+                    print(item["message"].get("rendered", item["message"]["message"]), flush=True)
+            build.check_returncode()
         output.seek(0)
         binaries = []
         for line in output:

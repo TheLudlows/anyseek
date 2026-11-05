@@ -616,11 +616,11 @@ impl RecordPartition {
                 if let Some(document)=&prepared.record.document {
                     prepared.component=Some(inner.index.reserve_component(&prepared.record,&inner.config).await?);
                     prepared.lexical=Some(if growth<=crate::storage::build_budget::EXPLICIT_BUFFERS {
-                        lexical::memory::Admission::Visible(inner.index.reserve_visible(document,&inner.config,&prepared.record.record_id).await?)
+                        lexical::memory::Admission::Visible(inner.index.reserve_visible(document,&inner.config,&prepared.record.record_id,inner.journal.owner_guard()).await?)
                     }else{
                         // Later escrows must count this row even while an
                         // asynchronous fallback has not published its base yet.
-                        lexical::memory::Admission::Fallback(inner.index.reserve_fallback(&prepared.record).await?)
+                        lexical::memory::Admission::Fallback(inner.index.reserve_fallback(&prepared.record,inner.journal.owner_guard()).await?)
                     });
                 }
                 let next_deadline=Some(&*prepared.record)
@@ -1121,7 +1121,7 @@ mod tests {
         assert!(matches!(result.results[4], Err(RecordError::Conflict(_))));
         assert_eq!(result.results[..4].iter().map(|r| r.as_ref().unwrap().version).collect::<Vec<_>>(), [1, 1, 2, 1]);
         p.inner.lock().await.index.drain_indexes().await.unwrap();
-        drop(p);
+        p.finish_service_shutdown().await.unwrap();drop(p);
         let p = RecordPartition::open(&root, settings.max_journal_bytes).await.unwrap();
         assert_eq!(p.get("s").await.unwrap().unwrap().document.unwrap()["body"], "updated");
         assert!(p.get("d").await.unwrap().is_some());
@@ -1163,7 +1163,7 @@ mod tests {
         let scope = failure.scope.unwrap();
         assert_eq!(scope.persistence_attempted, vec![1, 2]);
         assert_eq!(scope.replayed, vec![(0, receipt)]);
-        drop(p);
+        p.finish_service_shutdown().await.unwrap();drop(p);
         let p = RecordPartition::open(&root, settings.max_journal_bytes)
             .await
             .unwrap();
@@ -1264,7 +1264,7 @@ mod tests {
             std::fs::remove_file(root.join(format!(".test-{lane}-consumer-pause"))).unwrap();
         }
         p.inner.lock().await.index.drain_indexes().await.unwrap();
-        drop(p);
+        p.finish_service_shutdown().await.unwrap();drop(p);
         let p = RecordPartition::open(&root, settings.max_journal_bytes)
             .await
             .unwrap();

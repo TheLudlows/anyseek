@@ -1285,7 +1285,7 @@ mod tests {
         for n in 0..129 {let req=write(&format!("op-{n}"),&format!("r-{n}"),"alpha",ExpectedVersion::Absent);let receipt=p.write(req.clone()).await.unwrap();receipts.push((req,receipt));}
         {let inner=p.inner.lock().await;assert_eq!(inner.anchor.as_ref().unwrap().id,selected,"native rotation must not replace the State checkpoint");assert!(inner.index.detached_cache);assert_eq!(inner.index.components().await.len(),3);}
         assert_eq!(p.search("alpha".into(),None,SearchMode::Lexical,vec![],200).await.unwrap().count_total,130);
-        drop(p);
+        p.finish_service_shutdown().await.unwrap();drop(p);
         std::fs::write(path.join(".test-recovery-after-derived-seal"),b"fail").unwrap();
         let mut leftovers=None;
         for _ in 0..3 {
@@ -1403,7 +1403,7 @@ mod tests {
         std::fs::remove_file(path.join(".test-anchor-reject-loaded")).unwrap();
         p.compact_journal().await.unwrap();
         {let inner=p.inner.lock().await;let chosen=inner.anchor.as_ref().unwrap().segments.iter().find(|s|s.id==sealed.id).expect("same native package identity, not rebuilt from bodies");assert_eq!(chosen.files.as_slice(),sealed.files.as_slice());assert!(inner.index.pending_seals.is_empty());}
-        drop(p);let p=RecordPartition::open(&path,settings.max_journal_bytes).await.unwrap();
+        drop(held);p.finish_service_shutdown().await.unwrap();drop(p);let p=RecordPartition::open(&path,settings.max_journal_bytes).await.unwrap();
         assert_eq!(p.write(b).await.unwrap(),receipt);
         assert_eq!(query(&p,SearchMode::Lexical).await.hits.len(),3);
     }

@@ -99,6 +99,11 @@ impl Drop for Runtime {
     }
 }
 impl Runtime {
+    pub(crate) fn retain_partition_owner(&self, owner: Arc<std::fs::File>) -> Result<(), RecordError> {
+        self.directory.as_ref().ok_or_else(|| storage("immutable native partition owner"))?
+            .retain_partition_owner(owner)
+    }
+
     async fn blocking<T: Send + 'static>(
         self: &Arc<Self>,
         mut data: OwnedData,
@@ -218,6 +223,7 @@ impl Runtime {
             .ok_or_else(||storage("native selected byte budget overflow"))?;
         let directory=super::directory::BudgetDirectory::open_selected(path,limit)?;
         directory.retain_pin(pin.clone())?;
+        let directory_owner = directory.owner_token();
         let index = NativeIndex::open(directory).map_err(storage)?;
         let reader: IndexReader = index
             .reader_builder()
@@ -226,6 +232,7 @@ impl Runtime {
             .map_err(storage)?;
         let mut snapshot = capture(reader.searcher(), &manifest,None)?;
         snapshot._pin = Some(pin.clone());
+        snapshot._directory_owner = Some(directory_owner);
         Ok(Arc::new(Self {
             config: config.clone(),
             analyzer,
@@ -478,6 +485,7 @@ impl Runtime {
         };
         let mut snapshot = capture(data.reader.searcher(), &manifest,snapshot_charge)?;
         snapshot._pin = Some(self.pin.clone());
+        snapshot._directory_owner = self.directory.as_ref().map(|directory| directory.owner_token());
         let bytes = serde_json::to_vec(&(
             manifest,
             serde_json::to_value((&self.config.index, &self.config.schema, crate::tokenizer::standard::identity(self.config.index.tokenizer))).map_err(storage)?,
@@ -763,6 +771,7 @@ impl Runtime {
             _memory:Arc::new(memory),
             _buffer:buffer.map(Arc::new),
             _pin: None,
+            _directory_owner: None,
         })
     }
 
@@ -1278,7 +1287,7 @@ impl Runtime {
                 assert!(inner.anchor.is_none(),"derived rotation must leave WAL authority unchanged");
                 assert_eq!(inner.index.components().await.len(),2);}
             assert_eq!(held.identities.len(),128,"captured Searcher remains at its original cut");
-            drop(partition);
+            drop(held);partition.finish_service_shutdown().await.unwrap();drop(partition);
             let partition=RecordPartition::open(&path,settings.max_journal_bytes).await.unwrap();
             let receipt=partition.write(request.clone()).await.unwrap();
             assert_eq!(receipt.seq,129);assert_eq!(receipt.version,1);

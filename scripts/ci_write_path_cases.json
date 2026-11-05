@@ -42,5 +42,7 @@
   "record::write::tests::acknowledged_async_index_waiter_cancel_keeps_running_fallback_owned",
   "record::write::tests::synchronous_batch_caller_cancel_keeps_running_fallback_owned",
   "storage::build_budget::tests::disk_checks_before_growth_and_rescans_same_live_ledger",
-  "record::anchor::tests::anchor_component_metadata_pressure_stays_busy_and_retries_without_fencing"
+  "record::anchor::tests::anchor_component_metadata_pressure_stays_busy_and_retries_without_fencing",
+  "record::remote_checkpoint::tests::cold_cache_eviction_waits_for_materializer_without_checkpointing",
+  "record::remote_checkpoint::tests::dropped_partition_keeps_cross_process_owner_until_materializer_exits"
 ]

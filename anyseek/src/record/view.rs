@@ -29,15 +29,18 @@ pub(super) struct RetrievalView {
     owner: std::sync::Weak<Mutex<Inner>>,
 }
 impl RetrievalView {
-    pub(super) async fn reserve_visible(&self,document:&Document,config:&RecordConfig,id:&str)->Result<lexical::memory::Reservation,RecordError>{
+    pub(super) async fn reserve_visible(&self,document:&Document,config:&RecordConfig,id:&str,owner:Arc<std::fs::File>)->Result<lexical::memory::Reservation,RecordError>{
         let mut reservation=lexical::memory::Reservation::new(document,config,id)?;
         let native=self.tail.read().await.segments[0].lexical.clone();
+        // Install before publication can start an independently owned materializer.
+        native.retain_partition_owner(owner)?;
         // Empty base creation is fallible and must precede durable acceptance.
         if !native.has_snapshot()? {native.flush().await?;}
         native.reserve_visible(&mut reservation)?;Ok(reservation)
     }
-    pub(super) async fn reserve_fallback(&self,record:&Record)->Result<lexical::memory::Fallback,RecordError>{
+    pub(super) async fn reserve_fallback(&self,record:&Record,owner:Arc<std::fs::File>)->Result<lexical::memory::Fallback,RecordError>{
         let native=self.tail.read().await.segments[0].lexical.clone();
+        native.retain_partition_owner(owner)?;
         if !native.has_snapshot()? {native.flush().await?;}
         let document=record.document.as_ref().ok_or_else(||storage("fallback credit for tombstone"))?;
         // Synchronous publication passes the full indexed document; asynchronous
@@ -532,6 +535,7 @@ mod tests {
             query(&partition, SearchMode::Lexical).await.hits[0].score,
             expected
         );
+        partition.finish_service_shutdown().await.unwrap();
         drop(partition);
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -600,6 +604,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(query(&partition, SearchMode::Lexical).await.hits.len(), 2);
+        partition.finish_service_shutdown().await.unwrap();
         drop(partition);
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -648,6 +653,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(query(&partition, SearchMode::Lexical).await.hits.len(), 2);
+        partition.finish_service_shutdown().await.unwrap();
         drop(partition);
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -771,6 +777,8 @@ mod tests {
             partition.statistics().await.unwrap().physical_versions,
             oracle.statistics().await.unwrap().physical_versions
         );
+        partition.finish_service_shutdown().await.unwrap();
+        oracle.finish_service_shutdown().await.unwrap();
         drop(partition);
         drop(oracle);
         std::fs::remove_dir_all(root).unwrap();
