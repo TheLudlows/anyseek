@@ -26,7 +26,7 @@ struct Ledger {
     written: u64,
     paths: BTreeSet<PathBuf>,
 }
-struct WriterReservation {
+pub(super) struct WriterReservation {
     _memory: crate::storage::build_budget::MemoryLease,
     _buffer: Option<resources::Lease>,
 }
@@ -37,7 +37,7 @@ struct Budget {
     #[cfg(test)]
     failed_writes: std::sync::atomic::AtomicUsize,
     pin: Mutex<Option<Arc<crate::record::package_pins::Pin>>>,
-    writer_memory: Mutex<Option<WriterReservation>>,
+    writer_memory: Mutex<Option<Arc<WriterReservation>>>,
     pending_analysis: Mutex<Vec<WriterReservation>>,
     ledger: Mutex<Ledger>,
     bytes: u64,
@@ -147,13 +147,29 @@ impl BudgetDirectory {
     }
     /// Admit before the first worker starts. Directory clones retain the charge
     /// through worker shutdown, including failure/cancellation of its caller.
-    pub(super) fn admit_writer(&self, bytes:u64)->Result<(),RecordError> {
+    pub(super) fn prepare_writer(&self,bytes:u64)->Result<Arc<WriterReservation>,RecordError>{
         if self.selected {return Err(storage("immutable native package"));}
+        let reservation=self.budget.writer_memory.lock().map_err(|_|storage("native writer reservation poisoned"))?;
+        if let Some(owner)=reservation.as_ref(){return Ok(owner.clone());}
+        crate::storage::build_budget::validate_single(bytes).map_err(storage)?;
+        let memory=crate::storage::build_budget::reserve_memory(bytes).map_err(crate::record::memory_error)?;
+        let buffer=self.budget.scope.as_ref().map(|scope|scope.bytes(bytes)).transpose().map_err(|error|if error.is_recoverable(){RecordError::Busy}else{storage(error)})?;
+        Ok(Arc::new(WriterReservation{_memory:memory,_buffer:buffer}))
+    }
+    pub(super) fn install_writer(&self,prepared:Arc<WriterReservation>)->Result<(),RecordError>{
         let mut reservation=self.budget.writer_memory.lock().map_err(|_|storage("native writer reservation poisoned"))?;
-        if reservation.is_none() {
+        if let Some(owner)=reservation.as_ref(){
+            if !Arc::ptr_eq(owner,&prepared){return Err(storage("native writer workspace owner changed"));}
+        }else{*reservation=Some(prepared);}
+        Ok(())
+    }
+    pub(super) fn admit_writer(&self,bytes:u64)->Result<(),RecordError>{
+        if self.selected{return Err(storage("immutable native package"));}
+        let mut reservation=self.budget.writer_memory.lock().map_err(|_|storage("native writer reservation poisoned"))?;
+        if reservation.is_none(){
             let memory=crate::storage::build_budget::reserve_memory(bytes).map_err(storage)?;
-            let buffer=self.budget.scope.as_ref().map(|s|s.bytes(bytes)).transpose().map_err(storage)?;
-            *reservation=Some(WriterReservation {_memory:memory,_buffer:buffer});
+            let buffer=self.budget.scope.as_ref().map(|scope|scope.bytes(bytes)).transpose().map_err(storage)?;
+            *reservation=Some(Arc::new(WriterReservation{_memory:memory,_buffer:buffer}));
         }
         Ok(())
     }

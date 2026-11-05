@@ -37,7 +37,31 @@ impl Cursors {
     }
 }
 
+/// Credits belong to one immutable segment admission generation. The pending
+/// token follows the retained append lease after the identity has transferred.
+pub(super) struct ComponentCredit {
+    pub identity:crate::storage::build_budget::MemoryLease,
+    pub append:crate::component::AppendMemory,
+}
+impl ComponentCredit {
+    #[cfg(test)]
+    pub(super) fn new(shard:&crate::component::VectorSegment,document:&Document,id:&str)->Result<Self,RecordError>{
+        let retained=build_budget::component_estimate(document,shard.indexed_schema_vec.iter().map(|f|f.field.as_str())
+            .chain(shard.facets.iter().map(|f|f.name.as_str())))?;
+        let input=build_budget::document_estimate(document,&[])?;
+        Self::from_estimates(&shard.admission,input,retained,id)
+    }
+    pub(super) fn from_estimates(admission:&Arc<crate::component::memory::Admission>,input:u64,retained:u64,id:&str)->Result<Self,RecordError>{
+        let credit=admission.reserve(input,retained,build_budget::identity_estimate(id)?).map_err(memory_error)?;
+        Ok(Self{identity:credit.identity,append:crate::component::AppendMemory{
+            input:credit.input,retained:credit.retained,pending:credit.pending}})
+    }
+}
+
 pub(super) struct Input {
+    component:Option<ComponentCredit>,
+    visible:Option<lexical::memory::Admission>,
+    publish_native:bool,
     identity: lexical::Identity,
     ordinal: usize,
     fingerprint: Option<[u8; 32]>,
@@ -51,6 +75,9 @@ impl Input {
         identity: lexical::Identity,
         document: &Document,
     ) -> Result<Self, RecordError> {
+        let mut input=Self::admitted_visible(native,identity,document,None)?;input.publish_native=false;Ok(input)
+    }
+    pub fn admitted_visible(native:&lexical::runtime::Runtime,identity:lexical::Identity,document:&Document,visible:Option<lexical::memory::Admission>)->Result<Self,RecordError>{
         // Copy only lexical fields. Vectors and canonical bodies remain owned by
         // their respective components and Record; this is transient work input.
         let bytes = build_budget::component_estimate(document, native.config.schema.iter()
@@ -75,6 +102,9 @@ impl Input {
             .collect();
         native.reserve_queued_update();
         Ok(Self {
+            component:None,
+            publish_native:!matches!(&visible,Some(lexical::memory::Admission::Visible(_))),
+            visible,
             identity,
             ordinal: 0,
             fingerprint: None,
@@ -89,6 +119,10 @@ impl Input {
         ordinal: usize,
         document: &Document,
     ) -> Result<Self, RecordError> {
+        Self::vector_with_credit(config,identity,ordinal,document,None)
+    }
+    pub fn vector_with_credit(config:&RecordConfig,identity:lexical::Identity,ordinal:usize,
+        document:&Document,component:Option<ComponentCredit>)->Result<Self,RecordError>{
         let schema = retrieval_schema(config);
         let bytes = build_budget::component_estimate(document, schema.iter()
             .filter(|f| f.index_vector || f.facet).map(|f| f.field.as_str()))?
@@ -110,6 +144,9 @@ impl Input {
             })
             .collect();
         Ok(Self {
+            component,
+            publish_native:false,
+            visible:None,
             identity,
             ordinal,
             fingerprint,
@@ -134,9 +171,14 @@ impl Engine {
             Self::Vector { .. } => "vector",
         }
     }
-    async fn append(&self, input: Input, cursors: &Cursors) -> Result<(), RecordError> {
+    async fn append(&self, input: Input, cursors: &Arc<Cursors>) -> Result<(), RecordError> {
         match self {
-            Self::Lexical(native) => native.append_queued(input.identity, &input.document).await,
+            Self::Lexical(native) => match input.visible {
+                Some(lexical::memory::Admission::Visible(reservation))=>native.append_visible(input.identity,&input.document,reservation,false,Some(cursors.clone())).await,
+                Some(lexical::memory::Admission::Fallback(admission))=>native.append_fallback_admitted(input.identity,&input.document,admission,false).await,
+                None if input.publish_native=>native.append_fallback_queued(input.identity,&input.document).await,
+                None=>native.append_queued(input.identity, &input.document).await,
+            },
             Self::Vector { index, .. } => {
                 let component = index.read().await.segments[0].vector.clone();
                 #[cfg(test)]
@@ -159,6 +201,7 @@ impl Engine {
                     _ => None,
                 };
                 let append = async {
+                let mutation=shard.admission.mutation();
                 let outcome = std::panic::AssertUnwindSafe(async {
                     if shard.failed {
                         return Err(RecordError::RecoveryRequired);
@@ -172,13 +215,21 @@ impl Engine {
                     {
                         return Err(storage("vector consumer input order mismatch"));
                     }
-                    if let Some(memory) = &mut shard.build_reservation {
-                        memory
-                            .grow(build_budget::identity_estimate(&input.identity.id)?)
-                            .map_err(storage)?;
-                    }
+                    let component_memory=match input.component {
+                        Some(mut credit)=>{
+                            if credit.identity.bytes()<build_budget::identity_estimate(&input.identity.id)? {
+                                return Err(storage("component identity credit bound exceeded"));
+                            }
+                            credit.append.pending.transfer(&shard.admission,credit.identity).map_err(storage)?;
+                            Some(credit.append)
+                        },
+                        None=>{
+                            shard.admission.grow(build_budget::identity_estimate(&input.identity.id)?,false).map_err(storage)?;
+                            None
+                        },
+                    };
                     shard.active.as_mut().unwrap().append_identity(input.identity.id, input.identity.version, input.identity.revision, input.fingerprint.ok_or_else(|| storage("vector fingerprint missing"))?);
-                    shard.append(input.document).await.map_err(storage)?;
+                    shard.append_with_memory(input.document,component_memory).await.map_err(storage)?;
                     #[cfg(any(test, feature = "fault-injection"))]
                     if panic_after {
                         panic!("injected vector panic after append");
@@ -199,8 +250,10 @@ impl Engine {
                     // Readers inspect this flag under this same component guard;
                     // no failed mmap/metadata mutation escapes before fencing.
                     shard.failed = true;
+                    shard.admission.fail();
                     cursors.fail(error);
                 }
+                if result.is_ok() {mutation.complete();}
                 result
                 };
                 match permit {
@@ -210,11 +263,14 @@ impl Engine {
             }
         }
     }
-    async fn flush(&self) -> Result<(), RecordError> {
+    async fn flush(&self,already_published:bool) -> Result<(), RecordError> {
         match self {
             Self::Lexical(native) => {
-                native.flush().await?;
-                native.merge_small_segments().await
+                // Visible overlays and fallback rows each publish using their
+                // own pre-WAL workspace. A second flush/optional merge would
+                // reacquire memory after ACK and discard that guarantee.
+                if already_published || native.visible_enabled(){native.visible_status()}
+                else {native.flush().await?;native.merge_small_segments().await}
             },
             Self::Vector { .. } => Ok(()),
         }
@@ -376,11 +432,12 @@ impl Consumer {
                     }
                 }
                 let changed = !batch.inputs.is_empty();
+                let already_published=batch.inputs.iter().all(|input|input.publish_native || input.visible.is_some());
                 for input in batch.inputs {
                     self.engine.append(input, &self.cursors).await?;
                 }
                 if changed {
-                    self.engine.flush().await?;
+                    self.engine.flush(already_published).await?;
                 }
                 Ok::<_, RecordError>(())
             }

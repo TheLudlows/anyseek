@@ -112,14 +112,31 @@ impl Serialize for Inventory {
 impl<'de> Deserialize<'de> for Inventory {
     fn deserialize<D:serde::Deserializer<'de>>(d:D)->Result<Self,D::Error>{
         let raw=<&serde_json::value::RawValue>::deserialize(d)?;
-        if raw.get().len()>16*1024*1024{return Err(serde::de::Error::custom("inventory metadata too large"));}
+        Self::decode_proof(raw).map_err(serde::de::Error::custom)
+    }
+}
+impl Inventory {
+    // Proof callers keep the typed admission error outside serde::Error::custom.
+    pub(super) fn decode_proof(raw:&serde_json::value::RawValue)->Result<Self,RecordError>{
+        if raw.get().len()>16*1024*1024{return Err(storage("inventory metadata too large"));}
         let bytes=(raw.get().len() as u64).checked_mul(32).and_then(|n|n.checked_add(128))
-            .ok_or_else(||serde::de::Error::custom("inventory charge overflow"))?;
-        let lease=crate::storage::build_budget::reserve_memory(bytes).map_err(serde::de::Error::custom)?;
-        let values:Vec<FileRef>=serde_json::from_str(raw.get()).map_err(serde::de::Error::custom)?;
-        if values.len()>1024{return Err(serde::de::Error::custom("inventory entry limit exceeded"));}
+            .ok_or_else(||storage("inventory charge overflow"))?;
+        let lease=crate::storage::build_budget::reserve_memory(bytes).map_err(memory_error)?;
+        let values:Vec<FileRef>=serde_json::from_str(raw.get()).map_err(storage)?;
+        if values.len()>1024{return Err(storage("inventory entry limit exceeded"));}
         Ok(Self(Arc::new(InventoryOwner{values,_lease:lease})))
     }
+}
+// Separate permanent per-inventory limits from temporary process occupancy.
+// The latter is admission refusal, not evidence of a corrupt selected package.
+fn admit_inventory(bytes:u64)->Result<crate::storage::build_budget::MemoryLease,RecordError>{
+    crate::storage::build_budget::validate_single(bytes).map_err(storage)?;
+    crate::storage::build_budget::reserve_memory(bytes).map_err(memory_error)
+}
+fn grow_inventory(lease:&mut crate::storage::build_budget::MemoryLease,bytes:u64)->Result<(),RecordError>{
+    let total=lease.bytes().checked_add(bytes).ok_or_else(||storage("inventory memory overflow"))?;
+    crate::storage::build_budget::validate_single(total).map_err(storage)?;
+    lease.grow(bytes).map_err(memory_error)
 }
 pub(super) fn files(root:&Path,budget:u64)->Result<Inventory,RecordError> {
     if std::fs::symlink_metadata(root).map_err(storage)?.file_type().is_symlink(){return Err(storage("segment root symlink rejected"));}
@@ -141,13 +158,13 @@ pub(super) fn files(root:&Path,budget:u64)->Result<Inventory,RecordError> {
             let relative=entry_path.strip_prefix(root).map_err(storage)?.to_str().ok_or_else(||storage("invalid segment filename"))?;
             let charge=(relative.len() as u64).checked_mul(6).and_then(|n|n.checked_add(512)).and_then(|n|n.checked_mul(32))
                 .ok_or_else(||storage("inventory entry charge overflow"))?;
-            lease.grow(charge).map_err(storage)?;
+            grow_inventory(lease,charge)?;
             let path=relative.replace('\\',"/");
             result.push(FileRef{path,bytes,sha256:digest.finalize().into()});
         }
         Ok(())
     }
-    let mut lease=crate::storage::build_budget::reserve_memory(128).map_err(storage)?;
+    let mut lease=admit_inventory(128)?;
     let mut result=Vec::new();walk(root,root,&mut 0,budget,0,&mut 0,&mut result,&mut lease)?;
     result.sort_by(|a,b|a.path.cmp(&b.path));
     Ok(Inventory(Arc::new(InventoryOwner{values:result,_lease:lease})))
@@ -165,6 +182,12 @@ pub(super) fn read_bounded(path:&Path,limit:u64)->Result<Vec<u8>,RecordError>{
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn permanent_inventory_limit_is_not_retryable_busy() {
+        assert!(matches!(admit_inventory(u64::MAX),Err(RecordError::Storage(_))));
+        let mut lease=admit_inventory(128).unwrap();
+        assert!(matches!(grow_inventory(&mut lease,u64::MAX),Err(RecordError::Storage(_))));
+    }
     #[tokio::test]
     async fn shared_segment_statistics_match_effective_corpus_after_mutations() {
         use super::super::tests::{path,config,write,query};

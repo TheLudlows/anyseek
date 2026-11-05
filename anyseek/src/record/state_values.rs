@@ -276,7 +276,7 @@ impl Records {
             .checked_add(growth)
             .and_then(|n| (n as u64).checked_mul(32))
             .ok_or_else(|| storage("record copy growth overflow"))?;
-        let mut lease = reserve_memory(bytes).map_err(storage)?;
+        let mut lease = reserve_memory(bytes).map_err(memory_error)?;
         let mut value = old.clone();
         change(&mut value)?;
         self.insert_shared(id.to_owned(), Shared::from_admitted(value, &mut lease)?)?;

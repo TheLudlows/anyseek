@@ -4,10 +4,20 @@ use super::*;
 use crate::record::{Document, RecordConfig};
 use tantivy::{IndexReader, IndexWriter};
 use tokio::sync::Mutex;
+mod live;
 
 // Bound only queued analysis, not the accepted document size or corpus size.
 const ANALYSIS_BATCH_BYTES: u64 = 32 * 1024 * 1024;
 const ANALYSIS_BATCH_DOCUMENTS: usize = 128;
+
+// Every accepted row owns its native progress budget before WAL append.
+struct RowWorkspace { analysis: Charge, identity: Charge }
+struct PublishWorkspace { temporary: Charge, snapshot: Charge }
+pub(super) struct Escrow {
+    row: RowWorkspace,
+    writer: Arc<super::directory::WriterReservation>,
+    publication: PublishWorkspace,
+}
 
 struct Charge {
     memory: crate::storage::build_budget::MemoryLease,
@@ -20,9 +30,15 @@ impl Charge {
             .transpose().map_err(storage)?;
         Ok(Self { memory, buffer })
     }
-    fn grow(&mut self, bytes: u64) -> Result<(), RecordError> {
+    fn admit(bytes:u64)->Result<Self,RecordError>{
+        crate::storage::build_budget::validate_single(bytes).map_err(storage)?;
+        let memory=crate::storage::build_budget::reserve_memory(bytes).map_err(crate::record::memory_error)?;
+        let buffer=crate::resources::Scope::current().map(|scope|scope.retained_io().bytes(bytes)).transpose().map_err(|error|if error.is_recoverable(){RecordError::Busy}else{storage(error)})?;
+        Ok(Self{memory,buffer})
+    }
+    fn grow(&mut self,bytes:u64)->Result<(),RecordError>{
         self.memory.grow(bytes).map_err(storage)?;
-        if let Some(buffer) = &mut self.buffer { buffer.grow_bytes(bytes).map_err(storage)?; }
+        if let Some(buffer)=&mut self.buffer {buffer.grow_bytes(bytes).map_err(storage)?;}
         Ok(())
     }
 }
@@ -31,6 +47,9 @@ pub(crate) struct Runtime {
     pub(crate) config: RecordConfig,
     pub(super) analyzer: super::query::Analyzer,
     data: Arc<Mutex<Data>>,
+    live: std::sync::Mutex<live::Live>,
+    live_done: tokio::sync::Notify,
+    visible_bytes:Arc<std::sync::atomic::AtomicU64>,
     published: std::sync::RwLock<Option<Arc<Snapshot>>>,
     updates: std::sync::atomic::AtomicUsize,
     asynchronous: std::sync::atomic::AtomicBool,
@@ -48,12 +67,16 @@ struct Data {
     // later shutdown cannot mistake an absent writer for a successful join.
     writer_join_error: Option<String>,
     identities: Vec<Identity>,
+    identity_supplements: Vec<Charge>,
     identity_charge: Charge,
     pending_analysis_bytes: u64,
     pending_analysis_documents: usize,
     cut: Cut,
 }
 // Field order releases the mutex guard before the final runtime owner.
+fn identity_bytes(data:&Data)->Result<u64,RecordError>{
+    data.identity_supplements.iter().try_fold(data.identity_charge.memory.bytes(),|n,charge|n.checked_add(charge.memory.bytes())).ok_or_else(||storage("native identity owner memory overflow"))
+}
 struct OwnedData {
     guard: tokio::sync::OwnedMutexGuard<Data>,
     _owner: Arc<Runtime>,
@@ -111,6 +134,9 @@ impl Runtime {
             match scope { Some(scope) => scope.run_sync(run), None => run() }
         }).await.map_err(storage)?
     }
+    pub(crate) fn has_snapshot(&self)->Result<bool,RecordError>{
+        Ok(self.published.read().map_err(|_|RecordError::RecoveryRequired)?.is_some())
+    }
     pub(crate) fn package_path(&self) -> &Path { &self.pin.paths()[0] }
     pub(crate) fn create(path: &Path, config: &RecordConfig) -> Result<Arc<Self>, RecordError> {
         let analyzer = super::query::Analyzer::admitted(config.index.clone())?;
@@ -144,6 +170,7 @@ impl Runtime {
             config: config.clone(),
             analyzer,
             directory: Some(directory),
+            live:Default::default(),live_done:Default::default(),visible_bytes:Default::default(),
             published: std::sync::RwLock::new(None),
             updates: std::sync::atomic::AtomicUsize::new(0),
             asynchronous: std::sync::atomic::AtomicBool::new(false),
@@ -156,6 +183,7 @@ impl Runtime {
                 pending_analysis_bytes: 0,
                 pending_analysis_documents: 0,
                 identities: Vec::new(),
+                identity_supplements: Vec::new(),
                 identity_charge: Charge::new(0)?,
                 cut: Cut {
                     sequence: 0,
@@ -196,12 +224,13 @@ impl Runtime {
             .reload_policy(ReloadPolicy::Manual)
             .try_into()
             .map_err(storage)?;
-        let mut snapshot = capture(reader.searcher(), &manifest)?;
+        let mut snapshot = capture(reader.searcher(), &manifest,None)?;
         snapshot._pin = Some(pin.clone());
         Ok(Arc::new(Self {
             config: config.clone(),
             analyzer,
             directory: None,
+            live:Default::default(),live_done:Default::default(),visible_bytes:Default::default(),
             published: std::sync::RwLock::new(Some(Arc::new(snapshot))),
             updates: std::sync::atomic::AtomicUsize::new(0),
             asynchronous: std::sync::atomic::AtomicBool::new(false),
@@ -214,6 +243,7 @@ impl Runtime {
                 pending_analysis_bytes: 0,
                 pending_analysis_documents: 0,
                 identities: manifest.identities,
+                identity_supplements: Vec::new(),
                 identity_charge,
                 cut: manifest.cut,
             })),
@@ -232,7 +262,13 @@ impl Runtime {
         document: &Document,
         publish: bool,
     ) -> Result<(), RecordError> {
-        self.append_inner(identity, document, publish, publish).await
+        self.join_visible().await?;
+        self.append_inner(identity, document, publish, publish,None,None).await
+    }
+    /// Private replay retains the normal rotation count while delaying publication.
+    pub(crate) async fn append_replayed(self: &Arc<Self>,identity:Identity,document:&Document)->Result<(),RecordError> {
+        self.join_visible().await?;
+        self.append_inner(identity,document,false,true,None,None).await
     }
     /// Committed execution queues documents on the retained writer and publishes once at the
     /// batch boundary. Count them before publication so rotation cannot overrun
@@ -242,7 +278,8 @@ impl Runtime {
         identity: Identity,
         document: &Document,
     ) -> Result<(), RecordError> {
-        self.append_inner(identity, document, false, false).await
+        self.join_visible().await?;
+        self.append_inner(identity, document, false, false,None,None).await
     }
     async fn append_inner(
         self: &Arc<Self>,
@@ -250,9 +287,18 @@ impl Runtime {
         document: &Document,
         publish: bool,
         count_update: bool,
+        workspace:Option<RowWorkspace>,
+        fallback:Option<super::memory::Fallback>,
     ) -> Result<(), RecordError> {
         let estimate =
             crate::record::build_budget::document_estimate(document, &self.config.schema)?;
+        let (workspace,publication,writer,pending)=match fallback {
+            Some(super::memory::Fallback{pending,workspace:Escrow{row,writer,publication}})=>{
+                if workspace.is_some(){return Err(storage("duplicate native progress ownership"));}
+                (Some(row),Some(publication),Some(writer),Some(pending))
+            },
+            None=>(workspace,None,None,None),
+        };
         let mut data = OwnedData { guard: self.data.clone().lock_owned().await, _owner: self.clone(), unacknowledged: false };
         if data.write_state != WriteState::Writable { return Err(storage("native writer is sealed or failed")); }
         // Drain before admitting another document. One larger document remains
@@ -263,11 +309,21 @@ impl Runtime {
         {
             data = self.blocking(data, |owner, data| owner.drain_analysis(data)).await?.0;
         }
-        let analysis = crate::storage::build_budget::reserve_memory(estimate).map_err(storage)?;
-        let buffer = crate::resources::Scope::current()
-            .map(|s| s.bytes(estimate))
-            .transpose()
-            .map_err(storage)?;
+        let (analysis,buffer,identity_charge)=match workspace {
+            Some(workspace)=>{
+                if workspace.analysis.memory.bytes()<estimate || workspace.identity.memory.bytes()<256+identity.id.len() as u64 {
+                    #[cfg(test)]
+                    eprintln!("native row workspace mismatch analysis_owned={} analysis_needed={estimate} identity_owned={} identity_needed={}",workspace.analysis.memory.bytes(),workspace.identity.memory.bytes(),256+identity.id.len() as u64);
+                    return Err(storage("native row workspace bound exceeded"));
+                }
+                (workspace.analysis.memory,workspace.analysis.buffer,Some(workspace.identity))
+            },
+            None=>{
+                let analysis=crate::storage::build_budget::reserve_memory(estimate).map_err(storage)?;
+                let buffer=crate::resources::Scope::current().map(|scope|scope.bytes(estimate)).transpose().map_err(storage)?;
+                (analysis,buffer,None)
+            }
+        };
         let analyzer = &self.analyzer;
         let mut fields = Vec::new();
         for field in self.config.schema.iter().filter(|f| f.index_lexical) {
@@ -288,8 +344,19 @@ impl Runtime {
             fields.push(analyzer.field(&text).await);
         }
         self.blocking(data, move |owner, data| {
+            #[cfg(feature="fault-injection")]
+            if writer.is_some() && std::env::var("ANYSEEK_FALLBACK_CRASH_STAGE").as_deref()==Ok("before_native") {std::process::abort();}
+            if let Some(writer)=&writer {
+                owner.directory.as_ref().ok_or_else(||storage("immutable fallback publication"))?
+                    .install_writer(writer.clone())?;
+            }
             owner.ensure_writer_locked(data)?;
-            data.identity_charge.grow(256 + identity.id.len() as u64)?;
+            if let Some(charge)=identity_charge {data.identity_supplements.push(charge);}
+            else {
+                let next=identity_bytes(data)?.checked_add(256+identity.id.len() as u64).ok_or_else(||storage("native identity memory overflow"))?;
+                crate::storage::build_budget::validate_single(next).map_err(storage)?;
+                data.identity_charge.grow(256+identity.id.len() as u64)?;
+            }
             let mut doc = TantivyDocument::new();
             let native_schema = data.index.schema();
             doc.add_u64(
@@ -325,12 +392,29 @@ impl Runtime {
                 .map_err(storage)?;
             data.cut.sequence = data.cut.sequence.max(identity.revision);
             data.identities.push(identity);
+            #[cfg(test)]
+            if writer.is_some() {
+                // Cancellation is injected after a real native add, while the
+                // actual blocking task owns Data and every remaining workspace.
+                let gate=owner.package_path().join(".test-fallback-native-block");
+                if gate.exists(){
+                    std::fs::write(gate.with_extension("started"),b"native add complete").map_err(storage)?;
+                    let deadline=std::time::Instant::now()+std::time::Duration::from_secs(10);
+                    while gate.exists(){
+                        if std::time::Instant::now()>deadline{return Err(storage("fallback native test gate deadline"));}
+                        std::thread::sleep(std::time::Duration::from_millis(1));
+                    }
+                }
+            }
             if count_update { owner.reserve_update(); }
             if publish {
-                owner.flush_locked(data)?;
+                owner.flush_locked_admitted(data,publication)?;
             } else if data.pending_analysis_bytes >= ANALYSIS_BATCH_BYTES {
                 owner.drain_analysis(data)?;
             }
+            // flush_locked has atomically advanced the base; until then this
+            // token lives in the actual native worker, even if its waiter drops.
+            drop((pending,writer));
             Ok(())
         }).await?;
         Ok(())
@@ -347,7 +431,24 @@ impl Runtime {
         data.pending_analysis_documents = 0;
         Ok(())
     }
-    fn flush_locked(&self, data: &mut Data) -> Result<(), RecordError> {
+    fn flush_locked(&self,data:&mut Data)->Result<(),RecordError>{
+        self.flush_locked_admitted(data,None)
+    }
+    fn flush_locked_admitted(&self,data:&mut Data,workspace:Option<PublishWorkspace>)->Result<(),RecordError>{
+        #[cfg(feature="fault-injection")]
+        let fallback=workspace.is_some();
+        let snapshot=self.commit_snapshot_locked(data,workspace)?;
+        #[cfg(feature="fault-injection")]
+        if fallback && std::env::var("ANYSEEK_FALLBACK_CRASH_STAGE").as_deref()==Ok("before_base_publish") {std::process::abort();}
+        let mut state=self.live.lock().map_err(|_|RecordError::RecoveryRequired)?;
+        if !state.rows.is_empty(){return Err(storage("private flush raced a visible delta"));}
+        if state.enabled{state.base=Some(snapshot.clone());}
+        *self.published.write().map_err(|_|RecordError::RecoveryRequired)?=Some(snapshot);
+        #[cfg(feature="fault-injection")]
+        if fallback && std::env::var("ANYSEEK_FALLBACK_CRASH_STAGE").as_deref()==Ok("after_base_publish") {std::process::abort();}
+        Ok(())
+    }
+    fn commit_snapshot_locked(&self, data: &mut Data,workspace:Option<PublishWorkspace>) -> Result<Arc<Snapshot>, RecordError> {
         if self.directory.is_none() {return Err(storage("immutable lexical package"));}
         self.drain_analysis(data)?;
         data.reader.reload().map_err(storage)?;
@@ -355,7 +456,13 @@ impl Runtime {
         let temporary_bytes = data.identities.iter().try_fold(65536u64, |n, id| {
             n.checked_add(256 + id.id.len() as u64 * 8)
         }).ok_or_else(|| storage("native manifest memory overflow"))?;
-        let _temporary = Charge::new(temporary_bytes)?;
+        let (_temporary,snapshot_charge)=match workspace {
+            Some(workspace)=>{
+                if workspace.temporary.memory.bytes()<temporary_bytes{return Err(storage("native manifest workspace mismatch"));}
+                (workspace.temporary,Some(workspace.snapshot))
+            },
+            None=>(Charge::new(temporary_bytes)?,None),
+        };
         let manifest = Manifest {
             format: FORMAT,
             engine: ENGINE.into(),
@@ -369,7 +476,7 @@ impl Runtime {
                 .collect(),
             identities: data.identities.clone(),
         };
-        let mut snapshot = capture(data.reader.searcher(), &manifest)?;
+        let mut snapshot = capture(data.reader.searcher(), &manifest,snapshot_charge)?;
         snapshot._pin = Some(self.pin.clone());
         let bytes = serde_json::to_vec(&(
             manifest,
@@ -383,8 +490,7 @@ impl Runtime {
         let directory = self.directory.as_ref().ok_or_else(|| storage("immutable lexical package"))?;
         directory.atomic_write(Path::new("record-native.json"), &bytes).map_err(storage)?;
         directory.sync_directory().map_err(storage)?;
-        *self.published.write().map_err(|_| RecordError::RecoveryRequired)? = Some(Arc::new(snapshot));
-        Ok(())
+        Ok(Arc::new(snapshot))
     }
     fn ensure_writer_locked(&self, data: &mut Data) -> Result<(),RecordError> {
         if data.write_state != WriteState::Writable {return Err(storage("native writer is sealed or failed"));}
@@ -410,6 +516,7 @@ impl Runtime {
         Ok(())
     }
     pub(crate) async fn flush(self: &Arc<Self>) -> Result<(), RecordError> {
+        self.join_visible().await?;
         let data = OwnedData { guard: self.data.clone().lock_owned().await, _owner: self.clone(), unacknowledged: false };
         self.blocking(data, |owner, data| {
             if data.write_state != WriteState::Writable { return Err(storage("native writer is sealed or failed")); }
@@ -426,6 +533,7 @@ impl Runtime {
     // Each successful pass reduces the segment count. Admission and the 128-row
     // input bound are shared with tail maintenance; no unbounded full-index merge.
     async fn merge_small_segments_once(self: &Arc<Self>) -> Result<bool, RecordError> {
+        if self.visible_enabled(){return Ok(false);}
         let data = OwnedData { guard: self.data.clone().lock_owned().await, _owner: self.clone(), unacknowledged: false };
         let (data, prepared) = self.blocking(data, |owner, data| {
             if data.write_state != WriteState::Writable {
@@ -519,6 +627,8 @@ impl Runtime {
     /// Readers keep their fixed Searcher/pin. No directory rename or authority
     /// publication occurs here, and a failed join never permits another writer.
     pub(crate) async fn seal(self: &Arc<Self>) -> Result<(), RecordError> {
+        self.live.lock().map_err(|_|RecordError::RecoveryRequired)?.closing=true;
+        self.join_visible().await?;
         let data = OwnedData { guard: self.data.clone().lock_owned().await, _owner: self.clone(), unacknowledged: false };
         self.blocking(data, |owner, data| {
             match data.write_state {
@@ -555,6 +665,8 @@ impl Runtime {
     /// This does not flush, publish a Searcher or checkpoint. Fixed readers keep
     /// their pins; a failed join remains an error on every subsequent attempt.
     pub(crate) async fn shutdown(self: &Arc<Self>) -> Result<(), RecordError> {
+        self.live.lock().map_err(|_|RecordError::RecoveryRequired)?.closing=true;
+        let visible_result=self.join_visible().await;
         let data = OwnedData { guard: self.data.clone().lock_owned().await, _owner: self.clone(), unacknowledged: false };
         self.blocking(data, |owner, data| {
             data.write_state = WriteState::Failed;
@@ -563,7 +675,7 @@ impl Runtime {
             data.write_state = WriteState::Sealed;
             Ok(())
         }).await?;
-        Ok(())
+        visible_result
     }
         pub(crate) fn reserve_update(&self) {
             self.updates.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
@@ -581,26 +693,28 @@ impl Runtime {
             (snapshot.identities.len(), snapshot.searcher.segment_readers().len())
         }
         pub(crate) async fn snapshot(&self) -> Result<Arc<Snapshot>, RecordError> {
+            self.visible_status()?;
             self.published.read().map_err(|_| RecordError::RecoveryRequired)?
                 .clone().ok_or_else(|| storage("unpublished native tail"))
         }
 
     }
-    fn capture(searcher: Searcher, manifest: &Manifest) -> Result<Snapshot, RecordError> {
+    fn capture(searcher: Searcher, manifest: &Manifest,prepared:Option<Charge>) -> Result<Snapshot, RecordError> {
         let (expected, fields) = schema(&manifest.fields)?;
         if *searcher.schema() != expected {
             return Err(storage("native runtime schema mismatch"));
         }
+        let identity_id_bytes=manifest.identities.iter().try_fold(0u64,|n,id|n.checked_add(id.id.len() as u64))
+            .ok_or_else(||storage("native identity bytes overflow"))?;
         let estimate = (manifest.identities.len() as u64)
             .checked_mul(128 + fields.len() as u64 * 32)
-            .and_then(|n| manifest.identities.iter().try_fold(n, |n, id| n.checked_add(id.id.len() as u64)))
+            .and_then(|n|n.checked_add(identity_id_bytes))
             .and_then(|n| n.checked_add(65536))
             .ok_or_else(|| storage("native view memory overflow"))?;
-        let memory = crate::storage::build_budget::reserve_memory(estimate).map_err(storage)?;
-        let buffer = crate::resources::Scope::current()
-            .map(|s| s.retained_io().bytes(estimate))
-            .transpose()
-            .map_err(storage)?;
+        let charge=match prepared {Some(charge)=>{
+            if charge.memory.bytes()<estimate {return Err(storage("native snapshot workspace mismatch"));}charge
+        },None=>Charge::new(estimate)?};
+        let Charge{memory,buffer}=charge;
         let mut seen = BTreeSet::new();
         let mut addresses = Vec::new();
         let mut lengths = Vec::new();
@@ -640,14 +754,14 @@ impl Runtime {
         }
         Ok(Snapshot {
             searcher,
-            fields,
-            names: manifest.fields.clone(),
+            fields:Arc::new(fields),
+            names: Arc::new(manifest.fields.clone()),
             cut: manifest.cut,
-            identities: Arc::new(manifest.identities.clone()),
-            addresses,
-            lengths,
-            _memory: memory,
-            _buffer: buffer,
+            identities: Arc::new(manifest.identities.clone().into()),identity_id_bytes,overlay:Vec::new(),
+            addresses:Arc::new(addresses),
+            lengths:Arc::new(lengths),
+            _memory:Arc::new(memory),
+            _buffer:buffer.map(Arc::new),
             _pin: None,
         })
     }

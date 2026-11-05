@@ -188,6 +188,35 @@ jobs:
           python scripts/record_reclamation_smoke.py --server "$server_binary" --backend local
           python scripts/record_reclamation_smoke.py --server "$server_binary" --backend fixture
 
+  write-path:
+    name: Write path (${{ matrix.os }})
+    needs: static
+    if: needs.static.outputs.code == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    env:
+      RUSTFLAGS: "-C target-cpu=x86-64"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_INCREMENTAL: "0"
+      ANYSEEK_TEST_SCALE: small
+      ANYSEEK_TEST_ROOT: ${{ github.workspace }}/target/anyseek-ci-write-path
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: ci-generic-write-path-v1
+      - name: Prepare isolated test root
+        shell: bash
+        run: mkdir -p "$ANYSEEK_TEST_ROOT"
+      - name: Exact visibility, memory admission, cancellation and recovery regressions
+        run: python scripts/ci_write_path_cases.py
+
   full-acceptance:
     if: github.event_name == 'workflow_dispatch' && inputs.full
     uses: ./.github/workflows/full-acceptance.yml

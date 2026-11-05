@@ -48,6 +48,11 @@ impl<'a> QueryStatistics<'a> {
                 }
             }
         }
+        for view in corpus {
+            for (ordinal,row) in &view.snapshot.overlay {if view.live.contains(ordinal){
+                for (field,length) in row.lengths.iter().enumerate(){sums[field]+=decoded(*length) as u64;nonempty[field]+=u64::from(*length>0);}
+            }}
+        }
         let mut averages = vec![1.0f32; field_count];
         if normalization == FieldLengthNormalization::Shared {
             let sum = sums.iter().sum::<u64>();
@@ -75,7 +80,7 @@ impl<'a> QueryStatistics<'a> {
                 for (segment_id, segment) in
                     view.snapshot.searcher.segment_readers().iter().enumerate()
                 {
-                    for field in &view.snapshot.fields {
+                    for field in view.snapshot.fields.iter() {
                         if let Some(mut postings) = segment
                             .inverted_index(*field)
                             .map_err(storage)?
@@ -96,6 +101,7 @@ impl<'a> QueryStatistics<'a> {
                         }
                     }
                 }
+                for (ordinal,row) in &view.snapshot.overlay {if view.live.contains(ordinal) && row.postings.iter().any(|field|field.contains_key(word.as_str())){present.insert(*ordinal);}}
                 df += present.len();
             }
             let n = population as f32;
@@ -257,6 +263,28 @@ impl ActiveView<'_> {
                 scorer.advance();
             }
         }
+        if !self.snapshot.overlay.is_empty() {
+            let predicate=query.downcast_ref::<super::query::Compiled>().ok_or_else(||storage("visible delta requires shared query compiler"))?;
+            for (ordinal,row) in &self.snapshot.overlay {
+                // Match before admission callbacks, just like the native scorer.
+                // Hybrid channel accounting happens in accepts and must not see nonmatches.
+                if !self.live.contains(ordinal) || !predicate.matches(row,&self.snapshot.fields) || !accepts(&row.identity){continue;}
+                count+=1;let mut score=0.0f32;
+                for group in groups {
+                    if !row.postings.iter().enumerate().any(|(field,terms)|
+                        (group.match_fields.is_empty() || group.match_fields.contains(&self.snapshot.fields[field])) && terms.contains_key(&group.matched_term)){continue;}
+                    for component in &group.components {let slot=slots[component.as_str()];
+                        for (field,terms) in row.postings.iter().enumerate(){let Some(positions)=terms.get(component) else{continue};
+                            let tf=positions.len() as f32;let length=decoded(row.lengths[field]);
+                            let denominator=1.2*(1.0-0.75+0.75*(length/averages[field]));
+                            score+=boosts[field]*idfs[slot]*(tf*(1.2+1.0)/(tf+denominator));
+                        }
+                    }
+                }
+                if !score.is_finite(){return Err(storage("nonfinite delta BM25F score"));}
+                collect(&row.identity,score);
+            }
+        }
         Ok(count)
     }
 }
@@ -337,6 +365,10 @@ impl<'a> CorpusView<'a> {
                 }
             }
         }
+        for view in &self.views {if !view.snapshot.overlay.is_empty(){
+            let predicate=query.downcast_ref::<super::query::Compiled>().ok_or_else(||storage("visible delta requires shared query compiler"))?;
+            for (ordinal,row) in &view.snapshot.overlay {if view.live.contains(ordinal) && predicate.matches(row,&view.snapshot.fields) && accepts(&row.identity){count+=1;}}
+        }}
         // select() bounds the unique active population by MAX_POPULATION.
         Ok(count)
     }

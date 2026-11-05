@@ -60,11 +60,19 @@ impl Context<'_> {
     /// Replay certified tail decisions into the selected index view. Never
     /// append WAL or generate another operation/owner identity during recovery.
     pub(super) async fn replay(&mut self,entry:Entry)->Result<(),RecordError>{
+        self.replay_with_native(entry,true).await
+    }
+    /// Only unpublished views may defer readers. Callers flush before exposure.
+    pub(super) async fn replay_private(&mut self,entry:Entry)->Result<(),RecordError>{
+        self.replay_with_native(entry,false).await
+    }
+    async fn replay_with_native(&mut self,entry:Entry,publish_native:bool)->Result<(),RecordError>{
         match entry {
             Entry::Applied(applied)=>{
                 #[cfg(test)] let _phase=(applied.receipt.seq%128==0).then(||maintenance::Phase::new("replay_applied",applied.receipt.seq));
                 let (index_bytes,updates)=build_budget::write_estimate(&*self.state,&self.config,&applied)?;
                 if index_bytes>0 && !self.index.can_admit(index_bytes,updates).await {
+                    if !publish_native {self.index.flush_replayed_native().await?;}
                     self.stage_stable_tail().await?;
                 }
                 let prepared=state_memory::Prepared::new(&*self.state,&applied)?;
@@ -76,7 +84,7 @@ impl Context<'_> {
                 }
                 let bytes=mutation::snapshot_after(&*self.state,*self.snapshot_bytes,&applied,&prepared.record)?;
                 prepared.admit_containers(&mut *self.state,bytes)?;
-                self.publish_prepared(&applied,bytes,Some(prepared)).await?;
+                self.publish_prepared_with_native(&applied,bytes,Some(prepared),publish_native).await?;
                 return Ok(());
             },
             Entry::Expired(event)=>{
@@ -91,5 +99,45 @@ impl Context<'_> {
         }
         *self.snapshot_bytes=checkpoint_codec::length(&self.config, &*self.state)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::record::tests::{config,write};
+    #[tokio::test(flavor="multi_thread",worker_threads=2)]
+    async fn cold_anchor_replay_batches_native_publication_and_keeps_receipts() {
+        let temp=tempfile::tempdir().unwrap();let root=temp.path().join("records");
+        let mut cfg=config();cfg.max_operations=512;cfg.max_journal_bytes=16*1024*1024;
+        let p=RecordPartition::create(&root,cfg.clone()).await.unwrap();
+        for i in 0..8 {let id=format!("r{i}");p.write(write(&id,&id,"alpha base",ExpectedVersion::Absent)).await.unwrap();}
+        p.compact_journal().await.unwrap();
+        let mut receipts=Vec::new();
+        for i in 0..300 {
+            let mut request=write(&format!("pending-{i}"),&format!("r{}",i%8),&format!("alpha term{i}"),ExpectedVersion::Any);
+            if i%11==0 {request.document=None;}
+            let receipt=p.write(request.clone()).await.unwrap();receipts.push((request,receipt));
+        }
+        let before=p.search("alpha".into(),None,crate::search::SearchMode::Lexical,vec![],32).await.unwrap();
+        let expected=before.hits.iter().map(|h|(h.record.record_id.clone(),h.record.document.clone(),h.score)).collect::<Vec<_>>();
+        p.finish_service_shutdown().await.unwrap();drop(before);drop(p);
+        let p=RecordPartition::open(&root,cfg.max_journal_bytes).await.unwrap();
+        let index=p.inner.lock().await.index.test_index().clone();
+        let root_index=index.read().await;let mut replayed_rows=0;
+        for segment in &root_index.segments {
+            let snapshot=segment.lexical.snapshot().await.unwrap();
+            assert!(snapshot.overlay.is_empty());
+            if snapshot.cut.sequence>8 {
+                replayed_rows+=snapshot.identities.len();
+                assert!(snapshot.native_segment_count()<=1,"private replay must not commit once per row");
+            }
+        }
+        assert!(replayed_rows>256);drop(root_index);drop(index);
+        let after=p.search("alpha".into(),None,crate::search::SearchMode::Lexical,vec![],32).await.unwrap();
+        assert_eq!(expected.len(),after.count_total);
+        assert_eq!(expected,after.hits.iter().map(|h|(h.record.record_id.clone(),h.record.document.clone(),h.score)).collect::<Vec<_>>());
+        for (request,receipt) in receipts {assert_eq!(p.write(request).await.unwrap(),receipt);}
+        p.finish_service_shutdown().await.unwrap();
     }
 }

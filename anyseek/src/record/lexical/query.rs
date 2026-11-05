@@ -7,7 +7,7 @@ use crate::{
     tokenizer::{AnalysisContext, analyze},
 };
 use ahash::{AHashMap, AHashSet};
-use tantivy::query::{AllQuery, BooleanQuery, EmptyQuery, Occur, PhraseQuery, TermQuery};
+use tantivy::query::{AllQuery, BooleanQuery as NativeBooleanQuery, EmptyQuery, Occur, PhraseQuery as NativePhraseQuery, TermQuery as NativeTermQuery};
 
 pub(super) struct Analyzer {
     meta: IndexMetaObject,
@@ -151,7 +151,7 @@ impl Analyzer {
         };
         if browse && text.is_empty() {
             return Plan {
-                predicate: Box::new(AllQuery),
+                predicate: Box::new(Compiled::all()),
                 scores: vec![],
                 query_terms: vec![],
             };
@@ -224,7 +224,7 @@ impl Analyzer {
         }
         if positive.is_empty() || fields.is_empty() {
             return Plan {
-                predicate: Box::new(EmptyQuery),
+                predicate: Box::new(Compiled::empty()),
                 scores: vec![],
                 query_terms,
             };
@@ -260,3 +260,44 @@ impl Analyzer {
         }
     }
 }
+
+// One compiler owns both native execution and the exact memory predicate.
+// In particular phrase offsets survive ngram expansion and stopword analysis.
+#[derive(Clone, Debug)]
+enum Expr {All,Empty,Term(Field,String),Boolean(Vec<(Occur,Expr)>),Phrase(Field,Vec<(usize,String)>)}
+#[derive(Debug)]
+pub(super) struct Compiled { native:Box<dyn Query>, expr:Expr }
+impl Clone for Compiled {fn clone(&self)->Self{Self{native:self.native.box_clone(),expr:self.expr.clone()}}}
+impl Query for Compiled {
+    fn weight(&self,e:EnableScoring<'_>)->tantivy::Result<Box<dyn tantivy::query::Weight>>{self.native.weight(e)}
+    fn query_terms<'a>(&'a self,v:&mut dyn FnMut(&'a Term,bool)){self.native.query_terms(v)}
+}
+impl Compiled {
+    fn all()->Self{Self{native:Box::new(AllQuery),expr:Expr::All}}
+    fn empty()->Self{Self{native:Box::new(EmptyQuery),expr:Expr::Empty}}
+    pub(super) fn matches(&self,row:&super::memory::Row,fields:&[Field])->bool{self.expr.matches(row,fields)}
+}
+impl Expr {
+    fn matches(&self,row:&super::memory::Row,fields:&[Field])->bool{match self {
+        Self::All=>true,Self::Empty=>false,Self::Term(f,t)=>!row.positions(fields,*f,t).is_empty(),
+        Self::Boolean(clauses)=>{let mut must=false;let mut should=false;let mut hit=false;
+            for (o,e) in clauses{let yes=e.matches(row,fields);match o{Occur::Must=>{must=true;if !yes{return false}},Occur::MustNot=>if yes{return false},Occur::Should=>{should=true;hit|=yes}}}
+            must || (should&&hit)
+        },
+        Self::Phrase(field,terms)=>{let Some((first_offset,first))=terms.first() else{return false};
+            row.positions(fields,*field,first).iter().any(|start|terms.iter().all(|(offset,term)|{
+                let target=i64::from(*start)+*offset as i64-*first_offset as i64;
+                target>=0 && row.positions(fields,*field,term).binary_search(&(target as u32)).is_ok()
+            }))
+        }
+    }}
+}
+struct BooleanQuery;
+impl BooleanQuery {fn new(clauses:Vec<(Occur,Box<dyn Query>)>)->Compiled{
+    let expr=Expr::Boolean(clauses.iter().map(|(o,q)|(*o,q.downcast_ref::<Compiled>().expect("compiler owns every clause").expr.clone())).collect());
+    Compiled{native:Box::new(NativeBooleanQuery::new(clauses)),expr}
+}}
+struct TermQuery;
+impl TermQuery {fn new(term:Term,option:IndexRecordOption)->Compiled{let expr=Expr::Term(term.field(),term.value().as_str().expect("text term").to_owned());Compiled{native:Box::new(NativeTermQuery::new(term,option)),expr}}}
+struct PhraseQuery;
+impl PhraseQuery {fn new_with_offset(terms:Vec<(usize,Term)>)->Compiled{let expr=Expr::Phrase(terms[0].1.field(),terms.iter().map(|(o,t)|(*o,t.value().as_str().expect("text term").to_owned())).collect());Compiled{native:Box::new(NativePhraseQuery::new_with_offset(terms)),expr}}}

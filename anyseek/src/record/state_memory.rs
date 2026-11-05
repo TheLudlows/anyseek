@@ -37,7 +37,7 @@ impl<T: Serialize> Shared<T> {
                 .checked_mul(32)
                 .ok_or_else(|| storage("value size overflow"))?,
         )
-        .map_err(storage)?;
+        .map_err(memory_error)?;
         // The measured value moves unchanged into its owner with the full lease.
         Ok(Self(Arc::new(ValueOwner { value, _lease: lease })))
     }
@@ -46,7 +46,7 @@ impl<T: Serialize> Shared<T> {
         crate::storage::build_budget::validate_single(bytes).map_err(storage)?;
         let total=parts.iter().try_fold(0u64,|n,p|n.checked_add(p.bytes()).ok_or_else(||storage("prepared balance overflow")))?;
         if bytes>total{return Err(storage("value exceeds prepared ownership"));}
-        let mut value=reserve_memory(0).map_err(storage)?;let mut remaining=bytes;
+        let mut value=reserve_memory(0).map_err(memory_error)?;let mut remaining=bytes;
         for part in parts {let n=remaining.min(part.bytes());value.merge(part.split_off(n).map_err(storage)?).map_err(storage)?;remaining-=n;if remaining==0{break;}}
         Ok(value)
     }
@@ -107,13 +107,13 @@ impl State {
         let needed=(bytes as u64).checked_mul(32).ok_or_else(||storage("state metadata estimate overflow"))?;
         if let Some(charge) = self.residency.as_mut().and_then(Arc::get_mut) {
             if needed > charge.bytes {
-                charge.lease.grow(needed - charge.bytes).map_err(storage)?;
+                charge.lease.grow(needed - charge.bytes).map_err(memory_error)?;
                 charge.bytes = needed;
             }
         } else {
             self.residency = Some(Arc::new(Charge {
                 bytes: needed,
-                lease: reserve_memory(needed).map_err(storage)?,
+                lease: reserve_memory(needed).map_err(memory_error)?,
             }));
         }
         Ok(())
@@ -148,7 +148,7 @@ impl State {
             .ok_or_else(|| storage("state clone estimate overflow"))?;
         let residency = Some(Arc::new(Charge {
             bytes,
-            lease: reserve_memory(bytes).map_err(storage)?,
+            lease: reserve_memory(bytes).map_err(memory_error)?,
         }));
         Ok(Self {
             lineage: self.lineage.clone(),
@@ -171,8 +171,9 @@ impl State {
 /// A gross ownership reservation prepared before the durable append. Replacing
 /// a same-sized live value still allocates a complete new value while a snapshot
 /// may retain the old one; no net-size subtraction is used for these owners.
-#[derive(Clone)]
 pub(super) struct Prepared {
+    pub lexical: Option<lexical::memory::Admission>,
+    pub component:Option<index_consumers::ComponentCredit>,
     pub record: Shared<Record>,
     pub operation: Shared<Applied>,
 }
@@ -186,14 +187,14 @@ impl Prepared {
         // Separate bounded allocations: new record projection, retained request
         // copy and small fixed record metadata. No giant aggregate single lease.
         let mut admission=[applied_bytes,applied_bytes,prior_bytes,1024].into_iter().map(|n|{
-            reserve_memory((n as u64).checked_mul(32).ok_or_else(||storage("prepared estimate overflow"))?).map_err(storage)
+            reserve_memory((n as u64).checked_mul(32).ok_or_else(||storage("prepared estimate overflow"))?).map_err(memory_error)
         }).collect::<Result<Vec<_>,_>>()?;
         let document=enrichment::document(prior,&applied.request)?;
         let temporal=temporal::retained(prior,&applied.request,applied.observed_time_ms)?;
         let record=mutation::projected_record(prior,applied,document,temporal);
         let record=Shared::from_parts(record,&mut admission)?;
         let operation=Shared::copy_from_parts(applied,&mut admission)?;
-        Ok(Self{record,operation})
+        Ok(Self{record,operation,lexical:None,component:None})
     }
     pub(super) fn admit_containers(&self,state:&mut State,total:usize)->Result<(),RecordError>{
         let old=state.records.get(&self.record.record_id);

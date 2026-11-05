@@ -94,7 +94,19 @@ mod tests {
         assert_eq!(RecordPartition::reclaim_deleted_files(&path, 0).await, Err(RecordError::Busy));
         drop(pin);
         for i in 0..100 { std::fs::write(path.join(format!("extra-{i}")), b"x").unwrap(); }
-        assert!(!RecordPartition::reclaim_deleted_files(&path, 1).await.unwrap());
+        // ACK may leave a bounded lexical materializer holding a child pin.
+        // Match service retirement: Busy preserves the root, then retry after
+        // the last owned worker releases it. Never detach a live native writer.
+        let first = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop { match RecordPartition::reclaim_deleted_files(&path, 1).await {
+                Err(RecordError::Busy) => {
+                    assert!(path.exists());
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                },
+                result => break result.unwrap(),
+            }}
+        }).await.unwrap();
+        assert!(!first);
         assert!(!path.exists());
         let mut passes = 1;
         while !RecordPartition::reclaim_deleted_files(&path, 8).await.unwrap() { passes += 1; assert!(passes < 100); }

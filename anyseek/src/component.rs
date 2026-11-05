@@ -12,6 +12,8 @@ use serde::{Serialize, Deserialize};
 use std::{collections::HashMap, fs, io::{Read, Seek, SeekFrom, Write}, path::{Path, PathBuf}, sync::Arc};
 use tokio::sync::RwLock;
 
+pub(crate) mod memory;
+
 const FORMAT: u32 = 3;
 const DESCRIPTOR: &str = "component.json";
 const VECTOR: &str = "vectors.bin";
@@ -24,6 +26,7 @@ pub(crate) type VectorSegmentArc = Arc<RwLock<VectorSegment>>;
 #[derive(Clone)]
 pub(crate) struct RetrievalSegment {
     pub vector: VectorSegmentArc,
+    pub admission: Arc<memory::Admission>,
     pub lexical: Arc<crate::record::lexical::runtime::Runtime>,
 }
 
@@ -39,6 +42,14 @@ pub(crate) struct VectorIndex {
     pub is_simd: bool,
     pub is_vector_indexing: bool,
     pub turbo_quant: TurboQuant,
+}
+
+/// Record transfers these pre-WAL leases; ordinary component callers retain
+/// the existing admission path. No allocation is charged twice during transfer.
+pub(crate) struct AppendMemory {
+    pub input:crate::storage::build_budget::MemoryLease,
+    pub retained:crate::storage::build_budget::MemoryLease,
+    pub pending:memory::Pending,
 }
 
 pub(crate) struct VectorSegment {
@@ -58,8 +69,7 @@ pub(crate) struct VectorSegment {
     pub vector_levels: usize,
     pub delete_hashset: AHashSet<usize>,
     pub active: Option<crate::active::ActiveStatistics>,
-    pub build_reservation: Option<crate::storage::build_budget::MemoryLease>,
-    pub build_input_covered: bool,
+    pub admission: Arc<memory::Admission>,
     path: PathBuf,
     pub facets: Vec<FacetField>,
     pub facets_map: HashMap<String, usize>,
@@ -114,7 +124,7 @@ pub(crate) fn field_width(field: &FieldType) -> usize {
         _ => 1,
     }
 }
-fn assemble(path: &Path, meta: IndexMetaObject, schema: &[SchemaField], saved: Option<Descriptor>) -> Result<(VectorIndex, VectorSegmentArc),String> {
+fn assemble(path: &Path, meta: IndexMetaObject, schema: &[SchemaField], saved: Option<Descriptor>, admission:Arc<memory::Admission>) -> Result<(VectorIndex, VectorSegmentArc),String> {
     crate::vector::validate_vector_schema(&meta.inference,schema)?;
     if schema.iter().any(|f| f.index_lexical || f.store) { return Err("vector/metadata component cannot own lexical fields or payloads".into()); }
     let (original,precision,quantization,similarity)=vector_settings(&meta);
@@ -144,7 +154,7 @@ fn assemble(path: &Path, meta: IndexMetaObject, schema: &[SchemaField], saved: O
     let facet_map=if width==0 {MmapOptions::new().len(1).map_anon()}else{unsafe{MmapMut::map_mut(&facets_file)}}.map_err(|e|e.to_string())?;
     let mut shard=VectorSegment {failed:false,indexed_doc_count:0,indexed_vector_count:0,indexed_cluster_count:0,committed_doc_count:0,uncommitted:false,
         schema_map:schema_map.clone(),indexed_schema_vec:indexed,#[cfg(test)] stored_field_names:Vec::new(),meta:meta.clone(),is_last_level_incomplete:false,
-        last_level_vector_file_start_pos:0,vector_levels:0,delete_hashset:AHashSet::new(),active:None,build_reservation:None,build_input_covered:false,
+        last_level_vector_file_start_pos:0,vector_levels:0,delete_hashset:AHashSet::new(),active:None,admission,
         path:path.to_owned(),facets,facets_map,facets_size_sum:width,facets_file,facets_file_mmap:facet_map,string_set_to_single_term_id_vec:Vec::new(),
         is_simd:simd,is_vector_indexing:original>0,vector_file,vector_file_mmap:vector_map,block_vector_buffer:Vec::new(),vector_dimensions:dimensions,
         vector_dimensions_original:original,vector_precision:precision,quantization,vector_similarity:similarity,min_vector_value:0.0,max_vector_value:f32::MIN,turbo_quant:turbo.clone()};
@@ -172,48 +182,56 @@ pub(crate) async fn create_index(path:&Path,meta:IndexMetaObject,schema:&[Schema
         Some(scope) if !scope.has_file_io_loan() => Some(scope.journal_io().await.map_err(|e|crate::record::RecordError::Storage(e.to_string()))?),
         _ => None,
     };
-    let create = || create_component_files(path, meta, schema);
+    let admission=memory::Admission::new(schema.iter().filter(|f|f.index_vector).map(|f|f.field.as_str())
+        .chain(schema.iter().filter(|f|f.facet).map(|f|f.field.as_str()))).map_err(crate::record::memory_error)?;
+    let create = || create_component_files(path, meta, schema, admission);
     let (mut index, vector) = match permit { Some(permit) => permit.run(create), None => create() }.map_err(crate::record::RecordError::Storage)?;
     let lexical = crate::record::lexical::runtime::Runtime::create_owned(&path.join("native"), config)
         .await?;
-    index.segments.push(RetrievalSegment { vector, lexical });
+    let admission=vector.read().await.admission.clone();
+    index.segments.push(RetrievalSegment { vector, lexical, admission });
     Ok(Arc::new(RwLock::new(index)))
 }
 // Serial local file construction only: no acquired VectorIndex/VectorSegment locks, native
 // writer, spawned task, or remote I/O can be reached while this loan is held.
-fn create_component_files(path:&Path,meta:IndexMetaObject,schema:&[SchemaField])->Result<(VectorIndex, VectorSegmentArc),String>{
+fn create_component_files(path:&Path,meta:IndexMetaObject,schema:&[SchemaField],admission:Arc<memory::Admission>)->Result<(VectorIndex, VectorSegmentArc),String>{
     fs::create_dir(path).map_err(|e|e.to_string())?;
     // Keep the independently authenticated schema file for package validation.
     let schema_file=File::create(path.join("schema.json")).map_err(|e|e.to_string())?;
     serde_json::to_writer(&schema_file,schema).map_err(|e|e.to_string())?;schema_file.sync_all().map_err(|e|e.to_string())?;
-    assemble(path,meta,schema,None)
+    assemble(path,meta,schema,None,admission)
 }
 pub(crate) async fn open_index(path:&Path,config:&crate::record::RecordConfig)->Result<VectorIndexArc,crate::record::RecordError>{
-    let (mut index, vector) = open_component_files(path).map_err(crate::record::RecordError::Storage)?;
+    let (mut index, vector) = open_component_files(path)?;
     vector.read().await.validate_euclidean_vectors().map_err(crate::record::RecordError::Rejected)?;
     let lexical = crate::record::lexical::runtime::Runtime::open_owned(&path.join("native"), config)
         .await?;
-    index.segments.push(RetrievalSegment { vector, lexical });
+    let admission=vector.read().await.admission.clone();
+    index.segments.push(RetrievalSegment { vector, lexical, admission });
     Ok(Arc::new(RwLock::new(index)))
 }
 
-fn open_component_files(path:&Path)->Result<(VectorIndex, VectorSegmentArc),String>{
+fn open_component_files(path:&Path)->Result<(VectorIndex, VectorSegmentArc),crate::record::RecordError>{
+    use crate::record::RecordError;
+    let storage=|error:String|RecordError::Storage(error);
     let io=crate::resources::Scope::current().map(|scope|scope.io())
-        .transpose().map_err(|e|e.to_string())?;
-    let file=fs::File::open(path.join(DESCRIPTOR)).map_err(|e|e.to_string())?;
-    let length=file.metadata().map_err(|e|e.to_string())?.len();
-    if length>64*1024*1024 {return Err("component descriptor budget exceeded".into());}
-    let estimate=length.checked_mul(8).and_then(|n|n.checked_add(4096)).ok_or("component descriptor size overflow")?;
-    let _memory=crate::storage::build_budget::reserve_memory(estimate).map_err(|e|e.to_string())?;
+        .transpose().map_err(|e|storage(e.to_string()))?;
+    let file=fs::File::open(path.join(DESCRIPTOR)).map_err(|e|storage(e.to_string()))?;
+    let length=file.metadata().map_err(|e|storage(e.to_string()))?.len();
+    if length>64*1024*1024 {return Err(storage("component descriptor budget exceeded".into()));}
+    let estimate=length.checked_mul(8).and_then(|n|n.checked_add(4096)).ok_or_else(||storage("component descriptor size overflow".into()))?;
+    let _memory=crate::storage::build_budget::reserve_memory(estimate).map_err(crate::record::memory_error)?;
     let _buffer=crate::resources::Scope::current().map(|s|s.retained_io().bytes(estimate))
-        .transpose().map_err(|e|e.to_string())?;
+        .transpose().map_err(|e|storage(e.to_string()))?;
     let mut bytes=Vec::with_capacity(length as usize);
-    file.take(length+1).read_to_end(&mut bytes).map_err(|e|e.to_string())?;
-    if bytes.len() as u64 != length {return Err("component descriptor changed while opening".into());}
+    file.take(length+1).read_to_end(&mut bytes).map_err(|e|storage(e.to_string()))?;
+    if bytes.len() as u64 != length {return Err(storage("component descriptor changed while opening".into()));}
     drop(io);
-    let saved:Descriptor=serde_json::from_slice(&bytes).map_err(|e|e.to_string())?;
-    if saved.format!=FORMAT {return Err("unsupported vector/metadata component format".into());}
-    assemble(path,saved.meta.clone(),&saved.schema.clone(),Some(saved))
+    let saved:Descriptor=serde_json::from_slice(&bytes).map_err(|e|storage(e.to_string()))?;
+    if saved.format!=FORMAT {return Err(storage("unsupported vector/metadata component format".into()));}
+    let admission=memory::Admission::new(saved.schema.iter().filter(|f|f.index_vector).map(|f|f.field.as_str())
+        .chain(saved.schema.iter().filter(|f|f.facet).map(|f|f.field.as_str()))).map_err(crate::record::memory_error)?;
+    assemble(path,saved.meta.clone(),&saved.schema.clone(),Some(saved),admission).map_err(storage)
 }
 
 impl VectorSegment {
@@ -314,7 +332,7 @@ impl VectorSegment {
             Some(permit) => permit.run_async(self.commit_component_admitted()).await,
             None => self.commit_component_admitted().await,
         };
-        if result.is_err() { self.failed = true; }
+        if result.is_err() { self.failed = true; self.admission.fail(); }
         result
     }
     async fn commit_component_admitted(&mut self)->std::io::Result<()> {
@@ -352,16 +370,19 @@ impl VectorSegment {
         Ok(())
     }
     pub(crate) async fn append(&mut self, document:Document)->Result<(),String>{
+        self.append_with_memory(document,None).await
+    }
+    pub(crate) async fn append_with_memory(&mut self, document:Document, memory:Option<AppendMemory>)->Result<(),String>{
         let permit = match crate::resources::Scope::current() {
             Some(scope) if !scope.has_file_io_loan() => Some(scope.journal_io().await.map_err(|e|e.to_string())?),
             _ => None,
         };
         match permit {
-            Some(permit) => permit.run_async(self.append_admitted(document)).await,
-            None => self.append_admitted(document).await,
+            Some(permit) => permit.run_async(self.append_admitted(document,memory)).await,
+            None => self.append_admitted(document,memory).await,
         }
     }
-    async fn append_admitted(&mut self, document:Document)->Result<(),String>{
+    async fn append_admitted(&mut self, document:Document, memory:Option<AppendMemory>)->Result<(),String>{
         crate::index::validate_field_values(self.schema_map.values(), &document)?;
         // Rebuild/replay can enter below the public write validator.
         if self.vector_similarity == VectorSimilarity::Euclidean && self.vector_precision == Precision::F32 {
@@ -373,16 +394,30 @@ impl VectorSegment {
         // Keep its transient lease across vector/indexing awaits, and retain only
         // actual vector/facet projection plus identity/row metadata afterwards.
         let input=crate::record::build_budget::document_estimate(&document,&[]).map_err(|e|e.to_string())?;
-        let _input=crate::storage::build_budget::reserve_memory(input).map_err(|e|e.to_string())?;
         let estimate=crate::record::build_budget::component_estimate(&document,
             self.indexed_schema_vec.iter().map(|f|f.field.as_str()).chain(self.facets.iter().map(|f|f.name.as_str())))
             .map_err(|e|e.to_string())?;
-        if !self.build_input_covered {if let Some(memory)=&mut self.build_reservation {memory.grow(estimate).map_err(|e|e.to_string())?;}}
+        let _input=match memory {
+            Some(mut memory)=>{
+                if memory.input.bytes()<input || memory.retained.bytes()<estimate {
+                    return Err("component pre-WAL memory bound exceeded".into());
+                }
+                memory.pending.transfer(&self.admission,memory.retained).map_err(|e|e.to_string())?;
+                memory.input
+            },
+            None=>{
+                let input=crate::storage::build_budget::reserve_memory(input).map_err(|e|e.to_string())?;
+                self.admission.grow(estimate,true).map_err(|e|e.to_string())?;
+                input
+            },
+        };
+        let mutation=self.admission.mutation();
         self.ensure_metadata_capacity(ordinal+1)?;
         if self.is_vector_indexing {self.index_vector_segment(ordinal,&document).await;}
         self.write_metadata(ordinal,&document)?;
         self.indexed_doc_count+=1;self.uncommitted=true;
         if let Some(active)=&mut self.active {active.publish(ordinal);}
+        mutation.complete();
         Ok(())
     }
     fn write_metadata(&mut self, docid_local:usize, document:&Document)->Result<(),String>{
@@ -495,8 +530,10 @@ mod descriptor_tests {
         let file=std::fs::File::create(&path).unwrap();
         file.set_len(64*1024*1024+1).unwrap();drop(file);
         let error=match super::open_component_files(root.path()) {Ok(_)=>panic!("oversized descriptor accepted"),Err(error)=>error};
-        assert_eq!(error,"component descriptor budget exceeded");
+        assert!(matches!(error,crate::record::RecordError::Storage(ref message) if message=="component descriptor budget exceeded"));
         assert_eq!(std::fs::metadata(path).unwrap().len(),64*1024*1024+1);
         assert_eq!(std::fs::read_dir(root.path()).unwrap().count(),1);
     }
 }
+
+impl Drop for VectorSegment {fn drop(&mut self){self.admission.close();}}

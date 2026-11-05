@@ -39,6 +39,7 @@ pub(crate) mod runtime;
 pub(crate) mod runtime_query;
 mod query;
 mod scoring;
+pub(crate) mod memory;
 
 /// Includes vector enrichment revisions independently of the document version.
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
@@ -370,6 +371,7 @@ impl Candidate {
         let mut addresses = Vec::new();
         let mut lengths = Vec::new();
         let mut seen = BTreeSet::new();
+        let mut identity_id_bytes=0u64;
         for segment in searcher.segment_readers() {
             if segment.num_docs() != segment.max_doc() {
                 return Err(storage("unexpected native deletion"));
@@ -389,6 +391,8 @@ impl Candidate {
                 {
                     return Err(storage("lexical address mapping mismatch"));
                 }
+                identity_id_bytes=identity_id_bytes.checked_add(manifest.identities[values[0] as usize].id.len() as u64)
+                    .ok_or_else(||storage("lexical identity bytes overflow"))?;
                 mapping.push(values[0] as usize);
                 let mut row = Vec::new();
                 for column in &columns {
@@ -408,14 +412,14 @@ impl Candidate {
         }
         Ok(Snapshot {
             searcher,
-            fields,
+            fields:Arc::new(fields),
             cut,
-            names: manifest.fields,
-            identities: Arc::new(manifest.identities),
-            addresses,
-            lengths,
-            _memory: memory,
-            _buffer: buffer,
+            names: Arc::new(manifest.fields),
+            identities: Arc::new(manifest.identities.into()),identity_id_bytes,overlay:Vec::new(),
+            addresses:Arc::new(addresses),
+            lengths:Arc::new(lengths),
+            _memory:Arc::new(memory),
+            _buffer:buffer.map(Arc::new),
             _pin: None,
         })
     }
@@ -423,17 +427,22 @@ impl Candidate {
 
 /// This struct holds a Searcher, not a reader with automatic reload. The native
 /// DocAddress mapping is authenticated again each time a package is opened.
+#[derive(Clone)]
 pub(super) struct Snapshot {
     searcher: Searcher,
-    pub fields: Vec<Field>,
-    names: Vec<String>,
+    pub fields: Arc<Vec<Field>>,
+    names: Arc<Vec<String>>,
     pub cut: Cut,
-    pub(super) identities: Arc<Vec<Identity>>,
-    addresses: Vec<Vec<usize>>,
-    lengths: Vec<Vec<Vec<u64>>>,
+    pub(super) identities: Arc<memory::Identities>,
+    // Cached with every native/overlay publication; pre-WAL admission is O(1)
+    // in the base corpus size and never scans identities under the Live lock.
+    pub(super) identity_id_bytes:u64,
+    pub(super) overlay: Vec<(usize,Arc<memory::Row>)>,
+    addresses: Arc<Vec<Vec<usize>>>,
+    lengths: Arc<Vec<Vec<Vec<u64>>>>,
     // Declared after native handles so the charge outlives their destruction.
-    _memory: crate::storage::build_budget::MemoryLease,
-    _buffer: Option<crate::resources::Lease>,
+    _memory: Arc<crate::storage::build_budget::MemoryLease>,
+    _buffer: Option<Arc<crate::resources::Lease>>,
     _pin: Option<Arc<super::package_pins::Pin>>,
 }
 
@@ -445,6 +454,8 @@ pub(super) struct ActiveView<'a> {
 }
 
 impl Snapshot {
+    #[cfg(test)]
+    pub(super) fn native_segment_count(&self)->usize {self.searcher.segment_readers().len()}
     /// Exact revision selection, before both statistics and Top-K. Metadata
     /// filters are supplied separately and do not change corpus statistics.
     pub(super) fn active(

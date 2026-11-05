@@ -52,6 +52,10 @@ mod tests {
                     shared_prefix=p.inner.lock().await.state.value_bytes().unwrap();
                 }
             }
+            // This test measures SourceProof's temporary ownership using the
+            // process-wide counter. Acknowledged visible rows may still be
+            // materializing; settle that unrelated owner before freezing it.
+            p.inner.lock().await.index.join_materializers().await.unwrap();
             let (proof,expected)={let mut inner=p.inner.lock().await;
                 assert_eq!(inner.anchor.is_some(),anchored);
                 (SourceProof::capture(&mut inner).unwrap(),inner.state.try_clone().unwrap())};
@@ -76,6 +80,151 @@ mod tests {
             drop(proof);drop(expected);drop(p);
         }
         assert!(outcomes.iter().all(|(_,r)|r.is_ok()),"{outcomes:?}");
+    }
+    // One fault at every real synchronous admission site catches errors lost
+    // inside serde and journal visitors, not just the first scratch reservation.
+    #[tokio::test]
+    async fn source_proof_bootstrap_shared_pressure_preserves_busy() {source_proof_pressure_case(false,false).await;}
+    #[tokio::test]
+    async fn source_proof_anchored_shared_pressure_preserves_busy() {source_proof_pressure_case(true,false).await;}
+    #[tokio::test]
+    async fn source_proof_expiry_and_history_suffix_preserve_busy_and_recover() {
+        source_proof_pressure_case(false,true).await;
+        source_proof_pressure_case(true,true).await;
+    }
+    async fn source_proof_pressure_case(anchored:bool,events:bool) {
+        use crate::storage::build_budget::{refuse_shared_at_for_test,used_memory_for_test};
+        {
+            let temp=tempfile::tempdir().unwrap();let path=temp.path().join("records");
+            let settings=super::super::tests::config();
+            let p=RecordPartition::create(&path,settings.clone()).await.unwrap();
+            struct ProofClock(std::sync::atomic::AtomicU64);
+            impl temporal::Clock for ProofClock {
+                fn now_ms(&self)->Result<u64,RecordError>{Ok(self.0.load(std::sync::atomic::Ordering::SeqCst))}
+            }
+            let now=SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64;
+            let clock=Arc::new(ProofClock(std::sync::atomic::AtomicU64::new(now)));
+            p.inner.lock().await.clock=clock.clone();
+            let mut first=super::super::tests::write("first","a","alpha",ExpectedVersion::Absent);
+            if events {first.temporal=Some(TemporalMetadata{expire_at_ms:Some(now+100),..Default::default()});}
+            p.write(first).await.unwrap();
+            if anchored {p.compact_journal().await.unwrap();}
+            p.write(super::super::tests::write("second","b","beta",ExpectedVersion::Absent)).await.unwrap();
+            if events {
+                let at=now+settings.history.retention_ms+1000;clock.0.store(at,std::sync::atomic::Ordering::SeqCst);
+                let _writer=p.writer.lock().await;let mut inner=p.inner.lock().await;
+                inner.expire_due().await.unwrap();inner.trim_history(at).await.unwrap();
+                assert_eq!(inner.state.seq,3);assert!(inner.state.records["a"].expired_at_ms.is_some());assert!(inner.state.history.floor>0);
+            }
+            let (mut proof,expected)={let mut inner=p.inner.lock().await;
+                // Settle acknowledged background owners before asserting exact
+                // global accounting. Do this before applying any test pressure.
+                inner.index.drain_indexes().await.unwrap();
+                inner.index.join_materializers().await.unwrap();
+                (SourceProof::capture(&mut inner).unwrap(),inner.state.try_clone().unwrap())};
+            if !anchored && !events {
+                // Include retained Shared values in the bootstrap decoder,
+                // which a newly created empty bootstrap would not exercise.
+                let frame=encode_entry(&Entry::Checkpoint{config:settings.clone(),state:expected.try_clone().unwrap()}).unwrap();
+                proof._memory=crate::storage::build_budget::reserve_memory(frame.len() as u64).unwrap();
+                proof.frames=vec![frame];
+            }
+            proof.verify(&path,&settings,&expected).unwrap();
+            let actual_pressure=crate::storage::build_budget::fill_memory_for_test();
+            assert_eq!(proof.verify(&path,&settings,&expected),Err(RecordError::Busy));
+            drop(actual_pressure);proof.verify(&path,&settings,&expected).unwrap();
+            let mut failures=Vec::new();let mut hits=0;let mut complete=false;
+            for ordinal in 0..256 {
+                let before=used_memory_for_test();
+                let (result,hit)=refuse_shared_at_for_test(ordinal,||proof.verify(&path,&settings,&expected));
+                assert_eq!(used_memory_for_test(),before,"leaked proof admission at {anchored}/{ordinal}");
+                if !hit {result.unwrap();complete=true;break;}
+                hits+=1;
+                if result!=Err(RecordError::Busy){failures.push((ordinal,result));}
+                proof.verify(&path,&settings,&expected).unwrap();
+            }
+            assert!(complete,"admission sweep exceeded its bounded probe count");
+            eprintln!("proof admission sweep anchored={anchored} events={events} refusal_points={hits}");
+            assert!(hits>2,"fixture must cover nested admission");
+            assert!(failures.is_empty(),"anchored={anchored}, events={events}, shared refusals misclassified: {failures:?}");
+            if events {
+                assert!(proof.frames.iter().any(|frame|matches!(serde_json::from_slice::<Entry>(frame),Ok(Entry::Expired(_)))));
+                assert!(proof.frames.iter().any(|frame|matches!(serde_json::from_slice::<Entry>(frame),Ok(Entry::HistoryTrim(_)))));
+            }
+            p.finish_service_shutdown().await.unwrap();drop(p);
+            let reopened=RecordPartition::open(&path,settings.max_journal_bytes).await.unwrap();
+            {let inner=reopened.inner.lock().await;assert_eq!(inner.state.seq,expected.seq);assert_eq!(inner.state.history.floor,expected.history.floor);
+                if events {assert!(inner.state.records["a"].expired_at_ms.is_some());assert!(inner.state.records["a"].document.is_none());}}
+            reopened.finish_service_shutdown().await.unwrap();
+        }
+    }
+    #[tokio::test]
+    async fn source_proof_busy_automatic_retry_and_cancel_preserve_authority() {
+        use super::super::tests::{config,write,wait_maintenance_idle};
+        for cancel in [false,true] {
+            let temp=tempfile::tempdir().unwrap();let root=temp.path().join("records");
+            let p=RecordPartition::create(&root,config()).await.unwrap();
+            let request=write("receipt","a","alpha",ExpectedVersion::Absent);
+            let receipt=p.write(request.clone()).await.unwrap();
+            let before={let inner=p.inner.lock().await;(inner.journal.physical_bytes(),serde_json::to_vec(&inner.anchor).unwrap(),inner.state.seq)};
+            std::fs::write(root.join(".test-source-proof-refuse"),b"0").unwrap();
+            if cancel {
+                std::fs::write(root.join(".test-indexer-pause"),b"pause").unwrap();
+                let job=p.start_compact_job().unwrap();let completion=job.handle.abort_handle();
+                tokio::time::timeout(std::time::Duration::from_secs(5),async {
+                    while !root.join(".test-indexer-started").exists(){tokio::time::sleep(std::time::Duration::from_millis(5)).await;}
+                }).await.unwrap();
+                drop(job); // Owned work survives cancellation of its waiter.
+                std::fs::remove_file(root.join(".test-indexer-pause")).unwrap();
+                tokio::time::timeout(std::time::Duration::from_secs(10),async {
+                    while !completion.is_finished(){tokio::time::sleep(std::time::Duration::from_millis(5)).await;}
+                }).await.unwrap();
+            } else {assert_eq!(p.compact_journal().await,Err(RecordError::Busy));}
+            assert!(root.join(".test-source-proof-refused").exists());
+            {let inner=p.inner.lock().await;assert!(inner.healthy);assert!(!inner.output.read().unwrap().fenced);assert!(inner.background.is_none());
+                assert_eq!((inner.journal.physical_bytes(),serde_json::to_vec(&inner.anchor).unwrap(),inner.state.seq),before);}
+            // Automatic worker sees the same pressure, retains the request and
+            // remains healthy; only service ticks (no client writes) retry it.
+            p.inner.lock().await.request_checkpoint("test_source_memory");
+            p.maintenance_tick().await;wait_maintenance_idle(&p).await;
+            {let inner=p.inner.lock().await;assert!(inner.healthy);assert!(!inner.output.read().unwrap().fenced);assert!(inner.maintenance_requested.is_some());assert_eq!(inner.state.seq,receipt.seq);}
+            std::fs::remove_file(root.join(".test-source-proof-refuse")).unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(20),async {
+                loop {p.maintenance_tick().await;wait_maintenance_idle(&p).await;if p.inner.lock().await.maintenance_requested.is_none(){break;}}
+            }).await.unwrap();
+            assert_eq!(p.write(request.clone()).await.unwrap(),receipt);
+            p.finish_service_shutdown().await.unwrap();drop(p);
+            let p=RecordPartition::open(&root,config().max_journal_bytes).await.unwrap();
+            assert_eq!(p.write(request).await.unwrap(),receipt);p.finish_service_shutdown().await.unwrap();
+        }
+    }
+    #[tokio::test]
+    async fn source_proof_pressure_does_not_certify_corrupt_selected_files() {
+        use super::super::tests::{config,write};
+        let temp=tempfile::tempdir().unwrap();let root=temp.path().join("records");
+        let p=RecordPartition::create(&root,config()).await.unwrap();
+        let request=write("receipt","a","alpha",ExpectedVersion::Absent);
+        let receipt=p.write(request.clone()).await.unwrap();p.compact_journal().await.unwrap();
+        let selected=p.inner.lock().await.anchor.clone().unwrap();
+        let member=selected.retained_packages()[0].path(&root).unwrap().join("schema.json");
+        let original=std::fs::read(&member).unwrap();
+        std::fs::write(root.join(".test-indexer-pause"),b"pause").unwrap();
+        std::fs::write(root.join(".test-source-proof-refuse"),b"0").unwrap();
+        let job=p.start_compact_job().unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5),async {
+            while !root.join(".test-indexer-started").exists(){tokio::time::sleep(std::time::Duration::from_millis(5)).await;}
+        }).await.unwrap();
+        std::fs::write(&member,b"corrupt").unwrap();
+        std::fs::remove_file(root.join(".test-indexer-pause")).unwrap();
+        assert_eq!(job.finish().await,Err(RecordError::Busy));
+        {let inner=p.inner.lock().await;assert!(inner.healthy);assert_eq!(inner.anchor.as_ref().unwrap().identity(),selected.identity());}
+        std::fs::remove_file(root.join(".test-source-proof-refuse")).unwrap();
+        assert_eq!(p.compact_journal().await,Err(RecordError::RecoveryRequired));
+        {let inner=p.inner.lock().await;assert!(!inner.healthy);assert!(inner.output.read().unwrap().fenced);assert_eq!(inner.anchor.as_ref().unwrap().identity(),selected.identity());}
+        drop(p);assert!(RecordPartition::open(&root,config().max_journal_bytes).await.is_err());
+        std::fs::write(&member,original).unwrap();
+        let p=RecordPartition::open(&root,config().max_journal_bytes).await.unwrap();
+        assert_eq!(p.write(request).await.unwrap(),receipt);p.finish_service_shutdown().await.unwrap();
     }
     struct Timings;
     impl log::Log for Timings {
@@ -141,12 +290,16 @@ mod tests {
                     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
                 }
             }
-            hot_load.await.unwrap();
         }).await;
         assert!(result.is_ok(),"cold maintenance must progress without a new request under bounded hot load: {result:?}; cold_requested={:?} second_requested={:?} hot_completed={}",
             cold.inner.try_lock().map(|inner|inner.maintenance_requested.is_some()),
             second.inner.try_lock().map(|inner|inner.maintenance_requested.is_some()),
             completed.load(std::sync::atomic::Ordering::SeqCst));
+        // Fairness is the cold collections' deadline above. Completing all
+        // eight hot checkpoints is cleanup, not a cold-starvation assertion.
+        tokio::time::timeout(std::time::Duration::from_secs(30),hot_load).await
+            .expect("hot maintenance load did not finish during bounded cleanup")
+            .expect("hot maintenance load failed");
         assert!(!cold.inner.lock().await.maintenance_pending);
     }
 
@@ -368,11 +521,11 @@ impl SourceCapture {
     pub(super) fn capture(inner:&Inner)->Result<Self,RecordError> {
         let cut=inner.journal.capture_cut().map_err(storage)?;
         let memory=crate::storage::build_budget::reserve_memory((inner.index.pending_seals.len() as u64)
-            .checked_mul((2*std::mem::size_of::<segment::Package>()) as u64).ok_or_else(||storage("source package inventory overflow"))?).map_err(storage)?;
+            .checked_mul((2*std::mem::size_of::<segment::Package>()) as u64).ok_or_else(||storage("source package inventory overflow"))?).map_err(memory_error)?;
         Ok(Self{cut,proof:SourceProof{anchor:inner.anchor.clone(),pending:inner.index.pending_seals.clone(),frames:Vec::new(),_memory:memory}})
     }
     pub(super) async fn collect(mut self,owner:&Arc<Mutex<Inner>>,id:u128,deadline:std::time::Instant)->Result<SourceProof,RecordError> {
-        let _memory=crate::storage::build_budget::reserve_memory(crate::storage::journal::READ_CHUNK as u64).map_err(storage)?;
+        let _memory=crate::storage::build_budget::reserve_memory(crate::storage::journal::READ_CHUNK as u64).map_err(memory_error)?;
         let mut buffer=vec![0;crate::storage::journal::READ_CHUNK];
         let mut scan=self.cut.scan();let mut offset=0;let mut published=false;
         #[cfg(test)]
@@ -403,7 +556,7 @@ impl SourceCapture {
                 let charge=bytes.len().checked_add(2*std::mem::size_of::<Vec<u8>>()).ok_or_else(||std::io::Error::other("source frame inventory overflow"))?;
                 self.proof._memory.grow(charge as u64)?;
                 self.proof.frames.push(bytes.to_vec());Ok(())
-            }).map_err(|error|if error.kind()==std::io::ErrorKind::InvalidData {RecordError::RecoveryRequired}else{storage(error)})?;
+            }).map_err(|error|if error.kind()==std::io::ErrorKind::InvalidData {RecordError::RecoveryRequired}else{memory_error(error)})?;
             offset+=length as u64;
             #[cfg(test)]
             if offset==length as u64 && root.join(".test-source-chunk-pause").exists() {
@@ -424,34 +577,44 @@ impl SourceProof {
     pub(super) fn frames(&self)->&[Vec<u8>] {&self.frames}
     pub(super) fn capture(inner:&mut Inner)->Result<Self,RecordError> {
         let _phase=Phase::new("source_frames_capture_locked",inner.state.seq);
-        let mut memory=crate::storage::build_budget::reserve_memory(0).map_err(storage)?;
+        let mut memory=crate::storage::build_budget::reserve_memory(0).map_err(memory_error)?;
         let mut frames=Vec::new();
         inner.journal.visit_committed(|bytes|{
             let charge=bytes.len().checked_add(2*std::mem::size_of::<Vec<u8>>()).ok_or_else(||std::io::Error::other("source frame inventory overflow"))?;
             memory.grow(charge as u64)?;
             frames.push(bytes.to_vec());Ok(())
-        }).map_err(storage)?;
-        memory.grow((inner.index.pending_seals.len() as u64).checked_mul((2*std::mem::size_of::<segment::Package>()) as u64).ok_or_else(||storage("source package inventory overflow"))?).map_err(storage)?;
+        }).map_err(memory_error)?;
+        memory.grow((inner.index.pending_seals.len() as u64).checked_mul((2*std::mem::size_of::<segment::Package>()) as u64).ok_or_else(||storage("source package inventory overflow"))?).map_err(memory_error)?;
         Ok(Self{anchor:inner.anchor.clone(),pending:inner.index.pending_seals.clone(),frames,_memory:memory})
     }
     pub(super) async fn verify_remote(&self,remote:&remote_checkpoint::RemoteBuild,root:&Path,config:&RecordConfig)->Result<(),RecordError> {
         remote.verify_source(root,self.anchor.as_ref(),&self.frames,config.max_journal_bytes).await
     }
     pub(super) fn verify(&self,root:&Path,config:&RecordConfig,expected:&State)->Result<(),RecordError> {
+        #[cfg(test)]
+        if root.join(".test-source-proof-refuse").exists() {
+            let ordinal=std::fs::read_to_string(root.join(".test-source-proof-refuse")).map_err(storage)?.parse::<usize>().map_err(storage)?;
+            let (result,hit)=crate::storage::build_budget::refuse_shared_at_for_test(ordinal,||self.verify_inner(root,config,expected));
+            if hit {std::fs::write(root.join(".test-source-proof-refused"),b"typed refusal").map_err(storage)?;}
+            return result;
+        }
+        self.verify_inner(root,config,expected)
+    }
+    fn verify_inner(&self,root:&Path,config:&RecordConfig,expected:&State)->Result<(),RecordError> {
         let _phase=Phase::new("background_source_proof",expected.seq);
         if let Some(anchor)=&self.anchor {return anchor.verify_captured_suffix(root,config,expected,&self.frames,&self.pending);}
         let mut replayed=None;
         for frame in &self.frames {
-            let _decode=crate::storage::build_budget::reserve_memory((frame.len() as u64).checked_mul(32).ok_or_else(||storage("source proof decode overflow"))?).map_err(storage)?;
-            let entry:Entry=serde_json::from_slice(frame).map_err(storage)?;
+            let _decode=crate::storage::build_budget::reserve_memory((frame.len() as u64).checked_mul(32).ok_or_else(||storage("source proof decode overflow"))?).map_err(memory_error)?;
             if replayed.is_none() {
-                let Entry::Checkpoint{config:source,mut state}=entry else{return Err(storage("missing captured bootstrap authority"));};
+                let (source,mut state)=proof_decode::bootstrap(frame)?;
                 if checkpoint_codec::json_digest(&source)?!=checkpoint_codec::json_digest(config)?{return Err(storage("captured bootstrap configuration mismatch"));}
                 state.admit_bytes(checkpoint_codec::json_length(&state)?)?;
                 restore_operation_lookup(&mut state)?;
                 state.admit_bytes(checkpoint_codec::json_length(&state)?)?;
                 replayed=Some(state);continue;
             }
+            let entry=proof_decode::mutation(frame)?;
             let state=replayed.as_mut().unwrap();
             state.admit_replay_frame(checkpoint_codec::json_length(&entry)?)?;
             match entry {

@@ -4,6 +4,15 @@ use super::*;
 use futures::FutureExt;
 use std::time::{Duration,Instant};
 
+fn verify_selected_packages(root:&Path,selected:&[segment::Package],limit:u64)->Result<(),RecordError>{
+    for package in selected {
+        package.verify(root,limit).map_err(|error|match error {
+            RecordError::Busy=>RecordError::Busy,
+            _=>RecordError::RecoveryRequired,
+        })?;
+    }
+    Ok(())
+}
 pub(super) const CAUSE:&str="derived_cache_merge";
 pub(super) const MAX_ROWS:usize=2*capacity::PACKAGE_RECORDS;
 const MAX_INPUT_BYTES:u64=32*1024*1024;
@@ -169,9 +178,7 @@ impl RecordPartition {
                 // Untouched packages/WAL remain authenticated by checkpoint
                 // and cold recovery; cache compaction cannot certify over them.
                 let limit=config.max_journal_bytes.checked_mul(64).and_then(|n|n.checked_add(32*1024*1024)).ok_or(RecordError::Busy)?;
-                for package in &selected {
-                    package.verify(&root,limit).map_err(|_|RecordError::RecoveryRequired)?;
-                }
+                verify_selected_packages(&root,&selected,limit)?;
                 let candidate={let _phase=maintenance::Phase::new("cache_merge_build_unlocked",snapshot.seq);
                     build_candidate(&root,&config,&snapshot).await?};
                 #[cfg(test)]
@@ -230,6 +237,20 @@ async fn pause(root:&Path,timeout:Duration) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn selected_package_memory_refusal_is_busy_but_corruption_still_fences() {
+        let root=tempfile::tempdir().unwrap();let id="a".repeat(32);
+        let path=root.path().join(format!("segment-{id}"));std::fs::create_dir(&path).unwrap();
+        std::fs::write(path.join("data"),b"valid").unwrap();
+        let package=segment::Package::seal(root.path(),&path,id,1024).unwrap();
+        let full=crate::storage::build_budget::fill_memory_for_test();
+        assert_eq!(verify_selected_packages(root.path(),std::slice::from_ref(&package),1024),Err(RecordError::Busy));
+        drop(full);
+        verify_selected_packages(root.path(),std::slice::from_ref(&package),1024).unwrap();
+        std::fs::write(path.join("data"),b"invalid").unwrap();
+        assert_eq!(verify_selected_packages(root.path(),std::slice::from_ref(&package),1024),Err(RecordError::RecoveryRequired));
+    }
+
     use crate::record::tests::{config,write};
     async fn rotate(partition:&RecordPartition) {
         let mut inner=partition.inner.lock().await;

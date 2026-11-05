@@ -77,8 +77,13 @@ struct Ledger { total: [Usage; 5], subjects: BTreeMap<String, [Usage; 5]> }
 pub struct Governor { limits: [Limits; 5], ledger: Mutex<Ledger>, io_available: Condvar }
 /// A definite refusal to acquire resources, before the guarded I/O/allocation.
 #[derive(Debug)]
-pub struct Busy { detail: String }
-impl Busy { fn new(detail: impl Into<String>) -> Self { Self { detail: detail.into() } } }
+pub struct Busy { detail: String, recoverable: bool }
+impl Busy {
+    fn new(detail:impl Into<String>)->Self{Self{detail:detail.into(),recoverable:false}}
+    fn occupied(detail:impl Into<String>)->Self{Self{detail:detail.into(),recoverable:true}}
+    // Typed admission classification; never infer retryability from log text.
+    pub(crate) fn is_recoverable(&self)->bool{self.recoverable}
+}
 impl std::fmt::Display for Busy {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { write!(f, "resource budget exhausted: {}", self.detail) }
 }
@@ -122,12 +127,15 @@ impl Governor {
         let mut ledger = self.ledger.lock().map_err(|_| Busy::new("class=ledger_poisoned"))?;
         let i = lane.index();
         if subject.len() > 272 || (!ledger.subjects.contains_key(subject) && ledger.subjects.len() >= 128) { log::warn!("resource subject admission exhausted: retained_subjects={}",ledger.subjects.len());return Err(Busy::new("class=subject_registry")); }
+        if Usage::default().add(amount,self.limits[i],false).is_none() || Usage::default().add(amount,self.limits[i],true).is_none(){
+            return Err(Busy::new("class=request_capacity"));
+        }
         let total = ledger.total[i].add(amount, self.limits[i], false).ok_or_else(|| {
-            log::warn!("resource global admission exhausted: lane={lane:?} used={:?} requested={amount:?} limits={:?}",ledger.total[i],self.limits[i]);Busy::new(format!("class=global lane={lane:?} used={:?} requested={amount:?} limits={:?}",ledger.total[i],self.limits[i]))
+            log::warn!("resource global admission exhausted: lane={lane:?} used={:?} requested={amount:?} limits={:?}",ledger.total[i],self.limits[i]);Busy::occupied(format!("class=global lane={lane:?} used={:?} requested={amount:?} limits={:?}",ledger.total[i],self.limits[i]))
         })?;
         let used=ledger.subjects.get(subject).map(|u|u[i]).unwrap_or_default();
         let local = used.add(amount, self.limits[i], true).ok_or_else(|| {
-            log::warn!("resource collection admission exhausted: lane={lane:?} used={used:?} requested={amount:?} limits={:?}",self.limits[i]);Busy::new(format!("class=collection lane={lane:?} used={used:?} requested={amount:?} limits={:?}",self.limits[i]))
+            log::warn!("resource collection admission exhausted: lane={lane:?} used={used:?} requested={amount:?} limits={:?}",self.limits[i]);Busy::occupied(format!("class=collection lane={lane:?} used={used:?} requested={amount:?} limits={:?}",self.limits[i]))
         })?;
         ledger.total[i] = total;
         ledger.subjects.entry(subject.into()).or_default()[i] = local;
@@ -309,6 +317,19 @@ impl std::fmt::Debug for Buffer { fn fmt(&self, f: &mut std::fmt::Formatter<'_>)
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn only_existing_occupancy_is_recoverable_admission() {
+        let governor=std::sync::Arc::new(super::Governor::default());
+        let scope=governor.admit("typed".into(),super::Lane::Background,0).unwrap();
+        let bytes=governor.limits[super::Lane::Background.index()].subject_bytes;
+        let held=scope.bytes(bytes).unwrap();
+        assert!(scope.bytes(1).err().unwrap().is_recoverable());
+        assert!(!scope.bytes(bytes+1).err().unwrap().is_recoverable());drop(held);
+        assert!(!governor.admit("x".repeat(273),super::Lane::Background,0).err().unwrap().is_recoverable());
+        let poisoned=governor.clone();let _=std::thread::spawn(move ||{let _guard=poisoned.ledger.lock().unwrap();panic!("test poison");}).join();
+        assert!(!scope.bytes(1).err().unwrap().is_recoverable());
+    }
+
     use super::*;
     #[tokio::test(flavor = "current_thread")]
     async fn file_io_async_loan_survives_yield_without_escaping_to_children() {

@@ -95,7 +95,11 @@ pub(crate) async fn search(
     let config = &root.segments[0].lexical.config;
     // Admission precedes active identity maps, term/field scorers and Top-K buffers.
     // The input bound is the selected live population, not retired physical history.
-    let mut query_bytes = 65536u64;
+    // Native clauses and their shared memory predicate both retain analyzed
+    // terms. Admit expansion from actual input bytes before compiling either.
+    let mut query_bytes = (text.len() as u64).checked_mul(64)
+        .and_then(|n|n.checked_mul(config.schema.len() as u64+1))
+        .and_then(|n|n.checked_add(65536)).ok_or_else(||storage("query predicate memory overflow"))?;
     for shard in &shards {
         let active = shard.active.as_ref().ok_or_else(|| storage("native metadata statistics absent"))?;
         for (_, id) in active.keys.iter().enumerate().filter(|(ordinal, _)| active.is_live(*ordinal)) {
