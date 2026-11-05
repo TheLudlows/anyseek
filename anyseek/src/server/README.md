@@ -1,15 +1,25 @@
 # anyseek Record HTTP 服务
 
-`POST /api/v1/index/{id}/ingest` 在业务判定和持久提交后返回非原子的逐项结果。HTTP 200 不代表全部成功，只有 `code=committed` 且带 Record `receipt` 的项成功；明确拒绝后继续处理后续项。429／503 保留已有回执，并区分 `outcome_unknown` 与 `not_attempted`。索引异步，可检查 `committed_seq`、`lexical_seq`、`vector_seq` 和 `index_error`；`/operation/{epoch}/{nonce}` 查询 Record 回执。现有 `/batch` 同步语义保留，独立 Intake 日志已移除。详见下方[异步索引写入](#异步索引写入)。
+通过 HTTP API 管理 Tenant、集合和记录，提供全文、向量与混合检索。同步 `/batch` 成功项持久且可见；`/ingest` 返回持久业务回执，索引异步推进，详见[写入与重试](#稳定身份写入和重试)。Web 控制台为独立进程。
 
-默认服务通过 `record_service.rs` 使用 SQLite Catalog 和 Record partition，提供稳定记录、可选向量、时间过滤、全文/向量混合及逐命中解释；Web 控制台位于独立的 `console/`，不嵌入服务。本地 Segment、compaction 与安全回收已合入，系统崩溃/断电验收仍未完成。[当前状态](../../../STATUS.md)记录实现与验证证据，[Record 契约](../../../docs/record-model.md)说明职责与一致性边界。
+[Record 契约](../../../docs/record-model.md)说明职责与一致性边界；[路线与验收证据](../../../docs/roadmap.md)记录剩余工作与验证范围。
 
 ## 构建与启动
+
+从仓库根目录执行。Linux / macOS：
 
 ```sh
 cargo build
 export MASTER_KEY_SECRET='replace-with-your-private-secret'
 target/debug/anyseek_server local_ip=127.0.0.1 local_port=8080
+```
+
+Windows PowerShell：
+
+```powershell
+cargo build
+$env:MASTER_KEY_SECRET = 'replace-with-your-private-secret'
+.\target\debug\anyseek_server.exe local_ip=127.0.0.1 local_port=8080
 ```
 
 `MASTER_KEY_SECRET` 必须显式设置且不能全为空白；缺失或无效时在创建数据目录、监听端口前报错退出。新部署请使用随机生成并妥善保存的私密值（例如 `python3 -c "import secrets; print(secrets.token_hex(32))"`），不要使用示例占位符。普通启动日志不输出 secret 或 Master Key。需要初始化时，在同一环境下单独运行：
@@ -20,7 +30,7 @@ target/debug/anyseek_server print_master_key=true
 
 Windows PowerShell 使用 `.\target\debug\anyseek_server.exe print_master_key=true`。此命令只向标准输出打印 `Base64(SHA-256(secret 的 UTF-8 字节))` 并退出，不打开数据目录、不启动服务；输出本身就是管理凭据，不要记录到共享日志。它不生成或轮换密钥。
 
-Master Key 只用于管理 Tenant 和普通 API Key，以及现有服务备份管理；不能用于集合数据接口。先 POST `/api/v1/tenants` 提交 `{operation_id,tenant_id}`，再由 master POST `/api/v1/apikey` 提交 `{operation_id,tenant_id,key_id,apikey_base64}`，签发普通 Key。按[控制台指南](../../../console/README.md)启动独立前端后使用该 Tenant Key 连接。API 默认端口为 8080，根路径不提供页面。Tenant ID 与 Collection ID 均须匹配 `^[a-z][a-z0-9_-]{0,62}$`，不转换大小写，Tenant 不支持改名或删除。首次 `index_path` 必须不存在且父目录存在；重启必须指向可恢复的 catalog 根，并保持 `MASTER_KEY_SECRET` 一致。旧按 key 组织的目录、已有空目录和不完整权威状态不会被当成空数据库导入。没有旧格式升级或迁移接口。
+Master Key 只用于管理 Tenant 和普通 API Key，以及现有服务备份管理；不能用于集合数据接口。先 POST `/api/v1/tenants` 提交 `{operation_id,tenant_id}`，再由 master POST `/api/v1/apikey` 提交 `{operation_id,tenant_id,key_id,apikey_base64}`，签发普通 Key。按[控制台指南](../../../console/README.md)启动独立前端后使用该 Tenant Key 连接。API 默认端口为 8080，根路径不提供页面。Tenant ID 与 Collection ID 均须匹配 `^[a-z][a-z0-9_-]{0,62}$`，不转换大小写，Tenant 不支持改名或删除。默认数据目录位于可执行文件旁的 `anyseek_index`。首次 `index_path` 必须不存在且父目录存在；重启必须指向可恢复的 catalog 根，并保持 `MASTER_KEY_SECRET` 一致。旧按 key 组织的目录、已有空目录和不完整权威状态不会被当成空数据库导入。没有旧格式升级或迁移接口。
 
 | 参数 | 默认值与约束 |
 | --- | --- |
@@ -35,15 +45,7 @@ Master Key 只用于管理 Tenant 和普通 API Key，以及现有服务备份�
 
 ## 启动 Web UI
 
-保持 API 服务运行，在另一个终端从仓库根启动独立控制台，需要 Node.js 24 和 npm：
-
-```sh
-cd console
-npm ci
-npm run dev
-```
-
-打开 `http://127.0.0.1:5173`，用上面签发的 Tenant API Key 连接。UI 默认代理到 `http://127.0.0.1:8080`；API 地址配置、远程访问及生产部署统一见 [UI 启动与部署](../../../console/README.md)。
+API 与 UI 分别启动。控制台的安装、首次初始化与 Tenant Key 连接统一见[控制台指南](../../../console/README.md#本地启动-ui)；API 根路径 `/` 不提供页面。
 
 ## S3 后端（显式启用）
 
@@ -65,6 +67,20 @@ Catalog 与 S3 协调元数据共用服务根目录下的 `metadata.sqlite`；�
 PATCH collection 发布完整远端 checkpoint 后再回收已覆盖且无 pin 的对象。collection backup 的相同请求在中断后继续原 cut；恢复到新 collection，复制到目标集合新代次，不包含服务凭据。完整服务备份沿用本地独立归档格式，包含 catalog 和完整数据；在 S3 模式恢复启动时会发布到目标独立 bucket。
 
 该后端已合入；真实目标服务的条件写/读后可见性认证与其余维护路径审计仍待完成，见[存储协议](../../../docs/storage.md)。SQLite 首版是单主机协调，不提供跨主机 HA。
+
+## 字段类型与数值
+
+字段类型：String、StringSet、Int、Float、Text、Timestamp、Json、Binary。类型存在不代表支持全部索引方式。向量使用 Json/Binary 加 index_vector；已配置向量字段可缺席，缺向量记录不参与该字段召回；后补向量须使用精确版本条件。过滤字段需显式 filterable:true。不提供分面统计聚合、直方图或字段 extrema。
+
+Int 是有符号 64 位整数（-9223372036854775808 至 9223372036854775807），Float 是有限的 64 位浮点数。Int 不接受小数、数字字符串或越界的原 UInt64 值；不会截断或静默转换。Timestamp 同样使用有符号 64 位 Unix 秒。旧的带宽度类型名及 Bool 均不再接受，不提供旧 schema/磁盘格式迁移兼容；需用新 schema 重建数据。Json 内嵌 true/false 不受影响，向量 F32/I8 精度配置不变。
+
+String 使用完整字符串进行精确过滤；StringSet 是字符串集合，按任一成员精确匹配，去重并以 32 位字典 ID 存储。Text 保留分词全文检索。Int/Float/Timestamp 范围过滤为左闭右开。null 和缺失字段保留原始 payload 表示，不匹配元数据过滤，升序和降序排序均置于有值字段之后。
+
+StringSet 排序以排序去重后的首个成员为键：升序空集合在非空集合之前，降序在非空集合之后；null/缺失字段始终排在有值字段（包括空集合）之后。相同键继续采用后续排序键或稳定记录身份排序。
+
+Web 文档编辑器保留输入 JSON 的原始数值文本，新增、条件更新信封及暂存重发均不会经过 JavaScript Number 重新编码；嵌套 Json、整数和小数保持原文。旧版客户端已经暂存并可能发送的请求只保留其已有内容与操作身份，无法恢复过去丢失的精度。
+
+Web 检查面板和搜索结果的 Document JSON 展开区保留服务器响应原文；搜索字段展示也保留原始数值，复制到编辑器可无损写回。业务逻辑仍使用普通 JavaScript 对象，原文仅用于响应展示和复制。
 
 ## 稳定身份、写入和重试
 
@@ -231,7 +247,7 @@ python3 scripts/record_service_smoke.py --server target/debug/anyseek_server
 
 小型调用方示例使用 `scripts/anyseek_client.py`：设置 `ANYSEEK_API_KEY` 后运行 `python3 scripts/index_write_query_smoke.py --port 8080 --requests requests.json`；重复执行同一命令重试保存的请求，不生成新身份。旧 `http_smoke.py` 已由完整 Record smoke 取代。
 
-`generate_openapi=true` 在可执行文件目录输出 `openapi.json` 和 `openapi.yml`。路由清单见 [FEATURES](../../../FEATURES.md)，公共请求设置在 `api_types.rs`，默认服务实现为 `record_service.rs`。
+`generate_openapi=true` 在可执行文件目录输出 `openapi.json` 和 `openapi.yml`。生成结果包含当前路由与请求 schema，公共请求设置在 `api_types.rs`，默认服务实现为 `record_service.rs`。
 
 ## 普通来源元数据
 
@@ -260,7 +276,7 @@ python3 scripts/record_service_smoke.py --server target/debug/anyseek_server
 
 检索在捕获时刻过滤 TTL，并在评分后按最新时间重验候选，期间到期可能短页；count_total 是捕获索引的观测数，不是最终时刻精确总数。后台回收前的过期索引仍可能影响 BM25 语料统计。分页跨越最早 TTL 会使 continuation 冲突，需要重启遍历。
 
-`/doc/{record_id}/status` 保留当前技术版本、visible/deleted/expired 状态和 pending_vector_fields。完整边界见[Record 契约](../../../docs/record-model.md)，验证状态见 [STATUS](../../../STATUS.md)。
+`/doc/{record_id}/status` 保留当前技术版本、visible/deleted/expired 状态和 pending_vector_fields。完整边界见[Record 契约](../../../docs/record-model.md)，验证状态见 [路线与验收证据](../../../docs/roadmap.md)。
 
 ### 回执保留边界
 
