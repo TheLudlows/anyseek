@@ -4,15 +4,7 @@ AnySeek 是服务产品，仓库仅有一个 `anyseek` Cargo package。存储和
 
 ## 本地运行
 
-API 与 UI 使用两个独立进程。按[快速开始](../README.md#快速开始)启动 API 后，在另一个终端从仓库根运行：
-
-```sh
-cd console
-npm ci
-npm run dev
-```
-
-默认 UI 为 `http://127.0.0.1:5173`，默认 API 为 `http://127.0.0.1:8080`。UI 启动前通过 `API_TARGET` 指定其他 API 地址；具体 Linux / PowerShell 命令、远程访问与生产反向代理见[控制台指南](../console/README.md)。
+API 与 UI 使用两个独立进程。最短流程见[快速开始](../README.md#快速开始)，完整配置见[服务指南](../anyseek/src/server/README.md#构建与启动)和[控制台指南](../console/README.md#本地启动-ui)。
 
 ## 构建与测试
 

@@ -49,7 +49,7 @@ cross-AES acceptance remain separate from fixture/process tests.
 Historical workflow timings, failed runs and cleanup experiments remain in Git
 history and their PRs. They are not current validation results; moving a check to
 manual execution does not resolve a previous failure. Validation results and
-remaining acceptance gaps are tracked in [STATUS](../STATUS.md).
+remaining acceptance gaps are tracked in [路线与验收证据](roadmap.md).
 
 ## Test-target ownership
 

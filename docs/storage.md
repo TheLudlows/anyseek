@@ -1,8 +1,8 @@
 # 持久化、对象存储与恢复
 
-本地 Segment 已由 PR #71 合入；SQLite/S3 协调、远端 checkpoint、保留与共同备份已由 [PR #72](https://github.com/TheLudlows/anyseek/pull/72) 合入；[PR #73](https://github.com/TheLudlows/anyseek/pull/73) 和 [PR #74](https://github.com/TheLudlows/anyseek/pull/74) 的维护路径、审计修复及无缓存验收也已合入。实现与剩余验收统一见 [STATUS](../STATUS.md)，配置见 [服务指南](../anyseek/src/server/README.md)。
+本地 Segment 已由 PR #71 合入；SQLite/S3 协调、远端 checkpoint、保留与共同备份已由 [PR #72](https://github.com/TheLudlows/anyseek/pull/72) 合入；[PR #73](https://github.com/TheLudlows/anyseek/pull/73) 和 [PR #74](https://github.com/TheLudlows/anyseek/pull/74) 的维护路径、审计修复及无缓存验收也已合入。实现与剩余验收统一见 [路线与验收证据](roadmap.md)，配置见 [服务指南](../anyseek/src/server/README.md)。
 
-[#98](https://github.com/TheLudlows/anyseek/issues/98) 将 Tenant/Catalog 与 S3 authority 统一到 SQLite。Catalog 格式为 5，authority schema 为 3，authority 备份快照为 2；旧 Catalog 日志及旧数据库格式不提供迁移。验收状态见 [STATUS](../STATUS.md)。
+[#98](https://github.com/TheLudlows/anyseek/issues/98) 将 Tenant/Catalog 与 S3 authority 统一到 SQLite。Catalog 格式为 5，authority schema 为 3，authority 备份快照为 2；旧 Catalog 日志及旧数据库格式不提供迁移。验收状态见 [路线与验收证据](roadmap.md)。
 
 ## 本地 Segment 与共同视图
 
@@ -136,7 +136,7 @@ checkpoint 与索引尾段封存仍通过 anchor 发布协议选择权威闭包�
 - `scripts/record_service_smoke.py`：默认本地后端、HTTP、授权与恢复；独立 UI 浏览器流程见[控制台指南](../console/README.md#验证)；`--cold-restarts --section …` 将同一组语义用于 S3，每次重启删除 collection 与 `*.object-cache` 两类缓存。
 - `scripts/s3_storage_smoke.py --faults`：真实服务进程连接可丢弃 HTTP 测试后端，覆盖远端发布前后、缓存追加失败、无缓存查询、历史 GC 切点、四个备份中断边界、恢复重试、独立 GC 和完整服务归档。
 - `scripts/s3_acceptance.py`：统一执行上述存储矩阵、六组共享语义（启用 --faults 时）与不可变对象/共同备份合同；`--backend real` 只接受专用测试配置。命令及报告边界见[开发指南](development.md)。
-- 当前提交的 CI 状态、历史证据和未运行项集中在 [STATUS](../STATUS.md)；完整矩阵的触发及覆盖范围见 [CI 指南](ci-validation.md)。旧阶段 CI 不替代当前源码与依赖变更的验证。
+- 性能证据入口和未完成验收集中在 [路线与验收证据](roadmap.md)；完整矩阵的触发及覆盖范围见 [CI 指南](ci-validation.md)。旧阶段 CI 不替代当前源码与依赖变更的验证。
 
 HTTP fixture 不等于真实 S3 服务认证，实际 endpoint、系统/文件系统崩溃与硬断电单独待验收。SQLite 为单主机持久卷权威，不提供跨主机 HA 或权威卷丢失零 RPO。
 

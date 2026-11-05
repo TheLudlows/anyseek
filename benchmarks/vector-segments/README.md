@@ -4,7 +4,7 @@
 
 ## 查询行为和成本边界
 
-本次移除重复的 `shard_number`、固定为一的构造参数、未使用的位置 ID，以及 tail 旋转时对共享 `meta.id` 的改写。逻辑查询配置由 VectorIndex 保存；文件、ANN 层级、量化、构建租约与派生可见性由各 Segment 保存。字段归属及地址规则见 [ARCHITECTURE](../../ARCHITECTURE.md#向量索引与-segment-所有权)。
+本次移除重复的 `shard_number`、固定为一的构造参数、未使用的位置 ID，以及 tail 旋转时对共享 `meta.id` 的改写。逻辑查询配置由 VectorIndex 保存；文件、ANN 层级、量化、构建租约与派生可见性由各 Segment 保存。字段归属及地址规则见 [ARCHITECTURE](../../docs/architecture.md#向量索引与-segment-所有权)。
 
 查询仍捕获 S 个有效 Segment，最多启动 S 个向量子任务，S 受现有组件数上限约束。每段最多保留 K 个候选，全局合并至多 S×K 个候选后截取 K 个，排序上界仍为 O(S×K×log(S×K))。Hybrid 仍按全局通道名次执行一次 RRF，并分别应用 keyword/vector candidate cap。可见性过滤、稳定记录 ID tie-break、ANN 探测与量化算法不变，没有增加调度层或候选预算。
 

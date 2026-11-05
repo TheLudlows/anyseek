@@ -6,7 +6,7 @@
 
 ### 1. 启动 API
 
-API 需要保持运行。完整的 Linux / macOS、Windows PowerShell 启动命令见仓库[快速开始](../README.md#快速开始)，Tenant 和普通 API Key 的签发流程见[服务指南](../anyseek/src/server/README.md#构建与启动)。
+API 需要保持运行。Linux / macOS、Windows PowerShell 启动命令及 Tenant Key 签发流程见[服务指南](../anyseek/src/server/README.md#构建与启动)。
 
 默认 API 地址为 `http://127.0.0.1:8080`，访问 `/api/v1/live` 应返回服务版本。**UI 的集合连接使用 Tenant API Key，不能使用 Master Key。**
 
@@ -140,7 +140,7 @@ docker run --rm -p 8081:80 --network YOUR_NETWORK \
 | 页面能打开，连接请求失败 | 确认 API 已启动；检查 Vite 终端中的代理错误及 `API_TARGET`，不要追加 `/api/v1` |
 | 提示需要浏览器安全上下文 | 本机使用 localhost/127.0.0.1；远程使用受信任 HTTPS，HTTP 局域网 IP 不可用 |
 | 提示 Key 无效或无权访问集合 | 使用管理员签发的 Tenant API Key；Master Key 只用于管理操作 |
-| 别的电脑打不开 UI | 用 `--host 0.0.0.0` 启动开发服务器，并访问前端主机 IP |
+| 别的电脑打不开 UI | 用 `--host 0.0.0.0` 启动开发服务器，并配置受信任 HTTPS 入口（见远程访问说明） |
 
 ## 运行状态与容量
 

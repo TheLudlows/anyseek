@@ -1,6 +1,6 @@
 # 当前架构
 
-本文描述当前主干的模块和运行边界；合入与验证证据见 [STATUS](STATUS.md)，业务契约见 [Record 语义](docs/record-model.md)。主干合入不代表已发布版本。
+本文描述当前主干的模块和运行边界；合入与验证证据见 [路线与验收证据](roadmap.md)，业务契约见 [Record 语义](record-model.md)。主干合入不代表已发布版本。
 
 AnySeek 是 Rust 实现的存储和检索服务，通过 HTTP API 和独立 Web 控制台使用。资源模型为 Tenant → Collection → Partition → Segment；每个 collection 一个持久 partition。HTTP 数据请求统一交由内部 RecordPartition 处理；内部向量/元数据组件包含可变 tail 与冻结 Segment，重复逻辑 shard 状态已由 #111 移除。
 
@@ -23,7 +23,7 @@ AnySeek 是 Rust 实现的存储和检索服务，通过 HTTP API 和独立 Web 
 
 ## 写入与查询
 
-`commit_writes` 与 HTTP `/ingest` 在业务判定和权威持久提交后逐项返回 committed、rejected、outcome_unknown 或 not_attempted；只有 committed 带业务回执。全文与向量消费者异步推进，持久提交不保证对应索引已可查。`/batch` 提供唯一同步 HTTP 写入入口，内部复用 `RecordPartition::write`。只有一层 Record WAL，不再维护独立 Intake 日志。
+`commit_writes` 与 HTTP `/ingest` 在业务判定和权威持久提交后逐项返回 committed、rejected、outcome_unknown 或 not_attempted；只有 committed 带业务回执。全文与向量消费者异步推进，持久提交不保证对应索引已可查。`/batch` 提供唯一同步 HTTP 写入入口，单条内部使用 `RecordPartition::write`，多条使用 `write_batch` 分组共享持久提交与索引发布；HTTP 仍按项返回结果，不提供批次事务。只有一层 Record WAL，不再维护独立 Intake 日志。
 
 查询短暂持有 Record guard 捕获派生拓扑，在 guard 外评分，完成后重验当前记录版本、fingerprint、删除及 TTL 可见性。组件变化不依靠物理 ordinal 充当稳定身份。纯向量 collection 也能按 metadata 浏览；普通查询允许观察不同消费者的进度，提交与各索引水位分别表达。
 
@@ -37,9 +37,9 @@ AnySeek 是 Rust 实现的存储和检索服务，通过 HTTP API 和独立 Web 
 
 正文替换、删除和向量后补仍受技术版本、fingerprint 及 Absent/Any/Match 条件保护，旧向量不能补到新正文。全文和向量的通用 RRF 保留。
 
-TTL 在读取时排除到期正文，最终候选重验使用最新进程评估时间；后台经原持久协议回收，允许 ID 复用并递增版本。读取不持久转换 TTL/history。重启仅保留持久时间下界，未回收正文可能因墙钟回退重新可见，TTL 不承诺隐私删除。分页与计数边界见[Record 契约](docs/record-model.md#时间ttl-与查询视图)。
+TTL 在读取时排除到期正文，最终候选重验使用最新进程评估时间；后台经原持久协议回收，允许 ID 复用并递增版本。读取不持久转换 TTL/history。重启仅保留持久时间下界，未回收正文可能因墙钟回退重新可见，TTL 不承诺隐私删除。分页与计数边界见[Record 契约](record-model.md#时间ttl-与查询视图)。
 
-普通写从规划前到持久发布和清理结束持有同一 partition writer；PreparedBatch 绑定实际 writer/Inner 锁身份，PlanningView 只保留本批成功前缀并读取被修改的记录与回执。普通写不复制 full base/shadow，也不执行全量基准 proof；准入、时间、远端权威和失败封锁继续检查。历史回执检查和切段仍可能遍历保留状态，恢复和维护继续完整 proof，详见[写入证明](docs/record-write-proof.md)。
+普通写从规划前到持久发布和清理结束持有同一 partition writer；PreparedBatch 绑定实际 writer/Inner 锁身份，PlanningView 只保留本批成功前缀并读取被修改的记录与回执。普通写不复制 full base/shadow，也不执行全量基准 proof；准入、时间、远端权威和失败封锁继续检查。历史回执检查和切段仍可能遍历保留状态，恢复和维护继续完整 proof，详见[写入证明](record-write-proof.md)。
 
 ## 认证与生命周期
 
@@ -51,7 +51,7 @@ TTL 在读取时排除到期正文，最终候选重验使用最新进程评估�
 
 集合恢复只占用空闲名称并分配新代次。完整服务恢复发布到新未启动根，使用独立 bucket，禁用历史普通 Key，由目标 master 为已有 Tenant 重新签发。独立备份保留独立恢复 scope，不能证明备份之后没有删除；不提供跨服务自动灾备入口。
 
-服务关闭先停止准入，再等待已接受请求、后台消费者和阻塞工作完成，关闭原生 writer 并释放资源，最后释放根锁。取消等待不代表关闭完成；不强制新增 checkpoint 或 TTL/GC 工作，详见[运行故障与关闭边界](docs/runtime-fault-boundaries.md#service-shutdown)。
+服务关闭先停止准入，再等待已接受请求、后台消费者和阻塞工作完成，关闭原生 writer 并释放资源，最后释放根锁。取消等待不代表关闭完成；不强制新增 checkpoint 或 TTL/GC 工作，详见[运行故障与关闭边界](runtime-fault-boundaries.md#service-shutdown)。
 
 ## 权威与派生文件
 
@@ -63,9 +63,9 @@ Linux 同步文件和父目录；Windows 以同卷无覆盖目录移动完成发
 
 ## 当前边界
 
-这是有界单机实现：Record 身份和保留操作默认各 10,000 项，可显式选有界 100,000 档，详见 [FEATURES](FEATURES.md)。完整逻辑 State 仍驻内存；history trim、checkpoint/对象 GC 和已删除集合代次回收继续受保留期限、在途任务、读者及备份保护约束。专用来源历史和业务关系模型已移出内核，通用全文/向量融合保留。真实 S3、系统断电、长期容量和组合资源隔离验收仍未完成；分布式未实现。原生进程故障测试不能替代主机掉电验收。优先级统一见[后续路线](docs/roadmap.md)，全文与认证包边界见[下节契约](#全文与认证包契约)。
+这是有界单机实现：Record 身份和保留操作默认各 10,000 项，可显式选有界 100,000 档，详见 [功能与边界](features.md)。完整逻辑 State 仍驻内存；history trim、checkpoint/对象 GC 和已删除集合代次回收继续受保留期限、在途任务、读者及备份保护约束。专用来源历史和业务关系模型已移出内核，通用全文/向量融合保留。真实 S3、系统断电、长期容量和组合资源隔离验收仍未完成；分布式未实现。原生进程故障测试不能替代主机掉电验收。优先级统一见[后续路线](roadmap.md)，全文与认证包边界见[下节契约](#全文与认证包契约)。
 
-[Record 语义](docs/record-model.md) · [存储协议](docs/storage.md) · [服务契约](anyseek/src/server/README.md) · [许可](LICENSE)
+[Record 语义](record-model.md) · [存储协议](storage.md) · [服务契约](../anyseek/src/server/README.md) · [许可](../LICENSE)
 
 ## 向量索引与 Segment 所有权
 

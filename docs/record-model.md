@@ -1,6 +1,6 @@
 # Record 语义与一致性
 
-HTTP 请求、字段、配额和操作示例以[服务指南](../anyseek/src/server/README.md)为准；本文保留实现必须维持的不变量。当前交付状态见 [STATUS](../STATUS.md)，持久化见[存储协议](storage.md)。
+HTTP 请求、字段、配额和操作示例以[服务指南](../anyseek/src/server/README.md)为准；本文保留实现必须维持的不变量。当前交付状态见 [路线与验收证据](roadmap.md)，持久化见[存储协议](storage.md)。
 
 ## 身份、版本与重试
 
@@ -30,7 +30,7 @@ HTTP 请求、字段、配额和操作示例以[服务指南](../anyseek/src/ser
 
 来源版本、分块、章节、证据依赖和关系属于上层应用；可将这些信息作为普通 document 字段保存。AnySeek 不提供 source/derived 写入、旧版本正文摘录、定位符验证、关系遍历或关系融合接口。全文/向量通用混合检索、条件更新和精确正文版本的向量后补继续保留。
 
-普通提交的所有权与本批增量规划见[写入证明](record-write-proof.md)；合入记录及验证范围集中在 [STATUS](../STATUS.md)，主干合入不代表已发布版本行为。
+普通提交的所有权与本批增量规划见[写入证明](record-write-proof.md)；合入记录及验证范围集中在 [路线与验收证据](roadmap.md)，主干合入不代表已发布版本行为。
 
 ## 时间、TTL 与查询视图
 
