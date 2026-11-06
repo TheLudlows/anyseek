@@ -1,0 +1,190 @@
+{
+  "baseline-1": {
+    "wall_ms": {
+      "median": 284.957,
+      "min": 259.858,
+      "max": 378.104
+    },
+    "wait_sum_ms": {
+      "median": 0.258,
+      "min": 0.17,
+      "max": 0.354
+    },
+    "wait_p99_ms": {
+      "median": 0.012601,
+      "min": 0.001267,
+      "max": 0.025112
+    },
+    "hold_sum_ms": {
+      "median": 281.689,
+      "min": 256.711,
+      "max": 373.61
+    },
+    "hold_p99_ms": {
+      "median": 5.051639,
+      "min": 3.351368,
+      "max": 5.744955
+    },
+    "atomic_write_including_file_sync_sum_ms": {
+      "median": 204.161,
+      "min": 169.515,
+      "max": 258.546
+    },
+    "atomic_write_including_file_sync_p99_ms": {
+      "median": 3.085586,
+      "min": 2.156918,
+      "max": 4.622074
+    },
+    "directory_sync_sum_ms": {
+      "median": 87.196,
+      "min": 77.528,
+      "max": 115.064
+    },
+    "directory_sync_p99_ms": {
+      "median": 2.270506,
+      "min": 1.576696,
+      "max": 2.681247
+    }
+  },
+  "baseline-4": {
+    "wall_ms": {
+      "median": 1305.828,
+      "min": 1137.28,
+      "max": 1819.164
+    },
+    "wait_sum_ms": {
+      "median": 2998.076,
+      "min": 2628.659,
+      "max": 3557.373
+    },
+    "wait_p99_ms": {
+      "median": 98.677147,
+      "min": 91.285881,
+      "max": 127.327991
+    },
+    "hold_sum_ms": {
+      "median": 1280.306,
+      "min": 1111.302,
+      "max": 1736.181
+    },
+    "hold_p99_ms": {
+      "median": 4.757938,
+      "min": 3.315696,
+      "max": 11.1157
+    },
+    "atomic_write_including_file_sync_sum_ms": {
+      "median": 877.823,
+      "min": 754.657,
+      "max": 1291.423
+    },
+    "atomic_write_including_file_sync_p99_ms": {
+      "median": 3.425065,
+      "min": 2.186294,
+      "max": 8.098636
+    },
+    "directory_sync_sum_ms": {
+      "median": 402.483,
+      "min": 356.645,
+      "max": 444.758
+    },
+    "directory_sync_p99_ms": {
+      "median": 1.961169,
+      "min": 1.316796,
+      "max": 4.20054
+    }
+  },
+  "candidate-1": {
+    "wall_ms": {
+      "median": 286.235,
+      "min": 262.56,
+      "max": 366.7
+    },
+    "wait_sum_ms": {
+      "median": 0.223,
+      "min": 0.208,
+      "max": 0.37
+    },
+    "wait_p99_ms": {
+      "median": 0.002541,
+      "min": 0.001457,
+      "max": 0.007848
+    },
+    "hold_sum_ms": {
+      "median": 282.579,
+      "min": 259.001,
+      "max": 363.105
+    },
+    "hold_p99_ms": {
+      "median": 3.972082,
+      "min": 3.022109,
+      "max": 5.372109
+    },
+    "atomic_write_including_file_sync_sum_ms": {
+      "median": 191.701,
+      "min": 170.386,
+      "max": 242.145
+    },
+    "atomic_write_including_file_sync_p99_ms": {
+      "median": 3.10129,
+      "min": 1.919801,
+      "max": 4.600232
+    },
+    "directory_sync_sum_ms": {
+      "median": 90.878,
+      "min": 84.126,
+      "max": 120.96
+    },
+    "directory_sync_p99_ms": {
+      "median": 1.448742,
+      "min": 1.036904,
+      "max": 3.056002
+    }
+  },
+  "candidate-4": {
+    "wall_ms": {
+      "median": 595.509,
+      "min": 566.863,
+      "max": 660.417
+    },
+    "wait_sum_ms": {
+      "median": 1.476,
+      "min": 1.268,
+      "max": 1.553
+    },
+    "wait_p99_ms": {
+      "median": 0.022718,
+      "min": 0.003009,
+      "max": 0.033793
+    },
+    "hold_sum_ms": {
+      "median": 2247.914,
+      "min": 2052.005,
+      "max": 2539.552
+    },
+    "hold_p99_ms": {
+      "median": 8.344265,
+      "min": 6.859965,
+      "max": 10.580701
+    },
+    "atomic_write_including_file_sync_sum_ms": {
+      "median": 1501.94,
+      "min": 1401.989,
+      "max": 1691.642
+    },
+    "atomic_write_including_file_sync_p99_ms": {
+      "median": 5.620773,
+      "min": 5.200822,
+      "max": 8.793605
+    },
+    "directory_sync_sum_ms": {
+      "median": 758.092,
+      "min": 650.016,
+      "max": 847.91
+    },
+    "directory_sync_p99_ms": {
+      "median": 3.663099,
+      "min": 2.990894,
+      "max": 6.006855
+    }
+  }
+}

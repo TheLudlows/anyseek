@@ -1,0 +1,24 @@
+{
+  "base_sha": "014e66a8570685667d60197f543845a399186915",
+  "master_sha": "3815f230bee864feedd53ccbed9e6ecc4a4326a3",
+  "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: x86_64-unknown-linux-gnu\nrelease: 1.99.1\nLLVM version: 23.1.1\n",
+  "os": "Linux-6.18.57-x86_64-with-glibc2.41",
+  "cpu_max": "400000 100000",
+  "memory_max": "17179869184",
+  "profile": "test unoptimized; debug=0; incremental=0; repository target-cpu=native; default features",
+  "build_command": "cargo test --locked -p anyseek --lib --no-run -j 4",
+  "source_sha256": {
+    "anyseek/src/record/lexical/directory.rs": "ac120659213bdc6e1b7e74193fe0e337b641a15ea1f493042d67b32e5185b60a",
+    "anyseek/src/record/lexical/directory_gate.rs": "58e5194179c7728fcc5cfcd89cb36fcf1e9010c02707f2b9524ad6cc891b4e12",
+    "anyseek/src/record/lexical/directory_diagnostic.rs": "7bd1c0b2bd53bf353b1aea7b502d13ba4d8a8cbc59303eb1eed4e4c03b6215a2",
+    "Cargo.lock": "9d75ad81dd153ca34e883dee6f7b16f6736ba2a8073ae9e8b96877bd89c21631"
+  },
+  "filesystem": "overlayfs on /workspace",
+  "validation_environment": {
+    "CARGO_BUILD_JOBS": "4",
+    "ANYSEEK_TEST_SCALE": "small",
+    "CARGO_PROFILE_TEST_DEBUG": "0",
+    "CARGO_PROFILE_DEV_DEBUG": "0",
+    "CARGO_INCREMENTAL": "0"
+  }
+}

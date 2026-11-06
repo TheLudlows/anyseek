@@ -17,10 +17,11 @@ use tantivy::directory::{
     error::{DeleteError, LockError, OpenReadError, OpenWriteError},
 };
 
-// Native merge, indexing and reload may overlap. Serialize their short filesystem
-// operations after service admission. Never hold this gate while waiting for capacity.
-// This gate does not retain an I/O lease between operations.
-static NATIVE_IO: Mutex<()> = Mutex::new(());
+// Native merge, indexing and reload share a gate per physical directory.
+// Independent collections must not wait for each other's writes or disk syncs.
+// Acquire capacity before the gate; retain neither between operations.
+#[path = "directory_gate.rs"]
+mod gate;
 
 struct Ledger {
     written: u64,
@@ -31,6 +32,7 @@ pub(super) struct WriterReservation {
     _buffer: Option<resources::Lease>,
 }
 struct Budget {
+    io_gate: Arc<Mutex<()>>,
     cancelled: std::sync::atomic::AtomicBool,
     #[cfg(test)]
     fail_writes: std::sync::atomic::AtomicBool,
@@ -86,13 +88,13 @@ impl Budget {
         // refund charged traffic. Each new private build gets a fresh ledger.
         Ok(())
     }
-    fn io(&self) -> io::Result<(Option<resources::Lease>, std::sync::MutexGuard<'static, ()>)> {
+    fn io(&self) -> io::Result<(Option<resources::Lease>, std::sync::MutexGuard<'_, ()>)> {
         let lease = self.scope
             .as_ref()
             .map(|s| s.native_io_wait(&self.cancelled))
             .transpose()
             .map_err(io::Error::other)?;
-        let gate = NATIVE_IO.lock().map_err(|_| io::Error::other("native I/O gate poisoned"))?;
+        let gate = self.io_gate.lock().map_err(|_| io::Error::other("native I/O gate poisoned"))?;
         Ok((lease, gate))
     }
 }
@@ -222,7 +224,8 @@ impl BudgetDirectory {
     pub(super) fn open_selected(path: &Path, limit: u64) -> Result<Self, RecordError> {
         let scope = resources::Scope::current().map(|scope| scope.retained_io());
         let io = scope.as_ref().map(|s|s.native_io_wait(&std::sync::atomic::AtomicBool::new(false))).transpose().map_err(storage)?;
-        let gate=NATIVE_IO.lock().map_err(|_|storage("native I/O gate poisoned"))?;
+        let io_gate=gate::for_directory(path).map_err(storage)?;
+        let gate=io_gate.lock().map_err(|_|storage("native I/O gate poisoned"))?;
         let mut total=0u64;let mut metadata=65536u64;let mut count=0usize;
         for entry in std::fs::read_dir(path).map_err(storage)? {
             let entry=entry.map_err(storage)?;let kind=entry.file_type().map_err(storage)?;
@@ -237,8 +240,9 @@ impl BudgetDirectory {
         let memory=crate::storage::build_budget::reserve_memory(metadata).map_err(storage)?;
         let buffer=scope.as_ref().map(|s|s.bytes(metadata)).transpose().map_err(storage)?;
         let inner=MmapDirectory::open(path).map_err(storage)?;
-        drop(io);drop(gate);
+        drop(gate);drop(io);
         Ok(Self {inner,selected:true,budget:Arc::new(Budget {
+            io_gate,
             cancelled: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)] fail_writes: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)] failed_writes: std::sync::atomic::AtomicUsize::new(0),
@@ -253,6 +257,7 @@ impl BudgetDirectory {
         memory_bytes: u64,
         scope: Option<resources::Scope>,
     ) -> Result<Self, RecordError> {
+        let io_gate = gate::for_directory(path).map_err(storage)?;
         if std::fs::read_dir(path).map_err(storage)?.next().is_some() {
             return Err(storage("native candidate directory must be empty"));
         }
@@ -266,6 +271,7 @@ impl BudgetDirectory {
             inner: MmapDirectory::open(path).map_err(storage)?,
             selected: false,
             budget: Arc::new(Budget {
+                io_gate,
                 cancelled: std::sync::atomic::AtomicBool::new(false),
                 #[cfg(test)] fail_writes: std::sync::atomic::AtomicBool::new(false),
                 #[cfg(test)] failed_writes: std::sync::atomic::AtomicUsize::new(0),
@@ -393,6 +399,62 @@ impl Directory for BudgetDirectory {
 mod tests {
     use super::*;
     use crate::record::lexical::tests::Temp;
+
+    #[test]
+    fn directory_gates_share_aliases_and_isolate_other_directories() {
+        let root = tempfile::tempdir().unwrap();
+        let first = root.path().join("first");
+        let second = root.path().join("second");
+        std::fs::create_dir(&first).unwrap();
+        std::fs::create_dir(&second).unwrap();
+        let a = BudgetDirectory::persistent(&first, 65536, 16, 0).unwrap();
+        let alias = BudgetDirectory::persistent(&first.join("."), 65536, 16, 0).unwrap();
+        let b = BudgetDirectory::persistent(&second, 65536, 16, 0).unwrap();
+        assert!(Arc::ptr_eq(&a.budget.io_gate, &alias.budget.io_gate));
+        assert!(!Arc::ptr_eq(&a.budget.io_gate, &b.budget.io_gate));
+        a.atomic_write(Path::new("payload"), b"value").unwrap();
+        let selected = BudgetDirectory::open_selected(&first, 65536).unwrap();
+        assert!(Arc::ptr_eq(&a.budget.io_gate, &selected.budget.io_gate));
+        let clone = a.clone();
+        let held = a.budget.io_gate.lock().unwrap();
+        assert!(clone.budget.io_gate.try_lock().is_err());
+        assert!(selected.budget.io_gate.try_lock().is_err());
+        // A blocked index must not stop another index's durable publication.
+        let (done, receive) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            b.atomic_write(Path::new("independent"), b"progress").unwrap();
+            b.sync_directory().unwrap();
+            done.send(()).unwrap();
+        });
+        let completed = receive.recv_timeout(std::time::Duration::from_secs(5));
+        drop(held);
+        worker.join().unwrap();
+        completed.unwrap();
+        drop(a);
+        assert_eq!(selected.atomic_read(Path::new("payload")).unwrap(), b"value");
+        assert!(Arc::ptr_eq(&clone.budget.io_gate, &alias.budget.io_gate));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn directory_gates_resolve_symlinks_and_filesystem_identity() {
+        let root = tempfile::tempdir().unwrap();
+        let actual = root.path().join("actual");
+        let alias = root.path().join("alias");
+        std::fs::create_dir(&actual).unwrap();
+        std::os::unix::fs::symlink(&actual, &alias).unwrap();
+        let a = gate::for_directory(&actual).unwrap();
+        let b = gate::for_directory(&alias).unwrap();
+        assert!(Arc::ptr_eq(&a, &b));
+        let renamed = root.path().join("renamed");
+        std::fs::rename(&actual, &renamed).unwrap();
+        assert!(Arc::ptr_eq(&a, &gate::for_directory(&renamed).unwrap()));
+        let weak = Arc::downgrade(&a);
+        drop(a);
+        drop(b);
+        assert!(weak.upgrade().is_none());
+        assert!(gate::for_directory(&renamed).unwrap().try_lock().is_ok());
+    }
 
     #[test]
     fn contended_metadata_lock_releases_io_for_lock_owner_and_can_cancel() {
@@ -524,3 +586,8 @@ mod tests {
         drop(other);
     }
 }
+
+// Explicit diagnostic only: no timing or environment switches in production.
+#[cfg(test)]
+#[path = "directory_diagnostic.rs"]
+mod diagnostic;
