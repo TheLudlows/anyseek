@@ -61,13 +61,11 @@ impl ComponentCredit {
 pub(super) struct Input {
     component:Option<ComponentCredit>,
     visible:Option<lexical::memory::Admission>,
-    publish_native:bool,
     identity: lexical::Identity,
     ordinal: usize,
     fingerprint: Option<[u8; 32]>,
     document: Document,
-    _memory: crate::storage::build_budget::MemoryLease,
-    _scope: Option<crate::resources::Lease>,
+    _memory: crate::resources::MemoryReservation,
 }
 impl Input {
     pub fn admitted_visible(native:&lexical::runtime::Runtime,identity:lexical::Identity,document:&Document,visible:Option<lexical::memory::Admission>)->Result<Self,RecordError>{
@@ -77,11 +75,7 @@ impl Input {
             .filter(|f| f.index_lexical).map(|f| f.field.as_str()))?
             .checked_add(build_budget::identity_estimate(&identity.id)?)
             .ok_or_else(|| storage("queued input estimate overflow"))?;
-        let memory = crate::storage::build_budget::reserve_memory(bytes).map_err(storage)?;
-        let scope = crate::resources::Scope::current()
-            .map(|scope| scope.retained_io().bytes(bytes))
-            .transpose()
-            .map_err(storage)?;
+        let memory = build_budget::retained_memory(bytes)?;
         let document = native
             .config
             .schema
@@ -96,14 +90,12 @@ impl Input {
         native.reserve_queued_update();
         Ok(Self {
             component:None,
-            publish_native:!matches!(&visible,Some(lexical::memory::Admission::Visible(_))),
             visible,
             identity,
             ordinal: 0,
             fingerprint: None,
             document,
             _memory: memory,
-            _scope: scope,
         })
     }
     pub fn vector_with_credit(config:&RecordConfig,identity:lexical::Identity,ordinal:usize,
@@ -113,11 +105,7 @@ impl Input {
             .filter(|f| f.index_vector || f.facet).map(|f| f.field.as_str()))?
             .checked_add(build_budget::identity_estimate(&identity.id)?)
             .ok_or_else(|| storage("queued input estimate overflow"))?;
-        let memory = crate::storage::build_budget::reserve_memory(bytes).map_err(storage)?;
-        let scope = crate::resources::Scope::current()
-            .map(|scope| scope.retained_io().bytes(bytes))
-            .transpose()
-            .map_err(storage)?;
+        let memory = build_budget::retained_memory(bytes)?;
         let fingerprint = Some(crate::active::fingerprint(document).map_err(storage)?);
         let document = schema
             .into_iter()
@@ -130,14 +118,12 @@ impl Input {
             .collect();
         Ok(Self {
             component,
-            publish_native:false,
             visible:None,
             identity,
             ordinal,
             fingerprint,
             document,
             _memory: memory,
-            _scope: scope,
         })
     }
 }
@@ -161,8 +147,7 @@ impl Engine {
             Self::Lexical(native) => match input.visible {
                 Some(lexical::memory::Admission::Visible(reservation))=>native.append_visible(input.identity,&input.document,reservation,false,Some(cursors.clone())).await,
                 Some(lexical::memory::Admission::Fallback(admission))=>native.append_fallback_admitted(input.identity,&input.document,admission,false).await,
-                None if input.publish_native=>native.append_fallback_queued(input.identity,&input.document).await,
-                None=>native.append_queued(input.identity, &input.document).await,
+                None=>native.append_fallback_queued(input.identity,&input.document).await,
             },
             Self::Vector { index, .. } => {
                 let component = index.read().await.segments[0].vector.clone();
@@ -248,24 +233,22 @@ impl Engine {
             }
         }
     }
-    async fn flush(&self,already_published:bool) -> Result<(), RecordError> {
+    fn check_publication(&self) -> Result<(), RecordError> {
         match self {
             Self::Lexical(native) => {
                 // Visible overlays and fallback rows each publish using their
                 // own pre-WAL workspace. A second flush/optional merge would
                 // reacquire memory after ACK and discard that guarantee.
-                if already_published || native.visible_enabled(){native.visible_status()}
-                else {native.flush().await?;native.merge_small_segments().await}
+                native.visible_status()
             },
             Self::Vector { .. } => Ok(()),
         }
     }
-    fn advance(&self, cursors: &Cursors, sequence: u64) {
+    fn cursor<'a>(&self, cursors: &'a Cursors) -> &'a AtomicU64 {
         match self {
             Self::Lexical(_) => &cursors.lexical,
             Self::Vector { .. } => &cursors.vector,
         }
-        .fetch_max(sequence, Ordering::Release);
     }
 }
 struct Batch {
@@ -325,6 +308,11 @@ impl Consumer {
     pub fn submit(&self, inputs: Vec<Input>, sequence: u64) -> Result<(), RecordError> {
         if self.cursors.error().is_some() {
             return Err(RecordError::RecoveryRequired);
+        }
+        // Exact replays at an already published cut have no derived work. A
+        // delete at a newer sequence still queues an empty batch to advance it.
+        if inputs.is_empty() && sequence<=self.engine.cursor(&self.cursors).load(Ordering::Acquire) {
+            return Ok(());
         }
         let mut queue = self
             .queue
@@ -417,12 +405,11 @@ impl Consumer {
                     }
                 }
                 let changed = !batch.inputs.is_empty();
-                let already_published=batch.inputs.iter().all(|input|input.publish_native || input.visible.is_some());
                 for input in batch.inputs {
                     self.engine.append(input, &self.cursors).await?;
                 }
                 if changed {
-                    self.engine.flush(already_published).await?;
+                    self.engine.check_publication()?;
                 }
                 Ok::<_, RecordError>(())
             }
@@ -435,7 +422,7 @@ impl Consumer {
                 }
                 return;
             }
-            self.engine.advance(&self.cursors, batch.sequence);
+            self.engine.cursor(&self.cursors).fetch_max(batch.sequence, Ordering::Release);
         }
     }
     /// Administrative/synchronous paths join owned work before sealing a tail

@@ -235,6 +235,10 @@ mod tests {
               }
             }
         }
+        oracle.finish_service_shutdown().await.unwrap();
+        for partition in [&a,&b] {
+            partition.finish_service_shutdown().await.unwrap();
+        }
         drop(root_index);drop(a);drop(b);drop(oracle);for root in roots {std::fs::remove_dir_all(root).unwrap();}
     }
 

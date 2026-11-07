@@ -67,16 +67,20 @@ pub(super) async fn create(
         let initial_size=checkpoint_codec::length(&config,&empty)?;
         let initial_memory=crate::storage::build_budget::reserve_memory((initial_size as u64).checked_mul(32).ok_or_else(||storage("snapshot initial overflow"))?).map_err(storage)?;
         let initial=encode_entry(&Entry::Checkpoint {config:config.clone(),state:empty})?;
-        let mut journal=PartitionJournal::create(&prepared,config.max_journal_bytes,&initial).map_err(creation_error)?;
+        let mut journal=crate::resources::file_transaction(||
+            PartitionJournal::create(&prepared,config.max_journal_bytes,&initial)
+        ).await.map_err(|_|RecordError::Busy)?.map_err(creation_error)?;
         owned=true;
         drop(initial);drop(initial_memory);
         // Neither the initial empty runtime nor a mutable tail can be queried
         // in this private snapshot; do not construct and immediately discard them.
         let (payload,_payload_owner,_disk_owner)=anchor::snapshot_payload(&prepared,&config,&state).await?;
-        journal.checkpoint(&payload).map_err(creation_error)?;
-        drop(journal);
-        clean_recovery_caches(&prepared)?;
-        segment::sync_tree(&prepared)?;
+        crate::resources::file_transaction(|| {
+            journal.checkpoint(&payload).map_err(creation_error)?;
+            drop(journal);
+            clean_recovery_caches(&prepared)?;
+            segment::sync_tree(&prepared)
+        }).await.map_err(|_|RecordError::Busy)??;
         #[cfg(test)]
         {
             if destination.with_extension("reject-before-publish").exists() {
@@ -111,7 +115,10 @@ pub(super) async fn create(
         }
         return Err(error);
     }
-    match PartitionJournal::publish_prepared_root(&prepared, destination) {
+    let published=crate::resources::file_transaction(||
+        PartitionJournal::publish_prepared_root(&prepared, destination)
+    ).await.unwrap_or_else(|error|Err(CreateError::NotPublished(std::io::Error::other(error))));
+    match published {
         Ok(()) => {
             #[cfg(feature = "fault-injection")]
             publication_fault(destination, "published");
@@ -155,6 +162,34 @@ fn publication_fault(destination: &Path, stage: &str) {
 mod tests {
     use super::super::tests::{config, write};
     use super::*;
+
+    #[tokio::test(flavor="current_thread")]
+    async fn snapshot_waits_for_shared_background_io_and_reopens_exact_cut() {
+        let directory=tempfile::tempdir().unwrap();
+        let settings=config();let budget=settings.max_journal_bytes;
+        let source=RecordPartition::create(&directory.path().join("source"),settings.clone()).await.unwrap();
+        let request=write("snapshot-io","id","alpha",ExpectedVersion::Absent);
+        let receipt=source.write(request.clone()).await.unwrap();
+        source.finish_service_shutdown().await.unwrap();
+        let mut state=source.inner.lock().await.state.try_clone().unwrap();
+        state.independent_snapshot=true;
+        let governor=Arc::new(crate::resources::Governor::default());
+        let scope=governor.admit("snapshot".into(),crate::resources::Lane::Background,0).unwrap();
+        let held=scope.io().unwrap();
+        let target=directory.path().join("snapshot");
+        let work=scope.clone().run(create(&target,settings,state));
+        tokio::pin!(work);
+        assert!(tokio::time::timeout(std::time::Duration::from_millis(30),&mut work).await.is_err(),
+            "a private snapshot must wait for admitted I/O, rather than reject or bypass it");
+        assert!(!target.exists());
+        drop(held);
+        tokio::time::timeout(std::time::Duration::from_secs(10),&mut work).await.unwrap().unwrap();
+        assert!(scope.io().is_ok(),"completed snapshot returns its I/O capacity");
+        let restored=RecordPartition::open(&target,budget).await.unwrap();
+        assert_eq!(restored.write(request).await.unwrap(),receipt);
+        assert_eq!(restored.search("alpha".into(),None,SearchMode::Lexical,vec![],10).await.unwrap().hits.len(),1);
+        restored.finish_service_shutdown().await.unwrap();
+    }
 
     fn archive_hash(path:&Path,budget:u64)->String {
         use sha2::{Digest,Sha256};

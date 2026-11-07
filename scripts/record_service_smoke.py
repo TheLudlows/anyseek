@@ -14,7 +14,14 @@ def main():
     if args.section == 'startup':
         os.environ['ANYSEEK_STORAGE_BACKEND'] = 'local'
     binary=str(pathlib.Path(args.server).resolve())
-    with tempfile.TemporaryDirectory(prefix='anyseek-service-', dir=os.environ.get('ANYSEEK_TEST_ROOT')) as tmp:
+    temporary = tempfile.TemporaryDirectory(prefix='anyseek-service-', dir=os.environ.get('ANYSEEK_TEST_ROOT'))
+    with temporary as tmp:
+        # Nested service/collection backup IDs can exceed MAX_PATH. Keep the
+        # service's normal root, but let Python clean via an extended path.
+        if os.name == 'nt':
+            absolute = os.path.abspath(tmp)
+            temporary.name = absolute if absolute.startswith('\\\\?\\') else (
+                '\\\\?\\UNC\\' + absolute[2:] if absolute.startswith('\\\\') else '\\\\?\\' + absolute)
         root=pathlib.Path(tmp)/'data'
         if args.section == 'startup':
             clean_env = {k:v for k,v in os.environ.items() if k != 'MASTER_KEY_SECRET'}

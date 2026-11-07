@@ -153,7 +153,7 @@ mod tests {
         let (_,state)=second.read(&reader,config.max_journal_bytes).unwrap();
         assert_eq!(serde_json::to_vec(&state).unwrap(),expected);
         assert_eq!(state.operation_lookup.len(),2);
-        drop(reader);drop(partition);std::fs::remove_dir_all(root).unwrap();
+        drop(reader);partition.finish_service_shutdown().await.unwrap();drop(partition);std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]
@@ -174,7 +174,7 @@ mod tests {
         let prepared=serde_json::from_slice::<ReferencedState>(&encoded).unwrap();
         let (_,state)=prepared.read(&pool,config.max_journal_bytes).unwrap();
         assert_eq!(serde_json::to_vec(&state).unwrap(),expected);
-        drop(pool);drop(inner);drop(partition);
+        drop(pool);drop(inner);partition.finish_service_shutdown().await.unwrap();drop(partition);
         std::fs::remove_dir_all(root).unwrap();
     }
     #[tokio::test]

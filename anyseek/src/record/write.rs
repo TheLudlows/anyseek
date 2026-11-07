@@ -3,6 +3,7 @@
 use super::*;
 use futures::FutureExt;
 mod planning;
+mod persistence;
 use planning::PlanningView;
 
 /// Only the completed prefix has definite outcomes. Busy and uncertain
@@ -55,7 +56,6 @@ const MAX_BATCH_BYTES: usize = 4 * 1024 * 1024;
 #[derive(Clone, Copy)]
 pub(super) enum IndexDelivery {
     Synchronous,
-    SynchronousBatch,
     Asynchronous,
 }
 
@@ -71,178 +71,13 @@ struct PreparedBatch<'writer> {
     expires_at: Option<u64>,
 }
 
-struct RemoteUpload {
-    store: crate::storage::s3_compatible::S3CompatibleStore,
-    path: std::path::PathBuf,
-    head: crate::storage::sqlite_authority::PartitionHead,
-    block: crate::storage::object_log::ObjectLogBlock,
-    max_bytes: usize,
-    #[cfg(test)]
-    root: std::path::PathBuf,
-}
-struct UploadedBatch {
-    head: crate::storage::sqlite_authority::PartitionHead,
-    block: crate::storage::object_log::ObjectLogBlock,
-    reference: crate::storage::sqlite_authority::ObjectRef,
-}
-impl RemoteUpload {
-    async fn upload(self) -> Result<UploadedBatch, RecordError> {
-        #[cfg(test)]
-        if self.root.join(".test-write-upload-panic").exists() {
-            panic!("injected upload unwind");
-        }
-        #[cfg(test)]
-        if self.root.join(".test-write-upload-pause").exists() {
-            std::fs::write(
-                self.root.join(".test-write-upload-started"),
-                b"outside state lock",
-            )
-            .map_err(storage)?;
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-            while self.root.join(".test-write-upload-pause").exists() {
-                if std::time::Instant::now() >= deadline {
-                    return Err(RecordError::Busy);
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-            }
-        }
-        let digest = checkpoint_codec::json_digest(&self.block)?;
-        let key = crate::storage::object_keys::key(&self.head.partition_id, "wal", &format!(
-            "{:020}-{}",
-            self.block.first_seq,
-            digest
-                .iter()
-                .map(|byte| format!("{byte:02x}"))
-                .collect::<String>()
-        ));
-        // Independent short SQLite transactions avoid holding the shared authority
-        // connection while awaiting network I/O. Retired objects cannot resurrect.
-        let mut authority = crate::storage::sqlite_authority::SqliteAuthority::open(
-            &self.path,
-            std::time::Duration::from_secs(5),
-        )
-        .map_err(storage)?;
-        let reference = crate::storage::object_log::upload_log_block(
-            &self.store,
-            &mut authority,
-            &key,
-            &self.block,
-            unix_time_ms_i64(),
-            self.max_bytes,
-        )
-        .await
-        .map_err(|error| match RemoteCommitError::from(error) {
-            RemoteCommitError::Busy => RecordError::Busy,
-            RemoteCommitError::Unknown(error) => RecordError::OutcomeUnknown(error),
-        })?;
-        Ok(UploadedBatch {
-            head: self.head,
-            block: self.block,
-            reference,
-        })
-    }
-}
-impl UploadedBatch {
-    async fn publish(self, remote: &mut RemotePersistence) -> Result<(), RecordError> {
-        if remote.partition_id != self.head.partition_id
-            || remote.owner_epoch != self.head.owner_epoch
-        {
-            return Err(RecordError::RecoveryRequired);
-        }
-        let operations: Vec<_> = self
-            .block
-            .entries
-            .iter()
-            .map(|entry| (entry.operation_id.as_str(), entry.request_sha256, entry.seq))
-            .collect();
-        let result = remote
-            .authority
-            .lock()
-            .await
-            .publish_batch(
-                &remote.partition_id,
-                self.head.head_version,
-                remote.owner_epoch,
-                &operations,
-                self.reference,
-                None,
-            )
-            .map_err(|error| RecordError::OutcomeUnknown(error.to_string()))?;
-        match result {
-            crate::storage::sqlite_authority::PublishOutcome::Published(head)
-            | crate::storage::sqlite_authority::PublishOutcome::AlreadyPublished(head)
-                if head.committed_seq == self.block.last_seq =>
-            {
-                Ok(())
-            }
-            _ => Err(RecordError::OutcomeUnknown(
-                "remote batch head changed before publication".into(),
-            )),
-        }
-    }
-}
-impl Inner {
-    async fn prepare_remote_batch(
-        &self,
-        prepared: &PreparedBatch<'_>,
-    ) -> Result<Option<RemoteUpload>, RecordError> {
-        use sha2::{Digest, Sha256};
-        let Some(remote) = self.remote.as_ref() else {
-            return Ok(None);
-        };
-        if prepared.plans.is_empty() {
-            return Ok(None);
-        }
-        let authority = remote.authority.lock().await;
-        let head = authority
-            .read_head(&remote.partition_id)
-            .map_err(storage)?
-            .ok_or(RecordError::RecoveryRequired)?;
-        if head.owner_epoch != remote.owner_epoch || head.committed_seq != prepared.base_seq {
-            return Err(RecordError::RecoveryRequired);
-        }
-        let entries: Vec<_> = prepared
-            .plans
-            .iter()
-            .map(|plan| match plan {
-                mutation::PreparedWrite::Append { applied, bytes, .. } => {
-                    crate::storage::object_log::ObjectLogEntry {
-                        seq: applied.receipt.seq,
-                        operation_id: format!(
-                            "{}:{}",
-                            applied.request.operation_id.epoch, applied.request.operation_id.nonce
-                        ),
-                        request_sha256: Sha256::digest(bytes).into(),
-                        payload: bytes.clone(),
-                    }
-                }
-                _ => unreachable!(),
-            })
-            .collect();
-        let block = crate::storage::object_log::ObjectLogBlock {
-            partition_id: remote.partition_id.clone(),
-            first_seq: entries.first().unwrap().seq,
-            last_seq: entries.last().unwrap().seq,
-            previous: head.wal_tip.clone(),
-            entries,
-        };
-        Ok(Some(RemoteUpload {
-            store: remote.store.clone(),
-            path: authority.database_path().to_path_buf(),
-            head,
-            block,
-            max_bytes: remote.max_object_bytes,
-            #[cfg(test)]
-            root: self.journal.root().to_path_buf(),
-        }))
-    }
-}
 
 impl RecordPartition {
     /// Run an admitted prefix in order, deciding each command against preceding
     /// planned state. The admitted prefix shares a durable publication; it is
     /// not an all-or-nothing business batch.
     /// A definite rejection ends the prefix; an unprocessed suffix has no result.
+    #[cfg(test)]
     pub(super) async fn execute_writes(
         &self,
         requests: Vec<RecordWrite>,
@@ -251,7 +86,7 @@ impl RecordPartition {
         self.execute_writes_detailed(requests, delivery)
             .await
             .map_err(|failure| {
-                // Single-write callers retain their existing recovery error contract.
+                // Low-level tests inspect the original recovery error contract.
                 let BatchFailure {
                     error,
                     scope: _scope,
@@ -296,17 +131,14 @@ impl RecordPartition {
                 }
                 inner.observe_time()?;
                 inner.index.attach_cursors(partition.indexes.clone());
-                let buffered = !matches!(delivery, IndexDelivery::Synchronous);
                 let synchronous = !matches!(delivery, IndexDelivery::Asynchronous);
                 if synchronous {
                     inner.index.drain_indexes().await?;
                 }
-                if buffered {
-                    inner
-                        .index
-                        .begin_batch(partition.indexes.clone(), Arc::downgrade(&partition.inner))
-                        .await?;
-                }
+                inner
+                    .index
+                    .begin_batch(partition.indexes.clone(), Arc::downgrade(&partition.inner))
+                    .await?;
                 drop(inner);
                 let prepared = partition.prepare_batch(&writer, requests).await;
                 inner = partition.inner.lock().await;
@@ -335,24 +167,9 @@ impl RecordPartition {
                 }
                 let result = match prepared {
                     Ok(prepared) => {
-                        let upload = inner.prepare_remote_batch(&prepared).await;
-                        match upload {
-                            Ok(Some(upload)) => {
-                                drop(inner);
-                                let uploaded = upload.upload().await;
-                                inner = partition.inner.lock().await;
-                                match uploaded {
-                                    Ok(uploaded) => {
-                                        partition
-                                            .commit_batch(&mut inner, prepared, &mut scope, Some(uploaded))
-                                            .await
-                                    }
-                                    Err(error) => Err(error),
-                                }
-                            }
-                            Ok(None) => partition.commit_batch(&mut inner, prepared, &mut scope, None).await,
-                            Err(error) => Err(error),
-                        }
+                        let result;
+                        (inner, result) = partition.persist_prepared(inner, prepared, &mut scope).await;
+                        result
                     }
                     Err(error) => Err(error),
                 };
@@ -364,9 +181,7 @@ impl RecordPartition {
                     inner.fence_failed_write();
                 }
                 if !inner.healthy {
-                    if buffered {
-                        inner.index.abort_batch();
-                    }
+                    inner.index.abort_batch();
                     return Err(match result {
                         Err(error) => error,
                         Ok(batch) => batch.stop.unwrap_or(RecordError::RecoveryRequired),
@@ -382,10 +197,6 @@ impl RecordPartition {
                         stop: Some(error),
                     },
                 };
-                if !buffered {
-                    partition.indexes.immediate(inner.state.seq);
-                    return interrupted.map_or(Ok(batch), Err);
-                }
                 // Consumers do not acquire Inner. Synchronous batches join them
                 // under this guard; asynchronous ingestion returns after submission.
                 inner
@@ -685,7 +496,7 @@ impl RecordPartition {
         guard: &mut tokio::sync::MutexGuard<'_, Inner>,
         prepared: PreparedBatch<'_>,
         scope: &mut AttemptScope,
-        uploaded: Option<UploadedBatch>,
+        persistence: persistence::Prepared,
     ) -> Result<BatchResult, RecordError> {
         // Bind both borrowed guards to this partition before touching authority.
         // A held writer for another partition, or another Inner, is insufficient.
@@ -756,12 +567,8 @@ impl RecordPartition {
             .enumerate()
             .filter_map(|(i, result)| result.as_ref().ok().filter(|r| r.seq > base_seq).map(|_| i))
             .collect();
-        if let Some(uploaded) = uploaded {
-            let remote = inner.remote.as_mut().ok_or(RecordError::RecoveryRequired)?;
-            uploaded.publish(remote).await?;
-        }
         inner.index.attach_cursors(self.indexes.clone());
-        inner.append_operations(&payloads, sequence).await?;
+        persistence.commit(inner, &payloads, sequence).await?;
         #[cfg(feature = "fault-injection")]
         if let Some(path) = std::env::var_os("ANYSEEK_RECORD_BATCH_TRACE") {
             use std::io::Write;
@@ -849,9 +656,9 @@ mod tests {
         let mut target=b.inner.lock().await;
         let mut scope=AttemptScope::default();
         let prepared=a.prepare_batch(&writer,vec![request.clone()]).await.unwrap();
-        assert!(matches!(a.commit_batch(&mut target,prepared,&mut scope,None).await,Err(RecordError::RecoveryRequired)),"wrong Inner guard");
+        assert!(matches!(a.commit_batch(&mut target,prepared,&mut scope,persistence::Prepared::Local).await,Err(RecordError::RecoveryRequired)),"wrong Inner guard");
         let prepared=a.prepare_batch(&writer,vec![request.clone()]).await.unwrap();
-        assert!(matches!(b.commit_batch(&mut target,prepared,&mut scope,None).await,Err(RecordError::RecoveryRequired)),"wrong writer guard");
+        assert!(matches!(b.commit_batch(&mut target,prepared,&mut scope,persistence::Prepared::Local).await,Err(RecordError::RecoveryRequired)),"wrong writer guard");
         drop(target);drop(writer);
         assert_eq!(a.write(request).await.unwrap().seq,1);
         assert_eq!(b.write(write("other","r","beta",ExpectedVersion::Absent)).await.unwrap().seq,1);
@@ -898,7 +705,7 @@ mod tests {
         let request=write("owned-large","large",&"alpha ".repeat(50_000),ExpectedVersion::Absent);
         assert!(build_budget::document_estimate(request.document.as_ref().unwrap(),&settings.schema).unwrap()
             >crate::storage::build_budget::EXPLICIT_BUFFERS);
-        let delivery=if asynchronous {IndexDelivery::Asynchronous}else{IndexDelivery::SynchronousBatch};
+        let delivery=if asynchronous {IndexDelivery::Asynchronous}else{IndexDelivery::Synchronous};
         let caller={let owner=p.clone();let request=request.clone();tokio::spawn(async move {
             owner.execute_writes(vec![request],delivery).await
         })};
@@ -1031,9 +838,9 @@ mod tests {
     #[tokio::test]
     async fn fallback_and_visible_escrows_cover_mixed_and_async_queued_prefixes() {
         for (delivery,cross_batch) in [(IndexDelivery::Synchronous,false),
-            (IndexDelivery::SynchronousBatch,false),(IndexDelivery::Asynchronous,false),
+            (IndexDelivery::Asynchronous,false),
             (IndexDelivery::Asynchronous,true)] {
-            let delivery_name=match delivery {IndexDelivery::Synchronous=>"synchronous",IndexDelivery::SynchronousBatch=>"synchronous_batch",IndexDelivery::Asynchronous=>"asynchronous"};
+            let delivery_name=match delivery {IndexDelivery::Synchronous=>"synchronous",IndexDelivery::Asynchronous=>"asynchronous"};
             eprintln!("fallback escrow case delivery={delivery_name} cross_batch={cross_batch} phase=start");
             let directory=tempfile::tempdir().unwrap();let root=directory.path().join("records");
             let mut settings=config();settings.max_record_bytes=512*1024;settings.max_journal_bytes=16*1024*1024;

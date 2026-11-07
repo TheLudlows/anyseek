@@ -44,5 +44,9 @@
   "storage::build_budget::tests::disk_checks_before_growth_and_rescans_same_live_ledger",
   "record::anchor::tests::anchor_component_metadata_pressure_stays_busy_and_retries_without_fencing",
   "record::remote_checkpoint::tests::cold_cache_eviction_waits_for_materializer_without_checkpointing",
-  "record::remote_checkpoint::tests::dropped_partition_keeps_cross_process_owner_until_materializer_exits"
+  "record::remote_checkpoint::tests::dropped_partition_keeps_cross_process_owner_until_materializer_exits",
+  "record::snapshot::tests::snapshot_waits_for_shared_background_io_and_reopens_exact_cut",
+  "record::remote_checkpoint::tests::backup_joins_materializer_io_without_requiring_healthy_indexes",
+  "record::committed::tests::single_and_one_item_batch_are_visible_durable_and_replayable",
+  "resources::memory::tests::failed_growth_releases_both_incremental_reservations"
 ]

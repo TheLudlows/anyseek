@@ -21,7 +21,7 @@ async fn standard_profiles_preserve_operators_long_terms_originals_and_reopen() 
         partition.write(write("b", "b", "alpha gamma", ExpectedVersion::Absent)).await.unwrap();
         for state in 0..3 {
             if state == 1 { partition.compact_journal().await.unwrap(); }
-            if state == 2 { drop(partition); partition = RecordPartition::open(&root.0, 1024*1024).await.unwrap(); }
+            if state == 2 { partition.finish_service_shutdown().await.unwrap(); drop(partition); partition = RecordPartition::open(&root.0, 1024*1024).await.unwrap(); }
             assert_eq!(partition.get("a").await.unwrap().unwrap().document.unwrap()["body"], original);
             for (text, mode, expected) in [
                 ("alpha absent", QueryType::Union, vec!["a", "b"]),
@@ -44,6 +44,7 @@ async fn standard_profiles_preserve_operators_long_terms_originals_and_reopen() 
                 assert_eq!(result.count_total, expected.len());
             }
         }
+        partition.finish_service_shutdown().await.unwrap();
     }
 }
 
@@ -131,16 +132,19 @@ const CUT: Cut = Cut {
     evaluation_time_ms: 1000,
 };
 
-pub(super) struct Temp(pub(super) std::path::PathBuf);
+pub(super) struct Temp(pub(super) std::path::PathBuf, tempfile::TempDir);
 impl Temp {
     pub(super) fn new() -> Self {
-        Self(std::env::temp_dir().join(format!("anyseek-tantivy-{:032x}", rand::random::<u128>())))
+        // Runtime pins its parent package. Give each fixture its own parent
+        // rather than pinning the OS temp directory shared by every test.
+        let root=tempfile::tempdir().unwrap();
+        Self(root.path().join("native"),root)
     }
 }
 impl Drop for Temp {
     fn drop(&mut self) {
-        if self.0.exists() {
-            std::fs::remove_dir_all(&self.0).unwrap();
+        if self.1.path().exists() {
+            std::fs::remove_dir_all(self.1.path()).unwrap();
         }
     }
 }
@@ -657,6 +661,7 @@ async fn native_unigram_bm25f_matches_record_scores_at_the_vector_cut() {
         assert_eq!(actual, expected);
         assert_eq!(vectors.hits.len(), 4);
         drop(inner);
+        partition.finish_service_shutdown().await.unwrap();
         drop(partition);
     }
 }
@@ -860,6 +865,7 @@ async fn native_query_contract_matches_before_and_after_commit() {
                     }
                 }
                 drop(inner);
+                partition.finish_service_shutdown().await.unwrap();
                 drop(partition);
             }
         }
@@ -1160,7 +1166,7 @@ async fn punctuation_adjacent_query_operators_preserve_boundaries() {
         }
         for state in 0..3 {
         if state==1 {p.compact_journal().await.unwrap();}
-        if state==2 {drop(p);p=RecordPartition::open(&root.0,1024*1024).await.unwrap();}
+        if state==2 {p.finish_service_shutdown().await.unwrap();drop(p);p=RecordPartition::open(&root.0,1024*1024).await.unwrap();}
         let mut results=Vec::new();
         for text in ["alpha -beta","alpha,-beta","\"alpha beta\" gamma","\"alpha beta\", gamma","\"alpha beta\"","(\"alpha beta\")",",\"alpha beta\","] {
             let result=p.query(RecordQuery{text:text.into(),vector:None,mode:SearchMode::Lexical,query_type:QueryType::Union,offset:0,length:10,result_type:ResultType::TopkCount,fields:vec![],filters:vec![],sort:vec![],temporal:None}).await.unwrap();
@@ -1170,6 +1176,7 @@ async fn punctuation_adjacent_query_operators_preserve_boundaries() {
         }
         outcomes.push(results);
         }
+        p.finish_service_shutdown().await.unwrap();
     }
     // Pin the existing language, not merely agreement between implementations.
     assert_eq!(outcomes[0][0], BTreeSet::from(["a".to_owned()]));
@@ -1196,7 +1203,7 @@ async fn standard_punctuation_document_query_analysis_is_identical() {
         }
         for state in 0..3 {
         if state==1 {p.compact_journal().await.unwrap();}
-        if state==2 {drop(p);p=RecordPartition::open(&root.0,1024*1024).await.unwrap();}
+        if state==2 {p.finish_service_shutdown().await.unwrap();drop(p);p=RecordPartition::open(&root.0,1024*1024).await.unwrap();}
         for (id,text) in [("decimal","3.14"),("domain","foo.bar"),("ampersand","AT&T"),("percent","100%"),("url","www.example.com")] {
             let indexed=analyzer.terms(text,false);let queried=analyzer.terms(text,true);
             let result=p.query(RecordQuery{text:text.into(),vector:None,mode:SearchMode::Lexical,query_type:QueryType::Intersection,offset:0,length:10,result_type:ResultType::TopkCount,fields:vec![],filters:vec![],sort:vec![],temporal:None}).await.unwrap();
@@ -1204,6 +1211,7 @@ async fn standard_punctuation_document_query_analysis_is_identical() {
             if indexed!=queried || ids!=BTreeSet::from([id.to_owned()]) || result.count_total!=1 {mismatches.push(format!("{profile:?} state={state} {text:?}: index={indexed:?} query={queried:?} ids={ids:?} count={}",result.count_total));}
         }
     }
+    p.finish_service_shutdown().await.unwrap();
     }
     assert!(mismatches.is_empty(),"{mismatches:?}");
 }

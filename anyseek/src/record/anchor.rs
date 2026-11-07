@@ -561,6 +561,12 @@ impl Reference {
         self.load_verified_encoded(root,config,&checkpoint_codec::StateEncoding::new(state)?).await
     }
     async fn load_verified_encoded(&self,root:&Path,config:&RecordConfig,encoded:&checkpoint_codec::StateEncoding<'_>)->Result<VerifiedView,RecordError>{
+        let view=self.load_verified_view(root,config,encoded).await?;
+        // Live predecessors retain a comparison cut for later delta proofs.
+        if self.captured.get().is_none() { let _=self.captured.set(encoded.state().try_clone()?); }
+        Ok(view)
+    }
+    async fn load_verified_view(&self,root:&Path,config:&RecordConfig,encoded:&checkpoint_codec::StateEncoding<'_>)->Result<VerifiedView,RecordError>{
         let state=encoded.state();
         let _phase=maintenance::Phase::new("candidate_authentication_and_load",state.seq);
         #[cfg(test)]
@@ -588,7 +594,6 @@ impl Reference {
         }).await?;
         // Native reader admission below has its own I/O permit.
         let view=self.load_components(root,&path,config.max_journal_bytes,config,state,payloads).await?;
-        if self.captured.get().is_none() { let _=self.captured.set(state.try_clone()?); }
         Ok(view)
     }
     async fn load_components(&self,root:&Path,path:&Path,authority_budget:u64,config:&RecordConfig,state:&State,payloads:Closure)->Result<VerifiedView,RecordError>{
@@ -635,7 +640,9 @@ pub(super) async fn snapshot_payload(root:&Path,config:&RecordConfig,state:&Stat
     let disk=crate::storage::build_budget::DiskScope::begin(root,closure_limit(config.max_journal_bytes)?).map_err(storage)?;
     let encoded=checkpoint_codec::StateEncoding::new(state)?;
     let reference=Reference::prepare_encoded(root,config,&encoded,Closure::default(),None,None,true,None,None,None).await?;
-    let verified=reference.load_verified_encoded(root,config,&encoded).await?;
+    // An independent snapshot never becomes a live delta-proof predecessor.
+    // Authenticate the same bytes without retaining another State's containers.
+    let verified=reference.load_verified_view(root,config,&encoded).await?;
     drop(verified); // Close all mappings before later Windows root publication.
     let estimate=checkpoint_codec::json_length(&reference)?.checked_add(64).ok_or_else(||storage("snapshot authority overflow"))?;
     let lease=crate::storage::build_budget::reserve_memory(metadata_charge(estimate)?).map_err(storage)?;

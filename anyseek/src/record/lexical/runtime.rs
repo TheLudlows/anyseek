@@ -5,6 +5,8 @@ use crate::record::{Document, RecordConfig};
 use tantivy::{IndexReader, IndexWriter};
 use tokio::sync::Mutex;
 mod live;
+use crate::resources::MemoryReservation as Charge;
+use crate::record::build_budget::retained_memory;
 
 // Bound only queued analysis, not the accepted document size or corpus size.
 const ANALYSIS_BATCH_BYTES: u64 = 32 * 1024 * 1024;
@@ -17,30 +19,6 @@ pub(super) struct Escrow {
     row: RowWorkspace,
     writer: Arc<super::directory::WriterReservation>,
     publication: PublishWorkspace,
-}
-
-struct Charge {
-    memory: crate::storage::build_budget::MemoryLease,
-    buffer: Option<crate::resources::Lease>,
-}
-impl Charge {
-    fn new(bytes: u64) -> Result<Self, RecordError> {
-        let memory = crate::storage::build_budget::reserve_memory(bytes).map_err(storage)?;
-        let buffer = crate::resources::Scope::current().map(|s| s.retained_io().bytes(bytes))
-            .transpose().map_err(storage)?;
-        Ok(Self { memory, buffer })
-    }
-    fn admit(bytes:u64)->Result<Self,RecordError>{
-        crate::storage::build_budget::validate_single(bytes).map_err(storage)?;
-        let memory=crate::storage::build_budget::reserve_memory(bytes).map_err(crate::record::memory_error)?;
-        let buffer=crate::resources::Scope::current().map(|scope|scope.retained_io().bytes(bytes)).transpose().map_err(|error|if error.is_recoverable(){RecordError::Busy}else{storage(error)})?;
-        Ok(Self{memory,buffer})
-    }
-    fn grow(&mut self,bytes:u64)->Result<(),RecordError>{
-        self.memory.grow(bytes).map_err(storage)?;
-        if let Some(buffer)=&mut self.buffer {buffer.grow_bytes(bytes).map_err(storage)?;}
-        Ok(())
-    }
 }
 
 pub(crate) struct Runtime {
@@ -75,7 +53,7 @@ struct Data {
 }
 // Field order releases the mutex guard before the final runtime owner.
 fn identity_bytes(data:&Data)->Result<u64,RecordError>{
-    data.identity_supplements.iter().try_fold(data.identity_charge.memory.bytes(),|n,charge|n.checked_add(charge.memory.bytes())).ok_or_else(||storage("native identity owner memory overflow"))
+    data.identity_supplements.iter().try_fold(data.identity_charge.bytes(),|n,charge|n.checked_add(charge.bytes())).ok_or_else(||storage("native identity owner memory overflow"))
 }
 struct OwnedData {
     guard: tokio::sync::OwnedMutexGuard<Data>,
@@ -189,7 +167,7 @@ impl Runtime {
                 pending_analysis_documents: 0,
                 identities: Vec::new(),
                 identity_supplements: Vec::new(),
-                identity_charge: Charge::new(0)?,
+                identity_charge: retained_memory(0)?,
                 cut: Cut {
                     sequence: 0,
                     evaluation_time_ms: 0,
@@ -208,7 +186,7 @@ impl Runtime {
         let length = std::fs::metadata(&manifest_path).map_err(storage)?.len();
         if length > config.max_journal_bytes { return Err(storage("native manifest budget exceeded")); }
         // Retain conservative JSON/identity storage admission before reading/parsing.
-        let identity_charge = Charge::new(length.checked_mul(8).and_then(|n| n.checked_add(65536))
+        let identity_charge = retained_memory(length.checked_mul(8).and_then(|n| n.checked_add(65536))
             .ok_or_else(|| storage("native manifest memory overflow"))?)?;
         let bytes = segment::read_bounded(&manifest_path, config.max_journal_bytes)?;
         let (manifest, stored): (Manifest, serde_json::Value) =
@@ -277,17 +255,6 @@ impl Runtime {
         self.join_visible().await?;
         self.append_inner(identity,document,false,true,None,None).await
     }
-    /// Committed execution queues documents on the retained writer and publishes once at the
-    /// batch boundary. Count them before publication so rotation cannot overrun
-    /// the mutable-tail admission bound.
-    pub(crate) async fn append_queued(
-        self: &Arc<Self>,
-        identity: Identity,
-        document: &Document,
-    ) -> Result<(), RecordError> {
-        self.join_visible().await?;
-        self.append_inner(identity, document, false, false,None,None).await
-    }
     async fn append_inner(
         self: &Arc<Self>,
         identity: Identity,
@@ -316,19 +283,18 @@ impl Runtime {
         {
             data = self.blocking(data, |owner, data| owner.drain_analysis(data)).await?.0;
         }
-        let (analysis,buffer,identity_charge)=match workspace {
+        let (analysis,identity_charge)=match workspace {
             Some(workspace)=>{
-                if workspace.analysis.memory.bytes()<estimate || workspace.identity.memory.bytes()<256+identity.id.len() as u64 {
+                if workspace.analysis.bytes()<estimate || workspace.identity.bytes()<256+identity.id.len() as u64 {
                     #[cfg(test)]
-                    eprintln!("native row workspace mismatch analysis_owned={} analysis_needed={estimate} identity_owned={} identity_needed={}",workspace.analysis.memory.bytes(),workspace.identity.memory.bytes(),256+identity.id.len() as u64);
+                    eprintln!("native row workspace mismatch analysis_owned={} analysis_needed={estimate} identity_owned={} identity_needed={}",workspace.analysis.bytes(),workspace.identity.bytes(),256+identity.id.len() as u64);
                     return Err(storage("native row workspace bound exceeded"));
                 }
-                (workspace.analysis.memory,workspace.analysis.buffer,Some(workspace.identity))
+                (workspace.analysis,Some(workspace.identity))
             },
             None=>{
-                let analysis=crate::storage::build_budget::reserve_memory(estimate).map_err(storage)?;
-                let buffer=crate::resources::Scope::current().map(|scope|scope.bytes(estimate)).transpose().map_err(storage)?;
-                (analysis,buffer,None)
+                let analysis=Charge::new(estimate,crate::resources::Scope::current().as_ref()).map_err(storage)?;
+                (analysis,None)
             }
         };
         let analyzer = &self.analyzer;
@@ -362,7 +328,7 @@ impl Runtime {
             else {
                 let next=identity_bytes(data)?.checked_add(256+identity.id.len() as u64).ok_or_else(||storage("native identity memory overflow"))?;
                 crate::storage::build_budget::validate_single(next).map_err(storage)?;
-                data.identity_charge.grow(256+identity.id.len() as u64)?;
+                data.identity_charge.grow(256+identity.id.len() as u64).map_err(storage)?;
             }
             let mut doc = TantivyDocument::new();
             let native_schema = data.index.schema();
@@ -388,7 +354,7 @@ impl Runtime {
                 );
             }
             owner.directory.as_ref().ok_or_else(|| storage("immutable lexical package"))?
-                .retain_analysis(analysis, buffer)?;
+                .retain_analysis(analysis)?;
             data.pending_analysis_bytes = data.pending_analysis_bytes.checked_add(estimate)
                 .ok_or_else(|| storage("native pending analysis overflow"))?;
             data.pending_analysis_documents += 1;
@@ -465,10 +431,10 @@ impl Runtime {
         }).ok_or_else(|| storage("native manifest memory overflow"))?;
         let (_temporary,snapshot_charge)=match workspace {
             Some(workspace)=>{
-                if workspace.temporary.memory.bytes()<temporary_bytes{return Err(storage("native manifest workspace mismatch"));}
+                if workspace.temporary.bytes()<temporary_bytes{return Err(storage("native manifest workspace mismatch"));}
                 (workspace.temporary,Some(workspace.snapshot))
             },
-            None=>(Charge::new(temporary_bytes)?,None),
+            None=>(retained_memory(temporary_bytes)?,None),
         };
         let manifest = Manifest {
             format: FORMAT,
@@ -535,6 +501,7 @@ impl Runtime {
     /// Compact a bounded set of committed native segments without rebuilding
     /// Record state or acquiring its publication guard. Fixed readers retain
     /// their old Searcher; the replacement keeps the identical logical cut.
+    #[cfg(test)]
     pub(crate) async fn merge_small_segments(self: &Arc<Self>) -> Result<(), RecordError> {
         self.merge_small_segments_once().await.map(|_| ())
     }
@@ -575,7 +542,7 @@ impl Runtime {
                 })?;
             let bytes = input_bytes.checked_mul(32).and_then(|n| n.checked_add(WRITER_BYTES as u64))
                 .ok_or_else(|| storage("native merge memory overflow"))?;
-            let Ok(_memory) = Charge::new(bytes) else { return Ok(None); };
+            let Ok(_memory) = retained_memory(bytes) else { return Ok(None); };
             owner.ensure_writer_locked(data)?;
             let _phase = crate::record::maintenance::Phase::new("lexical_merge_without_record_guard",data.cut.sequence);
             // A cancellation/failed merge must never permit append to an uncertain
@@ -721,9 +688,8 @@ impl Runtime {
             .and_then(|n| n.checked_add(65536))
             .ok_or_else(|| storage("native view memory overflow"))?;
         let charge=match prepared {Some(charge)=>{
-            if charge.memory.bytes()<estimate {return Err(storage("native snapshot workspace mismatch"));}charge
-        },None=>Charge::new(estimate)?};
-        let Charge{memory,buffer}=charge;
+            if charge.bytes()<estimate {return Err(storage("native snapshot workspace mismatch"));}charge
+        },None=>retained_memory(estimate)?};
         let mut seen = BTreeSet::new();
         let mut addresses = Vec::new();
         let mut lengths = Vec::new();
@@ -769,8 +735,7 @@ impl Runtime {
             identities: Arc::new(manifest.identities.clone().into()),identity_id_bytes,overlay:Vec::new(),
             addresses:Arc::new(addresses),
             lengths:Arc::new(lengths),
-            _memory:Arc::new(memory),
-            _buffer:buffer.map(Arc::new),
+            _memory:Arc::new(charge),
             _pin: None,
             _directory_owner: None,
         })

@@ -60,7 +60,7 @@ impl RecordPartition {
         let bytes = request_bytes(requests)?;
         let copy_memory = crate::storage::build_budget::reserve_memory((bytes as u64) * 32)
             .map_err(|_| RecordError::Busy)?;
-        execute_with_delivery(self.clone(), requests.to_vec(), IndexDelivery::SynchronousBatch, Some(copy_memory)).await
+        execute_with_delivery(self.clone(), requests.to_vec(), IndexDelivery::Synchronous, Some(copy_memory)).await
     }
     /// Inspect progress without advancing time or waiting for indexes.
     pub async fn committed_progress(&self) -> CommittedProgress {
@@ -286,7 +286,7 @@ pub(super) async fn execute(
 ) -> Result<CommittedBatch, RecordError> {
     execute_with_delivery(partition, requests, IndexDelivery::Asynchronous, None).await
 }
-async fn execute_with_delivery(
+pub(super) async fn execute_with_delivery(
     partition: RecordPartition,
     requests: Vec<RecordWrite>,
     delivery: IndexDelivery,
@@ -294,7 +294,7 @@ async fn execute_with_delivery(
 ) -> Result<CommittedBatch, RecordError> {
     let bytes = request_bytes(&requests)?;
     let memory = crate::storage::build_budget::reserve_memory((bytes as u64)
-        * if matches!(delivery, IndexDelivery::SynchronousBatch) { 32 } else { 1 })
+        * if matches!(delivery, IndexDelivery::Synchronous) { 32 } else { 1 })
         .map_err(|_| RecordError::Busy)?;
     crate::resources::spawn(async move {
         let _copy_memory = copy_memory;
@@ -363,6 +363,42 @@ mod tests {
     use super::*;
     use crate::record::tests::{config, write};
     #[tokio::test]
+    async fn single_and_one_item_batch_are_visible_durable_and_replayable() {
+        let directory = tempfile::tempdir().unwrap();
+        let request = write("same-operation", "record", "alpha", ExpectedVersion::Absent);
+        let mut receipts = Vec::new();
+        for batch in [false, true] {
+            let root = directory.path().join(if batch { "batch" } else { "single" });
+            let p = RecordPartition::create(&root, config()).await.unwrap();
+            let receipt = if batch {
+                let result = p.write_batch(std::slice::from_ref(&request)).await.unwrap();
+                assert!(result.stop.is_none());
+                match result.results.into_iter().next().unwrap() {
+                    CommittedItem::Committed(receipt) => receipt,
+                    item => panic!("unexpected batch result: {item:?}"),
+                }
+            } else { p.write(request.clone()).await.unwrap() };
+            for mode in [SearchMode::Lexical, SearchMode::Vector {
+                similarity_threshold: None, ann_mode: crate::vector_similarity::AnnMode::All,
+            }] {
+                let result = crate::record::tests::query(&p,mode).await;
+                assert_eq!(result.hits.len(), 1);
+            }
+            let progress = p.committed_progress().await;
+            assert_eq!((progress.committed_seq,progress.lexical_seq,progress.vector_seq),(Some(1),1,1));
+            p.finish_service_shutdown().await.unwrap();
+            drop(p);
+            let p = RecordPartition::open(&root, config().max_journal_bytes).await.unwrap();
+            assert_eq!(p.operation(&request.operation_id).await.unwrap(), Some(receipt.clone()));
+            assert_eq!(p.write(request.clone()).await.unwrap(), receipt);
+            assert_eq!(p.search("alpha".into(), None, SearchMode::Lexical, vec![], 10).await.unwrap().hits.len(), 1);
+            receipts.push(receipt);
+            p.finish_service_shutdown().await.unwrap();
+        }
+        assert_eq!(receipts[0], receipts[1]);
+    }
+
+    #[tokio::test]
     async fn synchronous_batch_keeps_same_id_conditions_vector_patch_and_recovery() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().join("records");
@@ -404,6 +440,10 @@ mod tests {
         p.finish_service_shutdown().await.unwrap();
         drop(p);
         let p = RecordPartition::open(&root, 1024 * 1024).await.unwrap();
+        // Receipt-only retries must not create new index work. Failure gates
+        // remain armed so either accidental empty consumer task fails the test.
+        let pauses=[root.join(".test-lexical-consumer-fail"),root.join(".test-vector-consumer-fail")];
+        for path in &pauses {std::fs::write(path,b"fail").unwrap();}
         let replay = p.write_batch(&requests).await.unwrap();
         assert!(replay.stop.is_none());
         for (item, expected) in replay.results.iter().zip(receipts) {
@@ -412,6 +452,8 @@ mod tests {
             } else { assert!(matches!(item, CommittedItem::Rejected(RecordError::Conflict(_)))); }
         }
         assert_eq!(p.committed_progress().await.committed_seq, Some(5));
+        assert!(!p.committed_progress().await.recovery_required);
+        for path in pauses {std::fs::remove_file(path).unwrap();}
         p.finish_service_shutdown().await.unwrap();
     }
 

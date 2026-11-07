@@ -1,7 +1,7 @@
 //! Immutable analyzed rows shared by the visible delta and its materializer.
 use super::*;
 use super::super::{Document, RecordConfig};
-use crate::storage::build_budget::MemoryLease;
+use crate::resources::MemoryReservation;
 
 /// Both publication routes own all explicit native progress memory before WAL.
 /// Fallback skips the retained analyzed visible overlay, not native admission.
@@ -13,8 +13,7 @@ pub(crate) struct Fallback {
 
 pub(crate) struct Reservation {
     pub bytes: u64,
-    _memory: MemoryLease,
-    _scope: Option<crate::resources::Lease>,
+    _memory: MemoryReservation,
     pub(super) capacity:Option<Capacity>,
     pub(super) analysis_bytes:u64,
     pub(super) id_bytes:u64,
@@ -27,10 +26,8 @@ impl Reservation {
         let bytes=analysis_bytes
             .checked_add(65536).and_then(|n|n.checked_add(id.len() as u64*3))
             .ok_or_else(||storage("visible lexical reservation overflow"))?;
-        crate::storage::build_budget::validate_single(bytes).map_err(storage)?;
-        let memory=crate::storage::build_budget::reserve_memory(bytes).map_err(crate::record::memory_error)?;
-        let scope=crate::resources::Scope::current().map(|s|s.retained_io().bytes(bytes)).transpose().map_err(|error|if error.is_recoverable(){RecordError::Busy}else{storage(error)})?;
-        Ok(Self{bytes,_memory:memory,_scope:scope,capacity:None,analysis_bytes,id_bytes:id.len() as u64,workspace:Default::default(),pending:None})
+        let memory=crate::record::build_budget::admit_retained_memory(bytes)?;
+        Ok(Self{bytes,_memory:memory,capacity:None,analysis_bytes,id_bytes:id.len() as u64,workspace:Default::default(),pending:None})
     }
 }
 pub(crate) struct Row {

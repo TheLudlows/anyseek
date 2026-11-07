@@ -1,6 +1,23 @@
 //! Conservative logical admission. Deliberately not allocator/RSS accounting.
 use super::*;
 use crate::storage::build_budget::{MemoryLease, reserve_memory};
+use crate::resources::{MemoryError, MemoryReservation, Scope};
+
+/// Collection-owned buffers use the background class after the request ends.
+/// Both limits are acquired once and remain attached to the same owner.
+pub(crate) fn retained_memory(bytes: u64) -> Result<MemoryReservation, RecordError> {
+    MemoryReservation::new(bytes, Scope::current().map(|s| s.retained_io()).as_ref()).map_err(storage)
+}
+pub(crate) fn admit_memory(bytes: u64, scope: Option<&Scope>) -> Result<MemoryReservation, RecordError> {
+    MemoryReservation::new(bytes, scope).map_err(|error| match error {
+        MemoryError::Process(error) => memory_error(error),
+        MemoryError::Scoped(error) if error.is_recoverable() => RecordError::Busy,
+        MemoryError::Scoped(error) => storage(error),
+    })
+}
+pub(crate) fn admit_retained_memory(bytes: u64) -> Result<MemoryReservation, RecordError> {
+    admit_memory(bytes, Scope::current().map(|s| s.retained_io()).as_ref())
+}
 pub(crate) fn document_estimate(
     document: &Document,
     schema: &[SchemaField],
