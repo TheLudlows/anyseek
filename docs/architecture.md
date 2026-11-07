@@ -1,95 +1,121 @@
 # 当前架构
 
-本文描述当前主干的模块和运行边界；合入与验证证据见 [路线与验收证据](roadmap.md)，业务契约见 [Record 语义](record-model.md)。主干合入不代表已发布版本。
+本文按当前主干 `3e0a9a4`（#203）核对模块和运行边界。业务不变量见[Record 契约](record-model.md)，持久格式与恢复见[存储协议](storage.md)，验收缺口和性能证据见[路线](roadmap.md)。
 
-AnySeek 是 Rust 实现的存储和检索服务，通过 HTTP API 和独立 Web 控制台使用。资源模型为 Tenant → Collection → Partition → Segment；每个 collection 一个持久 partition。HTTP 数据请求统一交由内部 RecordPartition 处理；内部向量/元数据组件包含可变 tail 与冻结 Segment，重复逻辑 shard 状态已由 #111 移除。
+AnySeek 是通过 HTTP API 和独立 Web 控制台使用的 Rust 存储与检索服务。资源模型为 Tenant → Collection → Partition → Segment；每个 collection 一个持久 partition，数据请求统一交给 RecordPartition。
 
 ## 模块边界
 
+以下路径均相对 `anyseek/src/`，独立 UI 位于仓库根的 `console/`。
+
 | 层 | 代码 | 职责 |
 | --- | --- | --- |
-| 独立 UI | `console/` | 创建/写入原请求保存与重试、搜索、分页、预览、日期过滤、服务备份恢复 |
-| 默认服务 | `record_service.rs`、`server.rs`、`main.rs` | HTTP 契约、身份入口、admission、响应数据有效性保护、启动恢复 |
-| 控制权威 | `catalog.rs`、`catalog/sqlite.rs`、`catalog/service_snapshot.rs` | Tenant、Key verifier、集合代次与生命周期、控制回执和完整服务快照 |
-| 数据权威 | `record.rs`、`record/committed.rs` | 原始 Document/向量、稳定 ID、版本、墓碑、幂等与持久批提交 |
-| 持久化 | `storage/journal.rs`、`partition.rs`、`sqlite_authority.rs`、`s3_compatible.rs` | 本地 WAL/见证，或 SQLite 唯一协调权威 + 不可变对象；owner lock、共同恢复 |
-| 不可变布局 | `record/anchor.rs`、`segment.rs`、`remote_checkpoint.rs` | 规范 payload、冻结 Segment + tail、远端 manifest 发布与 GC |
-| 派生索引 | `record/lexical/runtime.rs`、`component.rs`、`record/index_consumers.rs` | Tantivy 全文与独立向量/元数据消费、构建和派生包提交 |
-| 检索 | `record/query.rs`、`record/lexical/runtime_query.rs`、`vector.rs`、`min_heap.rs` | 三路检索、候选、排序、遍历；Record 的稳定身份在截断前参与平分排序 |
-| 活动身份 | `active.rs` | 向量/元数据记录身份、fingerprint 和活动 ordinal；全文统计由 Tantivy 固定 Searcher 管理 |
-| 过滤/分词 | `metadata_filter.rs`、`tokenizer.rs` | 共享元数据判定与文本处理 |
+| HTTP 服务 | `server/record_service.rs`、`server/server.rs`、`server/main.rs` | 认证、准入、请求与响应、启动恢复和关闭 |
+| 控制权威 | `catalog.rs`、`catalog/sqlite.rs`、`catalog/service_snapshot.rs` | Tenant、Key verifier、集合代次、管理回执和服务快照 |
+| 数据权威 | `record.rs`、`record/committed.rs`、`record/write.rs` | 原文/原始向量、稳定身份、版本、墓碑、幂等和持久批提交 |
+| 持久化 | `storage/journal.rs`、`storage/partition.rs`、`storage/sqlite_authority.rs`、`storage/s3_compatible.rs` | 本地 WAL，或 SQLite 协调权威与不可变对象；owner lock 与恢复 |
+| 认证布局 | `record/anchor.rs`、`record/segment.rs`、`record/remote_checkpoint.rs` | payload、冻结 Segment、manifest、checkpoint 与 GC |
+| 全文派生 | `record/lexical/runtime.rs`、`runtime/live.rs`、`memory.rs` | Tantivy 固定 Searcher、可查尾段、内存预留与后台物化 |
+| 向量/元数据派生 | `component.rs`、`component/memory.rs`、`record/index_consumers.rs` | 组件文件、活动身份、消费进度与内存租约转移 |
+| 检索 | `record/query.rs`、`record/lexical/runtime_query.rs`、`vector.rs`、`min_heap.rs` | 三路查询、全局候选预算、排序与身份重验 |
+| 过滤与分析 | `active.rs`、`metadata_filter.rs`、`tokenizer.rs` | 活动身份、共享元数据谓词、分词与归一化 |
 
-存储和检索模块位于 `anyseek/src/`，HTTP 实现位于 `anyseek/src/server/`。`api_types.rs` 和 `api_schema.rs` 定义服务配置/查询 DTO 及 OpenAPI 描述。默认启动仅挂载 Record 服务，不保留独立的旧 HTTP/key/index 管理实现。
+`server/api_types.rs` 与 `server/api_schema.rs` 定义 HTTP DTO 和 OpenAPI。Rust 服务不嵌入前端资源；默认构建包含 HTTP 与本地/S3 存储。
 
 ## 写入与查询
 
-`commit_writes` 与 HTTP `/ingest` 在业务判定和权威持久提交后逐项返回 committed、rejected、outcome_unknown 或 not_attempted；只有 committed 带业务回执。全文与向量消费者异步推进，持久提交不保证对应索引已可查。`/batch` 提供唯一同步 HTTP 写入入口，单条内部使用 `RecordPartition::write`，多条使用 `write_batch` 分组共享持久提交与索引发布；HTTP 仍按项返回结果，不提供批次事务。只有一层 Record WAL，不再维护独立 Intake 日志。
+`/batch` 是唯一同步 HTTP 写入入口，单条内部使用 `write`，多条使用 `write_batch` 共享持久提交与派生发布；成功项表示 durable + visible，批次不是事务。`/ingest` 对应 `commit_writes`，只确认持久业务结果，全文和向量消费者独立推进。只有一层 Record WAL，具体结果与重试规则见[Record 契约](record-model.md#身份版本与重试)。
 
-查询短暂持有 Record guard 捕获派生拓扑，在 guard 外评分，完成后重验当前记录版本、fingerprint、删除及 TTL 可见性。组件变化不依靠物理 ordinal 充当稳定身份。纯向量 collection 也能按 metadata 浏览；普通查询允许观察不同消费者的进度，提交与各索引水位分别表达。
+普通写在 WAL 前预留规范值、容器、全文发布工作区和向量/元数据组件额度。PreparedBatch 绑定实际 writer/Inner 锁身份；规划只保留本批成功前缀和目标记录，恢复与维护继续完整校验。完整证明见[普通写入的提交基准](record-model.md#普通写入的提交基准)。
 
-纯全文 Count、默认排序及仅按 `_id`/`_score` 排序在捕获身份和固定 Searcher 后释放向量/元数据组件读锁，再做分析、统计与评分；Hybrid 和字段排序仍保持原组件锁路径。正文在候选评分及身份重验后按输出字段复制，不随全体候选参与评分。
+### WAL 支撑的可查全文尾段
 
-服务根据文本/向量选择 Lexical、Vector、Hybrid。Hybrid 两路候选通过 RRF 融合，支持权重和各路预算；ANN 可能因簇探测返回不足 K。候选窗口计数和候选内字段重排不等于全库精确结果。查询原始数据经 schema.store 和 fields 投影后输出；直接读取和 iterator 可返回完整权威 Record。
+全文读取视图由原生固定 Searcher 与有界、不可变的已分析增量组成。满足尾段准入的写入在权威持久化后发布增量，使同步写可在原生文件物化完成前参与查询。增量保留词项位置、字段长度和精确记录身份，按同一评分、过滤和排序规则与原生基底一起检索；它没有独立的业务提交权威。
 
-## 技术版本与时间可见性
+后台物化持有原生 writer、输入和预留额度，在前台发布锁外写入 Tantivy 文件，再原子交接原生快照与剩余增量。固定读者继续持有旧快照和对应租约。尾段受 128 行与 64 MiB 显式缓冲预算约束，已被读者固定的增量仍占额度；压力在 WAL 前形成背压。超过可查增量路径适用大小的记录使用同样预留工作区的原生发布路径，不承诺所有写入都绕过文件 I/O。
 
-`record/` 中的 mutation/publication/recovery 复用同一 Record 权威提交。temporal、history、visibility 分别处理时间、有限回执和当前记录可见性；来源版本、证据依赖、定位符和业务关系由应用维护，可保存为普通元数据。
+异步消费者发布的增量也可早于原生物化被查询，但 `/ingest` 返回本身仍不保证索引已消费到该提交。物化失败保持搜索封锁，已持久回执通过重开与 WAL 重放恢复。checkpoint、切段及关闭在需要时等待物化，不以尾段封存替换权威 checkpoint。
 
-正文替换、删除和向量后补仍受技术版本、fingerprint 及 Absent/Any/Match 条件保护，旧向量不能补到新正文。全文和向量的通用 RRF 保留。
+### 查询视图与锁范围
 
-TTL 在读取时排除到期正文，最终候选重验使用最新进程评估时间；后台经原持久协议回收，允许 ID 复用并递增版本。读取不持久转换 TTL/history。重启仅保留持久时间下界，未回收正文可能因墙钟回退重新可见，TTL 不承诺隐私删除。分页与计数边界见[Record 契约](record-model.md#时间ttl-与查询视图)。
+查询在短持 Record guard 时捕获派生拓扑与 evaluation_time，在 guard 外评分，再重验当前 Record 的版本、fingerprint、删除及 TTL。组件 ordinal 仅是地址。消费者进度可不同，普通查询不提供跨通道、回表和统计的全局不可变业务快照；更新或到期可能缩短页。
 
-普通写从规划前到持久发布和清理结束持有同一 partition writer；PreparedBatch 绑定实际 writer/Inner 锁身份，PlanningView 只保留本批成功前缀并读取被修改的记录与回执。普通写不复制 full base/shadow，也不执行全量基准 proof；准入、时间、远端权威和失败封锁继续检查。历史回执检查和切段仍可能遍历保留状态，恢复和维护继续完整 proof，详见[写入证明](record-write-proof.md)。
+纯全文 Count、默认排序及只按 `_id`/`_score` 排序的路径在捕获身份与全文快照后释放向量/元数据组件读锁；Hybrid 和字段排序仍保留相应组件锁。正文在评分与身份重验后按输出字段复制。每次查询将搜索执行交给一个阻塞 worker，最终身份与 TTL 检查仍面对当前权威状态。
 
-## 认证与生命周期
+Lexical、Vector、Hybrid 共用稳定 Record 身份。Hybrid 在各路跨组件形成全局排名后执行一次 RRF；候选窗口计数与 ANN/Hybrid 候选内字段排序不保证全库精确结果。纯向量 collection 也支持 metadata 浏览。配置、评分和排序细节见[检索契约](search.md)。
 
-普通 API Key 认证后确定 Tenant，同一 Tenant 的有效 Key 可访问其全部集合。master 创建/查询 Tenant、签发/撤销 Key 和管理服务备份恢复，不进入集合数据接口。撤销拒绝后续认证，已认证工作和准备好的响应允许完成；不维护 Grant、grant revision 或 Catalog 输出授权许可。DataOutputPermit 在响应和 body frame 交付时检查数据失败 fence；正常提交可保留已经验证的完整读取视图。
+## Segment 所有权与文件保护
 
-普通工作按全局快照共享屏障 → 集合共享生命周期屏障 → 短持 Catalog 元数据锁的顺序取得当前代次，在元数据锁外执行 Record future。删除/创建等生命周期变更使用对应集合独占屏障；完整服务快照保留全局独占屏障，Key 撤销不排空数据工作。分级资源准入在读 body 前计费，已接收 owned task 和传输缓冲保留额度至实际结束。
-
-创建为持久 Prepare → 初始化 partition → Activate。删除后名称可复用，新建集合分配新内部代次；旧句柄、缓存、回执、上传、后台索引和 GC 绑定旧代次，物理回收后置。本地路径由 `collections/{tenant_id}/{collection_id}/{generation}` 直接派生，对象使用 `anyseek/{tenant_id}/{collection_id}/`，代次编码在对象 ID 中。客户端仅使用名称，删除/重建前须停止旧请求及重试。
-
-集合恢复只占用空闲名称并分配新代次。完整服务恢复发布到新未启动根，使用独立 bucket，禁用历史普通 Key，由目标 master 为已有 Tenant 重新签发。独立备份保留独立恢复 scope，不能证明备份之后没有删除；不提供跨服务自动灾备入口。
-
-服务关闭先停止准入，再等待已接受请求、后台消费者和阻塞工作完成，关闭原生 writer 并释放资源，最后释放根锁。取消等待不代表关闭完成；不强制新增 checkpoint 或 TTL/GC 工作，详见[运行故障与关闭边界](runtime-fault-boundaries.md#service-shutdown)。
-
-## 权威与派生文件
-
-服务根由外部稳定 owner lock 保护。Catalog 和 S3 authority 共用 `metadata.sqlite`，只存协调元数据，不存完整 Record State、正文、原始向量或索引；Catalog 不保留独立持久化日志或名称到生成目录的映射。SQLite 事务不跨对象上传或索引构建。Record checkpoint 保留配置、当前记录、墓碑、逻辑水位和操作账本。backup-*、service-backup-* 是独立快照，完整服务 manifest 和外层完成见证认证目录发布。不同独立服务使用不同 bucket，不创建自动服务 namespace，也不检查 Bucket 归属。
-
-派生 cache-* 保存 Tantivy 原生文件与向量/元数据组件文件（component.json、vectors.bin、metadata.bin、schema.json 等）。启动加载认证 Segment 并重放权威 tail，缺失的派生缓存可重建，不把这组可变文件当作多文件原子事务。原始 Document 和未经归一化的输入向量独立保留，搜索 docstore 的投影不能替代它们。持久词项哈希使用固定 XXH64，当前低层索引格式为 8。
-
-Linux 同步文件和父目录；Windows 以同卷无覆盖目录移动完成发布并在移动前关闭内部句柄。恢复对已认证的新状态损坏报错，不静默回退旧代或重置为空数据库。低层 commit/close 传播 I/O Result，但仍不是权威事务协议。
-
-## 当前边界
-
-这是有界单机实现：Record 身份和保留操作默认各 10,000 项，可显式选有界 100,000 档，详见 [功能与边界](features.md)。完整逻辑 State 仍驻内存；history trim、checkpoint/对象 GC 和已删除集合代次回收继续受保留期限、在途任务、读者及备份保护约束。专用来源历史和业务关系模型已移出内核，通用全文/向量融合保留。真实 S3、系统断电、长期容量和组合资源隔离验收仍未完成；分布式未实现。原生进程故障测试不能替代主机掉电验收。优先级统一见[后续路线](roadmap.md)，全文与认证包边界见[下节契约](#全文与认证包契约)。
-
-[Record 语义](record-model.md) · [存储协议](storage.md) · [服务契约](../anyseek/src/server/README.md) · [许可](../LICENSE)
-
-## 向量索引与 Segment 所有权
-
-一个逻辑 `VectorIndex` 持有当前有界 `segments` 拓扑。可变 tail 独立持有一个可写 Segment；冻结 Segment 与新 tail 一起参与查询。没有独立逻辑 shard 数量配置或计数，组件数量直接来自固定读取拓扑的数组长度。
+一个逻辑 VectorIndex 持有有界 `segments` 拓扑：一个可变 tail 与若干冻结 Segment。每个 RetrievalSegment 配对持有全文 runtime 和向量/元数据组件，不另设逻辑 shard 数量或持久位置 ID。
 
 | 归属 | 保存内容 | 生命周期 |
 | --- | --- | --- |
-| RecordPartition | 规范数据、版本/删除/TTL 可见性、操作回执、当前 ordinal 到稳定记录身份的映射 | 权威提交与恢复 |
-| VectorIndex / RetrievalView | 查询拓扑、全局候选预算与 Top-K、伴随 Tantivy runtime 的读取 pin | 捕获读取视图，旋转/合并时替换拓扑 |
-| VectorSegment | 自己的向量/metadata 文件与 mmap、ANN 聚类/量化、物理行身份和活动 mask、构建内存租约 | 单组件构建、冻结、合并及最终释放 |
-| Tantivy runtime | 全文 postings、固定 Searcher、原生统计及文件引用 | 全文消费与固定读者 |
+| RecordPartition | 规范数据、版本/TTL、回执、ordinal 到稳定身份映射 | 权威提交与恢复 |
+| VectorIndex / RetrievalView | 拓扑、全局 Top-K/候选预算、读取 pin | 捕获视图，旋转/合并时替换拓扑 |
+| VectorSegment | 文件/mmap、ANN 聚类与量化、物理行身份、活动 mask、组件 admission | 单组件构建、冻结、合并及最终释放 |
+| Tantivy runtime | 原生 Searcher、可查增量、原生文件、writer 和目录 owner | 全文发布、物化与固定读者 |
 
-`VectorIndex` 的 `meta`、schema、量化/距离/SIMD 参数是逻辑查询配置，`segments` 中每个 `RetrievalSegment` 配对保存 lexical runtime 与 vector component。Segment 中的同类配置用于本地文件解释与构建，不是独立逻辑索引的可变配置。其 `indexed_*`、`committed_doc_count`、`uncommitted`、`failed` 描述单组件构建进度；`active`、`delete_hashset` 和退休 token 是 Record 权威可见性的派生读取状态。`path`、向量及 metadata 文件/mmap、facet 字典、`block_vector_buffer`、层级偏移、维度/精度/量化范围属于物理 Segment；`build_reservation` 与 `build_input_covered` 随组件构建及引用释放。冻结后文件不可变，派生可见性 mask 仍可因 Record 更新而退休旧行。
+VectorIndex 的 schema、距离和量化配置是逻辑查询配置；组件中的配置用于解释本地文件。`indexed_*`、`committed_doc_count`、`uncommitted`、`failed` 描述组件进度，`active`、`delete_hashset` 与退休 token 表达派生活动状态。组件 admission 汇总已持有和待转移的租约；切段关闭旧代次的新准入，已获额度的工作可按原绑定完成。
 
-物理地址只在捕获的拓扑内表示 `local_ordinal * segments.len() + slot`。tail 旋转、合并和恢复对当前映射整体重排；固定读者继续使用原拓扑，并通过稳定记录身份、revision/fingerprint 和退休 token 重验。拓扑位置不写入共享 Segment 的 `meta.id`，也不充当持久记录身份。
+物理地址仅在捕获拓扑内表示 `local_ordinal * segments.len() + slot`。旋转、合并或恢复会重排当前映射；固定读者使用原拓扑，并以稳定身份、revision/fingerprint 和退休 token 重验。拓扑位置不写入共享 Segment 的 `meta.id`。
 
-查询仍有界遍历 tail 和有效 Segment，按统一距离、稳定业务 ID 和候选预算做一次全局合并；各 Segment 内保留 ANN 聚类、SIMD 和量化。移除重复数量和位置 ID 不意味着把数据合为单个大文件，也不改变 ANN 的近似召回边界。
+原文和原始向量由规范 payload 保存；全文包记录精确 Tantivy 版本、schema 与分析契约，不另存权威正文。S3 文件先完整物化并校验，没有直接远端随机读 Directory。认证包验证完整不可变闭包，读者、原生 worker、构建和备份在释放前保护文件及 partition owner。格式标签、checkpoint 和回收协议统一见[存储协议](storage.md#本地-segment-与共同视图)。
 
-## 全文与认证包契约
+### 原生目录 I/O 隔离
 
-Tantivy 使用原生词典、postings、位置和固定 Searcher，不另存完整正文，也不决定业务 head。Payload 唯一保存规范原文和原始向量；伴随向量/元数据组件只保存派生文件。S3 对象先完整物化并校验再检索，当前没有直接远端随机读 Directory。
+`record/lexical/directory_gate.rs` 按同一物理索引目录共享 I/O mutex，不再让不同目录共用进程级文件操作锁。Unix 以 canonical 路径对应的 device/inode 为键；其他平台使用 canonical 路径。全局 registry 只存弱引用，在打开目录时短持锁，不在该锁内做文件 I/O 或等待容量。
 
-分析身份保留 `xxh64-utf8-v1` helper；全文包记录精确 Tantivy 版本、schema 和分析契约。RecordCheckpointV19、检索 package manifest 3 与私有向量/metadata descriptor 3 是不同结构标签，不是多个提交权威。认证包选择验证完整不可变文件闭包；固定 Searcher、构建、备份和查询 pin 保护仍在使用的文件。
+Directory/Writer 克隆与固定读者通过原有 owner 保留目录锁。内存、服务级/集合级 I/O 额度、OS writer/owner lock、取消和包 pin 继续生效；不允许外部替换仍在使用的目录。该改动消除了无关目录间的 mutex 等待，端到端吞吐与 Windows 别名行为仍需独立验收，见[原生 I/O 证据](../benchmarks/native-io/README.md)。
 
-同步写入等待必要派生应用；异步索引写入单独报告 committed/lexical/vector 水位。查询固定派生拓扑与 evaluation_time，再重验当前 Record 身份、fingerprint 和 TTL 可见性，不要求各异步消费者同时推进。保留 BM25F/邻近度、中文与 N-gram 适配及全局通道排名后的单次 RRF；ANN 和有界候选不保证全库精确召回。
+## 认证与生命周期
 
-只支持新库，无旧倒排格式读取、双写或迁移。跨 AES 手工 fixture、Windows、真实 S3 和断电证据分别以实际执行为准；重新构建派生缓存不等于修改权威格式，也不能据此推断性能提升。
+普通 API Key 认证得到 Tenant，同租户有效 Key 的集合访问范围一致；master 管理 Tenant、凭据和服务备份恢复。撤销只拒绝后续认证，已认证工作及准备好的响应可完成。DataOutputPermit 在响应和 body frame 交付时检查数据失败 fence。
+
+锁顺序为全局快照屏障 → 集合生命周期屏障 → 短持 Catalog 元数据锁，Record future 在元数据锁外执行。创建、激活、删除使用集合独占屏障，完整服务快照使用全局独占屏障。已接收的 owned task、输出缓冲与子任务持有额度至实际结束，取消调用者不会提前释放所有权。
+
+创建遵循持久 Prepare → 初始化 partition → Activate。删除后同名重建分配新内部代次；旧句柄、回执、上传与 GC 绑定旧代次。名称、认证及恢复 scope 的业务边界见[Record 契约](record-model.md#授权与恢复)，物理回收见[存储协议](storage.md#已删除集合代次的最终回收)。
+
+## 故障边界
+
+生产 release 使用 `panic = "abort"`，Rust panic、原生崩溃或 allocation abort 会终止进程，由 supervisor 重启并重放持久权威。`catch_unwind` 仅防御 unwind 构建，不提供生产任务隔离。内存队列准入不等于持久化；断连请求仍须使用原操作身份与完整请求解决未知结果。
+
+| 故障 | 查询与权威边界 | 恢复 |
+| --- | --- | --- |
+| 全文消费者或物化失败 | 所有搜索通道返回 RecoveryRequired；健康权威中的记录与已提交回执仍有效，失败消费水位不推进 | 重开并重建派生缓存 |
+| 向量消费者或 metadata 组件部分修改失败 | 所有搜索依赖活动身份和过滤，失败组件保持封锁；不能作为规范数据读取 | 重开；不支持独立 metadata 在线修复 |
+| 权威发布未知或不健康 | 读写失败封锁，响应缺席不证明未提交 | 恢复权威后再重建缓存 |
+| 进程 panic | API 断连，仅持久权威可恢复 | 重启、重开、原身份查账或重试 |
+
+独立消费不等于独立故障隔离。不得手工推进 cursor、清空共享错误槽以开放部分结果、删除在用缓存或复用失败 writer；恢复失败的 partition 必须保持不可用。回归覆盖消费者错误、metadata mmap 增长失败、部分向量提交、权威部分帧及重开，执行结果以对应源码的验收记录为准。
+
+阻塞 worker 持有查询 admission、资源 scope、句柄和 package pin，直到工作 join，客户端取消不撤回这些资源。checkpoint 的 journal 安装也把 partition/writer guard 与 I/O 租约移交给阻塞 worker，仍持发布锁；移出异步 executor 不代表消除发布暂停或已证明吞吐提升。
+
+## 服务关闭
+
+SIGINT/SIGTERM 先建立停止准入边界，再启动 HTTP graceful shutdown。此前接收的请求及必要子任务可完成；后续请求在读 body 前收到 HTTP 503、`code: shutting_down`。HTTP/1 关闭连接，HTTP/2 不发送 Connection 头。
+
+关闭顺序如下：
+
+1. join 周期维护协调器，停止新的自动 checkpoint/cache 维护与未获准入的重试；已接受消费者完成原有有界 flush/merge。
+2. 排空 HTTP、索引和阻塞 executor 中的 owned activity，包括取消后的任务、body 丢弃后仍持有的 frame，以及尚未交付的任务结果。仅保存状态的已完成 handle 不算在途工作。
+3. join 索引消费者、全文物化和原生 writer，释放 partition、读者、package pin、mmap 与 Catalog。
+4. 最后释放服务根锁，仅完整成功后报告 `Shutdown complete`，此时才可立即重开或回收目录。
+
+关闭不强制 checkpoint、TTL sweep 或 GC，也不增加持久性承诺。传输 owner 未释放会让关闭继续等待；重复调用共用同一完成状态。消费者健康错误可通过重开恢复；worker join、原生 writer 终止失败或遗留 partition owner 会报告关闭未完成并保留根锁至进程退出，可执行程序返回非零。
+
+取消或超时等待者不会取消协调器，也不表示已关闭；可再次等待同一完成 handle。可执行程序没有强制排空期限，外部 hard kill 按崩溃恢复处理。HTTP Tokio runtime 必须保持运行，直到 `Shutdown::wait()` 返回 `Ok(())`；停止通知、HTTP server 返回或 `Err` 都不允许提前重开。丢弃外部完成 handle 不会取消仍在运行的协调器。
+
+`finish_service_shutdown()` 是内部排空后屏障，调用者须已停止生产者并释放 partition 克隆，不能用它关闭任意库实例。服务仍采用单 owner、共享进程 executor 的模型。
+
+### 资源所有权与配置
+
+| 资源 | 作用域与配置时机 | 关闭行为 |
+| --- | --- | --- |
+| HTTP Tokio executor | 可执行程序所有，运行至关闭成功 | 成功前不能销毁 runtime |
+| INDEX_RUNTIME、维护 WORKERS | 进程级 LazyLock runtime 与双 worker semaphore | join 本服务工作，不重置共享 executor 或等待无关 owner |
+| 构建 MEMORY / MEMORY_LIMITS | ANYSEEK_BUILD_MEMORY_BYTES、ANYSEEK_BUILD_SHARED_MEMORY_BYTES 由 LazyLock 解析一次，错误配置也保留 | 释放实际租约；重开不重读或重置预算 |
+| 服务 Governor | 每次 open 由 Governor::from_env() 捕获 lane 配置 | 释放任务、缓冲和 I/O 租约；独立于进程构建预算 |
+
+环境配置在启动前设置，运行时修改环境不属于支持的重配置。显式额度不覆盖全部分配，也不提供进程 RSS 硬上限；可独立配置 runtime/预算的嵌入式多实例隔离仍未实现。
+
+关闭回归保留拒绝新准入、取消与等待重试、frame/任务所有权、立即重开和失败保留根锁等场景。Linux 另跑真实 SIGTERM 冒烟；Windows 运行进程内所有权与目录回收回归，不能据此推定 POSIX 信号或系统断电通过。运行命令和 CI 分工见[开发指南](development.md)。

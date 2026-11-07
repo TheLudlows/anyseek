@@ -59,6 +59,7 @@ impl Context<'_> {
 impl Context<'_> {
     /// Replay certified tail decisions into the selected index view. Never
     /// append WAL or generate another operation/owner identity during recovery.
+    #[cfg(test)]
     pub(super) async fn replay(&mut self,entry:Entry)->Result<(),RecordError>{
         self.replay_with_native(entry,true).await
     }

@@ -61,7 +61,7 @@ pub(super) enum IndexDelivery {
 
 // This borrow is the ordinary write's basis proof. The owned writer was acquired
 // before capture and cannot be released until this batch is consumed/discarded.
-// All live canonical mutators use this same mutex; see docs/record-write-proof.md.
+// All live canonical mutators use this same mutex; see the write proof in docs/record-model.md.
 struct PreparedBatch<'writer> {
     _writer: &'writer tokio::sync::OwnedMutexGuard<()>,
     plans: Vec<mutation::PreparedWrite>,

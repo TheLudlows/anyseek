@@ -1,6 +1,6 @@
 //! Public schema, analysis and vector configuration for RecordPartition.
 //! Physical vector/metadata components are private and contain no lexical index.
-use ahash::{AHashMap, AHashSet};
+use ahash::AHashSet;
 use indexmap::IndexMap;
 use num_derive::FromPrimitive;
 use serde::{Deserialize, Serialize};

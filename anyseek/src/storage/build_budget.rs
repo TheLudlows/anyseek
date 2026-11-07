@@ -103,9 +103,6 @@ impl MemoryLease {
         self.0=total;other.0=0;Ok(())
     }
 
-    pub(crate) fn can_grow(&self, bytes: u64) -> bool {
-        memory_limits().is_ok_and(|limits| self.0.checked_add(bytes).is_some_and(|n| n <= limits.single))
-    }
     #[track_caller]
     pub(crate) fn grow(&mut self, bytes: u64) -> io::Result<()> {
         let limits = memory_limits()?;

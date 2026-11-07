@@ -236,16 +236,9 @@ Service archive/root 清理是明确的离线操作，不提供删除运行根�
 
 ## 开发验证
 
-```sh
-cargo test --workspace --all-targets
-python3 scripts/check_console_boundary.py
-python3 scripts/record_service_smoke.py --server target/debug/anyseek_server
-# 独立前端浏览器检查：见 console/README.md
-```
+构建、单测、真实 HTTP/故障进程、S3 验收与 CI 完整矩阵统一见[开发指南](../../../docs/development.md)；浏览器测试按[控制台指南](../../../console/README.md#验证)运行。正常构建默认关闭故障注入。
 
-浏览器测试在 `console/` 使用 Node.js Playwright 和 Chromium，按[控制台指南](../../../console/README.md#验证)运行。故障矩阵需先构建 `cargo build -p anyseek --features fault-injection`，再运行同一 smoke 脚本的 `--faults`。正常构建默认关闭故障注入。
-
-小型调用方示例使用 `scripts/anyseek_client.py`：设置 `ANYSEEK_API_KEY` 后运行 `python3 scripts/index_write_query_smoke.py --port 8080 --requests requests.json`；重复执行同一命令重试保存的请求，不生成新身份。旧 `http_smoke.py` 已由完整 Record smoke 取代。
+小型调用方示例使用 `scripts/anyseek_client.py`：设置 `ANYSEEK_API_KEY` 后运行 `python3 scripts/index_write_query_smoke.py --port 8080 --requests requests.json`；重复执行同一命令重试保存的请求，不生成新身份。
 
 `generate_openapi=true` 在可执行文件目录输出 `openapi.json` 和 `openapi.yml`。生成结果包含当前路由与请求 schema，公共请求设置在 `api_types.rs`，默认服务实现为 `record_service.rs`。
 

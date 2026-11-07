@@ -1,4 +1,6 @@
-use std::{fs, io, path::Path};
+use std::{io, path::Path};
+#[cfg(unix)]
+use std::fs;
 
 #[derive(Debug)]
 pub(super) enum PublishError {

@@ -582,6 +582,7 @@ impl Runtime {
             // writer. The owned consumer normally cannot be cancelled by callers.
             data.write_state = WriteState::Failed;
             let merge = data.writer.as_mut().unwrap().merge(&selected);
+            #[cfg(test)]
             let test_path = owner.package_path().join("native");
             let worker = crate::resources::spawn_background(async move {
                 let _memory = _memory;
@@ -1417,6 +1418,7 @@ impl Runtime {
             let result = query(&p, mode.clone()).await;
             assert_eq!(result.count_total, 2, "lexical-only frozen row plus vector-only tail row");
             assert_eq!(result.hits.len(), 2);
+            p.finish_service_shutdown().await.unwrap();
             drop(p);
             let p = RecordPartition::open(&root.0, cfg.max_journal_bytes).await.unwrap();
             assert_eq!(query(&p, mode).await.count_total, 2);

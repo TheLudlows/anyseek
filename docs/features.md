@@ -18,7 +18,7 @@ HTTP/Web UI 数据请求统一由服务内部的 Record/catalog 处理；旧低�
 | Tenant 认证 | 普通 Key 绑定 Tenant，同租户 Key 访问范围一致；撤销只影响后续认证，数据生命周期独立 |
 | 备份 | collection 独立快照、备份退役、完整 service/catalog 备份、新未启动根恢复 |
 
-全文派生索引使用 Tantivy，向量/元数据使用独立组件；规范原文与原始向量由 Payload 保存。模块与文件布局见[架构](architecture.md)。仅支持新库，不提供旧格式升级或迁移。
+全文派生索引使用 Tantivy 与 WAL 支撑的可查增量，后台物化不建立第二个提交权威；向量/元数据使用独立组件。规范原文与原始向量由 Payload 保存。可查尾段、额度预留与文件所有权见[架构](architecture.md)。仅支持新库，不提供旧格式升级或迁移。
 
 ## 接入与限制
 

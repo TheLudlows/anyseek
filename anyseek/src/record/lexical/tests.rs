@@ -54,8 +54,11 @@ async fn standard_analysis_implementation_identity_is_checked_on_native_open() {
     config.index.tokenizer = crate::index::TokenizerType::TantivySimpleV1;
     let native = runtime::Runtime::create(&root.0, &config).unwrap();
     native.flush().await.unwrap();
+    native.shutdown().await.unwrap();
     drop(native);
-    drop(runtime::Runtime::open(&root.0, &config).unwrap());
+    let reopened = runtime::Runtime::open(&root.0, &config).unwrap();
+    reopened.shutdown().await.unwrap();
+    drop(reopened);
     let manifest = root.0.join("record-native.json");
     let mut value: serde_json::Value = serde_json::from_slice(&std::fs::read(&manifest).unwrap()).unwrap();
     value[1][2] = "different-analysis-implementation".into();
@@ -67,7 +70,6 @@ async fn standard_analysis_implementation_identity_is_checked_on_native_open() {
 async fn field_restricted_phrase_keeps_first_position_after_skipping_earlier_field() {
     use crate::record::tests::{config, write};
     use crate::{
-        component::Commit,
         record::{ExpectedVersion, RecordPartition, RecordQuery},
         search::{QueryType, ResultType, SearchMode},
     };
@@ -91,13 +93,12 @@ async fn field_restricted_phrase_keeps_first_position_after_skipping_earlier_fie
             .insert("title".into(), title.into());
         partition.write(request).await.unwrap();
     }
-    let inner = partition.inner.lock().await;
     for committed in [false, true] {
         if committed {
-            inner.index.test_index().commit().await.unwrap();
+            partition.compact_journal().await.unwrap();
         }
-        let result = inner
-            .query_view(RecordQuery {
+        let result = partition
+            .query(RecordQuery {
                 temporal: None,
                 text: "\"the of\"".into(),
                 vector: None,
@@ -120,7 +121,7 @@ async fn field_restricted_phrase_keeps_first_position_after_skipping_earlier_fie
         assert_eq!(ids, BTreeSet::from(["a", "c"]), "committed={committed}");
         assert_eq!(result.count_total, 2);
     }
-    drop(inner);
+    partition.finish_service_shutdown().await.unwrap();
     drop(partition);
 }
 
@@ -984,7 +985,6 @@ fn native_corpus_uses_one_selected_population_across_frozen_and_tail() {
 
 #[tokio::test]
 async fn field_or_matches_selected_field_before_and_after_commit() {
-    use crate::component::Commit;
     use crate::record::tests::{config, write};
     use crate::{
         record::{ExpectedVersion, RecordPartition, RecordQuery},
@@ -1007,11 +1007,10 @@ async fn field_or_matches_selected_field_before_and_after_commit() {
             .insert("title".into(), title.into());
         partition.write(request).await.unwrap();
     }
-    let inner = partition.inner.lock().await;
     let mut before = Vec::new();
     for committed in [false, true] {
         if committed {
-            inner.index.test_index().commit().await.unwrap();
+            partition.compact_journal().await.unwrap();
         }
         for (offset, kind) in [
             (0, ResultType::TopkCount),
@@ -1019,8 +1018,8 @@ async fn field_or_matches_selected_field_before_and_after_commit() {
             (2, ResultType::TopkCount),
             (0, ResultType::Count),
         ] {
-            let result = inner
-                .query_view(RecordQuery {
+            let result = partition
+                .query(RecordQuery {
                     temporal: None,
                     text: "alpha beta".into(),
                     vector: None,
@@ -1059,6 +1058,7 @@ async fn field_or_matches_selected_field_before_and_after_commit() {
             }
         }
     }
+    partition.finish_service_shutdown().await.unwrap();
 }
 
 #[tokio::test]

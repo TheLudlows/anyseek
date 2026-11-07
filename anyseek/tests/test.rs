@@ -16,7 +16,6 @@ use anyseek::search::{
 };
 use anyseek::vector::{Embedding, Inference, Precision, Quantization};
 use anyseek::vector_similarity::{AnnMode, VectorSimilarity};
-use std::collections::HashSet;
 use std::{fs, path::Path};
 
 #[tokio::test]
@@ -44,7 +43,6 @@ async fn test_01_create_index() {
         inference: Inference::None,
     };
 
-    let segment_number_bits1 = 11;
     let index_arc = records::create(index_path, meta, (&schema).to_vec()).await;
     let result = index_arc.configuration().await.unwrap().index.name;
     assert_eq!(result, "test_index");
@@ -329,7 +327,6 @@ async fn test_09_create_index_vector_supplied() {
         },
     };
 
-    let segment_number_bits1 = 11;
     let index_arc = records::create(index_path, meta, (&schema).to_vec()).await;
     let result = index_arc.configuration().await.unwrap().index.name;
     assert_eq!(result, "test_index");
@@ -417,7 +414,6 @@ async fn test_12_create_index_vector_external() {
         },
     };
 
-    let segment_number_bits1 = 11;
     let index_arc = records::create(index_path, meta, (&schema).to_vec()).await;
     let result = index_arc.configuration().await.unwrap().index.name;
     assert_eq!(result, "test_index");

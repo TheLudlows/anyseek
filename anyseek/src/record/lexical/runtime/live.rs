@@ -50,10 +50,6 @@ impl Runtime {
         state.writer=Arc::downgrade(&writer);
         Ok((Escrow{row,writer,publication},super::super::memory::Pending{counts:state.pending.clone(),id_bytes:identity_bytes}))
     }
-    pub(crate) fn reserve_fallback(&self,document:&Document,id:&str)->Result<super::super::memory::Fallback,RecordError>{
-        let analysis=crate::record::build_budget::document_estimate(document,&self.config.schema)?;
-        self.reserve_fallback_estimated(analysis,id)
-    }
     pub(crate) fn reserve_fallback_estimated(&self,analysis:u64,id:&str)->Result<super::super::memory::Fallback,RecordError>{
         let (workspace,pending)=self.reserve_progress(analysis,id.len() as u64)?;
         Ok(super::super::memory::Fallback{pending,workspace})
@@ -200,6 +196,12 @@ mod tests {
     use super::*;
     use crate::record::{RecordPartition,ExpectedVersion};
     use crate::record::tests::{config,write};
+    impl Runtime {
+        fn reserve_fallback(&self,document:&Document,id:&str)->Result<crate::record::lexical::memory::Fallback,RecordError>{
+            let analysis=crate::record::build_budget::document_estimate(document,&self.config.schema)?;
+            self.reserve_fallback_estimated(analysis,id)
+        }
+    }
     #[tokio::test(flavor="multi_thread",worker_threads=2)]
     async fn committed_delta_is_queryable_during_paused_materialization_and_replays() {
         let temp=tempfile::tempdir().unwrap();

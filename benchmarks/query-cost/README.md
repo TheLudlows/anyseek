@@ -1,8 +1,8 @@
 # Remaining query cost: measured, scoped changes
 
 Baseline: master `768a18eb0ccb25d23d1f2b5bf9a09ec071afc857` (2026-11-03).
-No repository `AGENTS.md` exists at that revision. Development and CI constraints
-are in `docs/development.md` and `docs/ci-validation.md`.
+No repository `AGENTS.md` exists at that revision. Current development and CI
+instructions are consolidated in [the development guide](../../docs/development.md).
 
 ## State verified before implementation
 

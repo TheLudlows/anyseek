@@ -342,6 +342,7 @@ mod tests {
         crate::record::tests::wait_maintenance_idle(&p).await;
         {let inner=p.inner.lock().await;assert_eq!(inner.anchor.as_ref().unwrap().identity(),certificate,"cache merges must not replace the checkpoint");assert!(inner.index.components().await.len()<=capacity::segments(&settings)+1);}
         log::info!("record_maintenance marker=long_suffix_before_drop");
+        p.finish_service_shutdown().await.unwrap();
         drop(p);
         log::info!("record_maintenance marker=long_suffix_before_open");
         let p=RecordPartition::open(&root,settings.max_journal_bytes).await.unwrap();

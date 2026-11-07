@@ -56,3 +56,10 @@ pub async fn clear(partition: &RecordPartition) {
     let total=partition.statistics().await.unwrap().retained_identities;
     delete(partition,(0..total).collect()).await;
 }
+
+/// Join native workers after all fixture requests finish, before reopening or
+/// deleting its root. Dropping the handle alone may leave an owned worker alive.
+pub async fn close(partition: RecordPartition) {
+    partition.finish_service_shutdown().await.unwrap();
+    drop(partition);
+}

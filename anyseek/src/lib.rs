@@ -29,7 +29,6 @@ pub(crate) static INDEX_RUNTIME: LazyLock<Runtime> = LazyLock::new(|| {
 pub(crate) mod clustering;
 // Private vector/metadata component checkpoint.
 mod component;
-pub(crate) mod compatible;
 /// Schema, analysis, scoring and vector configuration for RecordPartition.
 pub mod index;
 // Internal ranking helpers.
@@ -39,7 +38,7 @@ pub(crate) mod opencc_t2s;
 pub mod search;
 /// Tokenizes text into tokens (words), supports Chinese word segmentation, folds (converts) diacritics, accents, zalgo text, umlaut, bold, italic, full-width UTF-8 characters into their basic representation.
 pub(crate) mod tokenizer;
-/// Utils `truncate()` and `substring()`
+/// Binary field codecs and base64 vector transport helpers.
 pub mod utils;
 /// Vector search by indexing vectors and searching for similar vectors based on cosine similarity, inner product, and Euclidean distance.
 pub mod vector;

@@ -36,7 +36,7 @@ const PHRASES: &[&str] = &[
     "of missing the",
 ];
 
-async fn assert_phrases(index: &RecordPartition, _realtime: bool, context: &str) {
+async fn assert_phrases(index: &RecordPartition, context: &str) {
     for phrase in PHRASES {
         let terms: Vec<_> = phrase.split_whitespace().collect();
         let expected: BTreeSet<_> = DOCUMENTS
@@ -105,16 +105,16 @@ async fn check_mask(mask: u8, similarity: LexicalSimilarity) {
     let index = records::create(&path, meta, schema).await;
     records::append(&index, DOCUMENTS.iter().map(|body| serde_json::from_value(json!({"body":body})).unwrap()).collect()).await;
     assert_eq!(index.statistics().await.unwrap().active_records, DOCUMENTS.len());
-    assert_phrases(&index, true, &format!("mask={mask}, realtime")).await;
+    assert_phrases(&index, &format!("mask={mask}, realtime")).await;
     index.compact_journal().await.unwrap();
-    assert_phrases(&index, false, &format!("mask={mask}, committed")).await;
+    assert_phrases(&index, &format!("mask={mask}, committed")).await;
 
-    drop(index);
+    records::close(index).await;
     let index = RecordPartition::open(&path, records::JOURNAL_LIMIT).await.unwrap();
     assert_eq!(index.configuration().await.unwrap().index.ngram_indexing, mask);
-    assert_phrases(&index, false, &format!("mask={mask}, reopened")).await;
+    assert_phrases(&index, &format!("mask={mask}, reopened")).await;
 
-    drop(index);
+    records::close(index).await;
     fs::remove_dir_all(path).unwrap();
 }
 

@@ -271,6 +271,7 @@ impl SqliteAuthority {
 
     /// Return every active object reachable from the current committed heads,
     /// following immutable manifest/WAL dependency edges transitively.
+    #[cfg(test)]
     pub(crate) fn reachable_objects(&self) -> rusqlite::Result<Vec<ObjectRef>> {
         self.objects_for_keys(reachable_keys(&self.connection)?)
     }
@@ -390,6 +391,7 @@ impl SqliteAuthority {
     /// This transaction is the commit point; object upload alone never commits data.
     /// If a manifest is supplied, the caller asserts it completely indexes through
     /// this commit's sequence; otherwise the committed tail remains unindexed.
+    #[cfg(test)]
     pub(crate) fn publish_commit(
         &mut self,
         partition_id: &str,
@@ -497,6 +499,7 @@ impl SqliteAuthority {
     }
 
     /// Atomically publish a complete index manifest, never advancing beyond committed data.
+    #[cfg(test)]
     pub(crate) fn publish_index(
         &mut self, partition_id: &str, expected_head_version: u64,
         owner_epoch: u64, indexed_seq: u64, manifest: ObjectRef,
@@ -970,6 +973,7 @@ impl SqliteAuthority {
     /// Pin a verified object before opening it or starting a background build.
     /// Expiry is advisory only: GC treats a pin as protective until an explicit unpin
     /// after the consumer has been fenced/cancelled. A clock deadline alone is not proof.
+    #[cfg(test)]
     pub(crate) fn pin_object(
         &mut self,
         pin_id: &str,
@@ -1029,6 +1033,7 @@ impl SqliteAuthority {
     }
 
     /// Release a reader/build/backup/staging pin after its consumer is finished.
+    #[cfg(test)]
     pub(crate) fn unpin_object(&mut self, pin_id: &str) -> rusqlite::Result<bool> {
         let tx = self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let changed = tx.execute("DELETE FROM object_pins WHERE pin_id=?1", [pin_id])?;
@@ -1103,6 +1108,7 @@ impl SqliteAuthority {
     }
 
     /// Resolve a response-lost retry using the original operation ID and request digest.
+    #[cfg(test)]
     pub(crate) fn resolve_operation(
         &self, partition_id: &str, operation_id: &str, request_sha256: [u8; 32],
     ) -> rusqlite::Result<Option<PartitionHead>> {
@@ -1321,8 +1327,8 @@ mod tests {
         let head=match db.publish_commit("p0",head.head_version,9,"op-1",[1;32],1,first.clone(),None).unwrap() {
             PublishOutcome::Published(head)=>head, other=>panic!("{other:?}")
         };
-        let head=match db.publish_commit("p0",head.head_version,9,"op-2",[2;32],2,second.clone(),None).unwrap() {
-            PublishOutcome::Published(head)=>head, other=>panic!("{other:?}")
+        match db.publish_commit("p0",head.head_version,9,"op-2",[2;32],2,second.clone(),None).unwrap() {
+            PublishOutcome::Published(_)=>(), other=>panic!("{other:?}")
         };
         assert!(!db.retire_object(&first.key,1,3).unwrap());
         assert!(db.prepare_backup_snapshot("backup-missing",&[second.clone()],4,1024*1024).is_err());

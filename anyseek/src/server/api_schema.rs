@@ -2,7 +2,6 @@
 //! Shared internal values use these descriptions; public request settings live in api_types.
 //! Remote Serialize derives check public field/variant layouts against the internal types at compile time.
 #![allow(dead_code, missing_docs)]
-use indexmap::IndexMap;
 use serde::Serialize;
 use std::ops::Range;
 use utoipa::ToSchema;

@@ -14,81 +14,7 @@ pub(super) struct Candidate {
     fingerprint: [u8; 32],
     hit: crate::min_heap::Result,
 }
-pub(super) struct Selection {
-    rows: BTreeMap<String, ((u64, u64), [u8; 32])>,
-    _pins: Vec<Arc<lexical::runtime::Runtime>>,
-    _memory: crate::storage::build_budget::MemoryLease,
-    _scope: Option<crate::resources::Lease>,
-}
-impl Selection {
-    pub async fn revalidate(
-        &mut self,
-        locations: &BTreeMap<String, usize>,
-        components: &[crate::component::VectorSegmentArc],
-    ) -> Result<(), RecordError> {
-        // One read guard per component, not one lock acquisition per record.
-        let shards = futures::future::join_all(components.iter().map(|shard| shard.read())).await;
-        if shards.iter().any(|shard| shard.failed) { return Err(RecordError::RecoveryRequired); }
-        self.rows.retain(|key, (revision, fingerprint)| {
-            let Some(&ordinal) = locations.get(key) else { return false; };
-            let local = ordinal / shards.len();
-            shards[ordinal % shards.len()].active.as_ref().is_some_and(|active| {
-                active.is_live(local) && active.keys.get(local) == Some(key)
-                    && active.revisions.get(local).is_some_and(|&current| current.0 == revision.0
-                        && (current.1 == revision.1 || active.fingerprints.get(local) == Some(fingerprint)))
-            })
-        });
-        Ok(())
-    }
-    pub fn allows(&self, key: &str) -> bool { self.rows.contains_key(key) }
-
-}
 impl Handle {
-    pub async fn filter(&self, filters: &[FacetFilter]) -> Result<Selection, RecordError> {
-        let root = self.index.read().await;
-        let shards =
-            futures::future::join_all(root.segments.iter().map(|segment| segment.vector.read())).await;
-        if shards.iter().any(|shard| shard.failed) {
-            return Err(RecordError::RecoveryRequired);
-        }
-        let mut bytes = 65536u64;
-        for shard in &shards {
-            let active = shard
-                .active
-                .as_ref()
-                .ok_or_else(|| storage("filter statistics missing"))?;
-            for key in &active.keys {
-                bytes = bytes
-                    .checked_add(key.len() as u64 * 4 + 256)
-                    .ok_or_else(|| storage("filter selection budget overflow"))?;
-            }
-        }
-        let memory = crate::storage::build_budget::reserve_memory(bytes).map_err(storage)?;
-        let scope = crate::resources::Scope::current()
-            .map(|scope| scope.bytes(bytes))
-            .transpose()
-            .map_err(|_| RecordError::Busy)?;
-        let mut rows = BTreeMap::new();
-        for shard in &shards {
-            let active = shard.active.as_ref().unwrap();
-            let filters = crate::metadata_filter::compile_filters(shard, filters)
-                .map_err(RecordError::Rejected)?;
-            for (local, key) in active.keys.iter().enumerate() {
-                if active.is_live(local)
-                    && !crate::metadata_filter::is_facet_filter(shard, &filters, local)
-                {
-                    let revision = *active.revisions.get(local).ok_or_else(|| storage("filter revision missing"))?;
-                    rows.insert(key.clone(), (revision, active.fingerprints[local]));
-                }
-            }
-        }
-        Ok(Selection {
-            rows,
-            _pins: root.segments.iter().map(|segment| segment.lexical.clone()).collect(),
-            _memory: memory,
-            _scope: scope,
-        })
-    }
     pub async fn capture(index: &VectorIndexArc, length: usize) -> Result<Self, RecordError> {
         let root = index.read().await;
         let metadata = checkpoint_codec::json_length(&(&root.meta, &root.schema_map))? as u64;
@@ -398,7 +324,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn candidate_and_filter_revalidation_fence_failed_component_after_capture() {
+    async fn captured_query_fences_failed_components_and_bounds_output() {
         let temporary = tempfile::tempdir().unwrap();
         let mut settings = config();
         settings.max_record_bytes = 1024 * 1024;
@@ -409,18 +335,18 @@ mod tests {
         p.write(request).await.unwrap();
         let inner = p.inner.lock().await;
         let handle = inner.index.capture_query(10).await.unwrap();
-        let mut selection = handle.filter(&[]).await.unwrap();
         let components = inner.index.components().await;
         components[0].write().await.failed = true;
         let identity = lexical::Identity { id: "a".into(), version: 1, revision: 1 };
         assert!(matches!(inner.index.matches_identity(0, &identity, [0; 32]).await,
             Err(RecordError::RecoveryRequired)));
-        assert!(matches!(selection.revalidate(&inner.locations, &components).await,
+        assert!(matches!(handle.candidates(vec![]).await,
             Err(RecordError::RecoveryRequired)));
-        let failed = crate::search::search_with_counts(&handle.index, String::new(),
+        let failed = lexical::runtime_query::search(&handle.index, String::new(),
             Some(Embedding::F32(vec![1.0, 0.0])), SearchMode::Vector {
                 similarity_threshold: None, ann_mode: crate::vector_similarity::AnnMode::All },
-            0, 10, ResultType::TopkCount, true, vec![], vec![], vec![], &mut vec![]).await;
+            QueryType::Union, 0, 10, ResultType::TopkCount, vec![], vec![], vec![],
+            lexical::Cut { sequence: u64::MAX, evaluation_time_ms: inner.evaluation_time_ms }).await;
         assert!(matches!(failed, Err(RecordError::RecoveryRequired)));
         // Exhaust only the caller's byte allowance; the same captured index is healthy.
         components[0].write().await.failed = false;

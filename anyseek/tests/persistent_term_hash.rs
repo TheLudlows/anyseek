@@ -1,4 +1,3 @@
-use anyseek::record::RecordSearch;
 #[path = "common/records.rs"] mod records;
 use anyseek::record::{RecordPartition, RecordQuery};
 // Format-8 persistence contract. Cross-build test is driven twice with opposite
