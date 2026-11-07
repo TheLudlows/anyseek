@@ -212,9 +212,6 @@ impl Records {
     pub(super) fn shared(&self, id: &str) -> Option<Shared<Record>> {
         self.values.get(id).cloned()
     }
-    pub(super) fn contains_key(&self, id: &str) -> bool {
-        self.values.contains_key(id)
-    }
     pub(super) fn keys(&self) -> impl DoubleEndedIterator<Item = &String> + ExactSizeIterator {
         self.values.keys()
     }

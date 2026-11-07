@@ -1990,7 +1990,6 @@ fn service_layers(app: Router<Arc<Service>>, service: Arc<Service>) -> Router {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     #[test]
     fn capacity_profiles_are_explicit_finite_and_preserve_other_limits() {
         let request=||serde_json::from_value::<CreateIndexRequest>(json!({"index_name":"capacity","schema":[]})).unwrap();
@@ -2582,14 +2581,6 @@ mod tests {
         partition.write(serde_json::from_value(body["records"][0].clone()).unwrap()).await.unwrap();
         drop(partition); drop(service); std::fs::remove_dir_all(path).unwrap();
     }
-    async fn raw(address: std::net::SocketAddr, request: String) -> Vec<u8> {
-        let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
-        stream.write_all(request.as_bytes()).await.unwrap();
-        let mut bytes = vec![];
-        let _ = stream.read_to_end(&mut bytes).await;
-        bytes
-    }
-
     #[cfg(feature = "fault-injection")]
     #[tokio::test]
     async fn service_data_fence_preserves_persistence_errors() {
@@ -2703,7 +2694,6 @@ mod tests {
     async fn service_publication_waits_share_original_request_deadline() {
         use tower::ServiceExt;
         use http_body::Body as _;
-        use std::error::Error as _;
         use std::time::Duration;
         for stage in ["header", "body", "late-body"] {
             let (mut service, path, headers) = setup().await;

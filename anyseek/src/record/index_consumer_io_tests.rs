@@ -1,6 +1,25 @@
 use super::*;
 use crate::component::Commit;
 
+// Fixtures without pre-WAL credits; service inputs use the admitted routes.
+impl Input {
+    fn admitted(
+        native: &lexical::runtime::Runtime,
+        identity: lexical::Identity,
+        document: &Document,
+    ) -> Result<Self, RecordError> {
+        let mut input=Self::admitted_visible(native,identity,document,None)?;input.publish_native=false;Ok(input)
+    }
+    fn vector(
+        config: &RecordConfig,
+        identity: lexical::Identity,
+        ordinal: usize,
+        document: &Document,
+    ) -> Result<Self, RecordError> {
+        Self::vector_with_credit(config,identity,ordinal,document,None)
+    }
+}
+
 async fn fixture() -> (tempfile::TempDir, VectorIndexArc, RecordConfig, Engine, crate::resources::Scope) {
     let root = tempfile::tempdir().unwrap();
     let mut config = crate::record::tests::config();

@@ -6,8 +6,10 @@
 //! as its selected manifest before serving search results.
 use super::{
     s3_compatible::{S3CompatibleStore, UploadRegisterError},
-    sqlite_authority::{ObjectRef, PartitionHead, PublishOutcome, SqliteAuthority},
+    sqlite_authority::{ObjectRef, PartitionHead, SqliteAuthority},
 };
+#[cfg(test)]
+use super::sqlite_authority::PublishOutcome;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -131,6 +133,7 @@ pub(crate) async fn upload_log_block(
 
 /// Result of the object-first append and SQLite publication protocol.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg(test)]
 pub(crate) enum AppendCommitOutcome {
     Published { head: PartitionHead, object: ObjectRef },
     AlreadyPublished(PartitionHead),
@@ -143,6 +146,7 @@ pub(crate) enum AppendCommitOutcome {
 ///
 /// This storage primitive does not apply Record state. RecordPartition owns
 /// canonical mutation validation and publication of its complete retrieval view.
+#[cfg(test)]
 pub(crate) async fn append_and_commit(
     store: &S3CompatibleStore,
     authority: &mut SqliteAuthority,

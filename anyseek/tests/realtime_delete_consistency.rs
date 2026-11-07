@@ -1,19 +1,7 @@
 #[path = "common/records.rs"] mod records;
 use anyseek::record::{RecordPartition, RecordQuery};
-// Regression tests: realtime (`include_uncommitted = true`) totals must
-// exclude deleted documents, for both `Count` and `TopkCount`.
-//
-// Root causes were in anyseek/src/realtime_search.rs: the single-term
-// tail redefined `filtered` without deletes/facets and fell back to the raw
-// `posting_count`; `union_count_uncommitted` never consulted `delete_hashset`;
-// and the `union_scan_uncommitted` single-hit branch double-counted filtered
-// docs (callee and caller each added one).
-// Depends on the single-term Count fix (#71) for committed reads.
-//
-// Self-contained (own index directory). The only waits are bounded polls
-// for the async indexer to settle (fails loudly on timeout, no sleeps
-// past settled state).
-
+// Count and TopkCount must exclude deleted records in the unsealed tail.
+// Fixtures cover both single-term and OR queries, including a frozen base.
 
 use anyseek::index::{
     Clustering, FrequentwordType,
@@ -54,7 +42,6 @@ async fn search(
     query: &str,
     query_type: QueryType,
     result_type: ResultType,
-    uncommitted: bool,
 ) -> anyseek::record::RecordSearch {
     index.query(RecordQuery {text:query.into(),vector:None,query_type:query_type,mode:SearchMode::Lexical,offset:0,length:100,result_type:result_type,fields:Vec::new(),filters:Vec::new(),sort:Vec::new(),temporal:None}).await.unwrap()
 }
@@ -78,9 +65,7 @@ async fn settle_search(
             index,
             query,
             query_type.clone(),
-            ResultType::TopkCount,
-            true,
-        )
+            ResultType::TopkCount)
         .await;
         if r.count_total == expected && r.hits.len() == expected.min(100) {
             return;
@@ -106,11 +91,9 @@ async fn realtime_single_count_excludes_deleted() {
         &index,
         "base",
         QueryType::Union,
-        ResultType::TopkCount,
-        true,
-    )
+        ResultType::TopkCount)
     .await;
-    let count = search(&index, "base", QueryType::Union, ResultType::Count, true).await;
+    let count = search(&index, "base", QueryType::Union, ResultType::Count).await;
     assert_eq!(topk.count_total, 8);
     assert_eq!(count.count_total, 8);
 
@@ -135,17 +118,13 @@ async fn realtime_union_count_excludes_deleted() {
         &index,
         "alpha beta",
         QueryType::Union,
-        ResultType::TopkCount,
-        true,
-    )
+        ResultType::TopkCount)
     .await;
     let count = search(
         &index,
         "alpha beta",
         QueryType::Union,
-        ResultType::Count,
-        true,
-    )
+        ResultType::Count)
     .await;
     assert_eq!(topk.count_total, 17);
     assert_eq!(topk.hits.len(), 17);

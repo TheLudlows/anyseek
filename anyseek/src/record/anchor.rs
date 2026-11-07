@@ -1042,13 +1042,13 @@ mod tests {
         assert_eq!(crate::storage::build_budget::used_memory_for_test(),before);
         let oversized=format!(r#"{{"unknown":"{}"}}"#,"x".repeat(8192));
         let error=serde_json::from_str::<Reference>(&oversized).unwrap_err().to_string();
-        assert!(error.contains("class=shared"),"admission must precede field decoding: {error}");
+        assert_eq!(error,"Busy","shared admission must precede field decoding");
         assert_eq!(crate::storage::build_budget::used_memory_for_test(),before);
         assert!(metadata_charge(usize::MAX).is_err());
         let root=tempfile::tempdir().unwrap();
         let path=root.path().join("manifest");
         std::fs::write(&path," ".repeat(8192)).unwrap();
-        assert!(read_manifest(&path,16384).err().unwrap().to_string().contains("class=shared"));
+        assert!(matches!(read_manifest(&path,16384),Err(RecordError::Busy)));
         assert_eq!(crate::storage::build_budget::used_memory_for_test(),before);
     }
     #[tokio::test]
@@ -1223,7 +1223,7 @@ mod tests {
             let result=p.write(timed.clone()).await;
             if failure==0 {assert_eq!(result.unwrap(),timed_receipt);} else {assert!(matches!(result,Err(RecordError::DurablePending(3))));}
             assert_eq!(serde_json::to_vec(&p.inner.lock().await.anchor).unwrap(),anchor,"suffix must not be absorbed by another compact");
-            drop(p);
+            p.finish_service_shutdown().await.unwrap();drop(p);
             let p=RecordPartition::open(&path,settings.max_journal_bytes).await.unwrap();
             {
                 let inner=p.inner.lock().await;
@@ -1236,7 +1236,7 @@ mod tests {
             assert_eq!(p.write(patch).await.unwrap(),patch_receipt);
             assert_eq!(p.write(timed).await.unwrap(),timed_receipt);
             assert_eq!(p.inner.lock().await.state.seq,3);
-            drop(p);
+            p.finish_service_shutdown().await.unwrap();drop(p);
         }
     }
 
@@ -1603,11 +1603,11 @@ mod tests {
                 let hits=|v:RecordSearch|v.hits.into_iter().map(|h|(h.record.record_id.clone(),h.record.version,h.score)).collect::<Vec<_>>();
                 assert_eq!(hits(got),hits(want),"round {round}");
             }
-            drop(p);p=RecordPartition::open(&root,settings.max_journal_bytes).await.unwrap();
+            p.finish_service_shutdown().await.unwrap();drop(p);p=RecordPartition::open(&root,settings.max_journal_bytes).await.unwrap();
             assert_eq!(p.get("a").await.unwrap().unwrap().version,if round>=1{2}else{1});
         }
         let tail=write("after-flush","tail","alpha tail",ExpectedVersion::Absent);
-        let receipt=p.write(tail.clone()).await.unwrap();drop(p);
+        let receipt=p.write(tail.clone()).await.unwrap();p.finish_service_shutdown().await.unwrap();drop(p);
         p=RecordPartition::open(&root,settings.max_journal_bytes).await.unwrap();
         assert_eq!(p.write(tail).await.unwrap(),receipt);
         let inner=p.inner.lock().await;let mut selected=inner.anchor.as_ref().unwrap().segments.iter().map(|s|s.id.clone()).collect::<std::collections::BTreeSet<_>>();
@@ -1694,7 +1694,7 @@ mod tests {
         let files_before=serde_json::to_vec(&files(&selected,closure_limit(config.max_journal_bytes).unwrap()).unwrap()).unwrap();
         let update=write("a2","a","alpha revised",ExpectedVersion::Match(1));let receipt=partition.write(update.clone()).await.unwrap();
         let expected=scores(query(&partition,mode.clone()).await);
-        drop(partition);
+        partition.finish_service_shutdown().await.unwrap();drop(partition);
         let restored=RecordPartition::open(&root,config.max_journal_bytes).await.unwrap();
         {
             let inner=restored.inner.lock().await;

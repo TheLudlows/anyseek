@@ -1,4 +1,3 @@
-use anyseek::record::RecordSearch;
 #[path = "common/records.rs"] mod records;
 use anyseek::record::{RecordPartition, RecordQuery};
 // Rank ties must be resolved before local TopK and again after global merging.
@@ -18,7 +17,6 @@ async fn query(
     sorts: Vec<ResultSort>,
     offset: usize,
     qt: QueryType,
-    realtime: bool,
 ) -> Vec<(usize, u32)> {
     let sm = match mode {
         0 => SearchMode::Lexical,
@@ -93,15 +91,15 @@ async fn stable_ranking_shards_pagination_explicit_sort_and_concurrency() {
         })
         .await
         .expect("all realtime documents must finish indexing");
-        // Cover realtime lexical selection before commit.
-        let rt = query(&index, 0, vec![], 0, QueryType::Union, true).await;
+        // Cover the unsealed tail before checkpoint.
+        let rt = query(&index, 0, vec![], 0, QueryType::Union).await;
         assert_eq!(
             rt.iter().map(|x| x.0).collect::<Vec<_>>(),
             (0..7).collect::<Vec<_>>(), "realtime shards={shards}, results={rt:?}"
         );
         index.compact_journal().await.unwrap();
         for mode in 0..4 {
-            let expected = query(&index, mode, vec![], 0, QueryType::Union, false).await;
+            let expected = query(&index, mode, vec![], 0, QueryType::Union).await;
             assert_eq!(
                 expected.iter().map(|x| x.0).collect::<Vec<_>>(),
                 (0..7).collect::<Vec<_>>(),
@@ -109,16 +107,16 @@ async fn stable_ranking_shards_pagination_explicit_sort_and_concurrency() {
             );
             for _ in 0..3 {
                 assert_eq!(
-                    query(&index, mode, vec![], 0, QueryType::Union, false).await,
+                    query(&index, mode, vec![], 0, QueryType::Union).await,
                     expected
                 );
                 let queries =
-                    (0..4).map(|_| query(&index, mode, vec![], 0, QueryType::Union, false));
+                    (0..4).map(|_| query(&index, mode, vec![], 0, QueryType::Union));
                 for result in futures::future::join_all(queries).await {
                     assert_eq!(result, expected);
                 }
             }
-            let page = query(&index, mode, vec![], 7, QueryType::Union, false).await;
+            let page = query(&index, mode, vec![], 7, QueryType::Union).await;
             assert_eq!(
                 page.iter().map(|x| x.0).collect::<Vec<_>>(),
                 (7..14).collect::<Vec<_>>()
@@ -135,7 +133,7 @@ async fn stable_ranking_shards_pagination_explicit_sort_and_concurrency() {
                     order: SortOrder::Ascending,
                 },
             ];
-            let actual = query(&index, 0, sorts, 0, qt, false).await;
+            let actual = query(&index, 0, sorts, 0, qt).await;
             assert_eq!(
                 actual.iter().map(|x| x.0).collect::<Vec<_>>(),
                 (83..90).rev().collect::<Vec<_>>()
@@ -150,9 +148,7 @@ async fn stable_ranking_shards_pagination_explicit_sort_and_concurrency() {
                     order,
                 }],
                 0,
-                QueryType::Union,
-                false,
-            )
+                QueryType::Union)
             .await;
             assert_eq!(
                 actual.iter().map(|x| x.0).collect::<Vec<_>>(),
@@ -177,7 +173,7 @@ async fn stable_ranking_shards_pagination_explicit_sort_and_concurrency() {
             (0..7).collect::<Vec<_>>()
         );
 
-        drop(index);
+        records::close(index).await;
         std::fs::remove_dir_all(path).unwrap(); // Only this test's newly created fixture.
     }
 }
@@ -238,6 +234,6 @@ async fn stable_equal_score_block_boundary_and_explicit_id_sort() {
         }
     }
 
-    drop(index);
+    records::close(index).await;
     std::fs::remove_dir_all(path).unwrap();
 }

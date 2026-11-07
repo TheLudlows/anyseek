@@ -204,7 +204,7 @@ mod tests {
         assert_eq!(state.operations[0].request.document,original);
         assert_eq!(state.operations[1].request.vector_patch.as_ref().unwrap()["vector"],serde_json::json!([7.0,0.0]));
         assert_eq!(state.records["s"].version,2);
-        drop(pool);drop(inner);drop(partition);std::fs::remove_dir_all(root).unwrap();
+        drop(pool);drop(inner);partition.finish_service_shutdown().await.unwrap();drop(partition);std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]
@@ -224,7 +224,7 @@ mod tests {
         assert!(invalid.read(&pool,settings.max_journal_bytes).is_err());
         std::fs::OpenOptions::new().write(true).open(&file).unwrap().set_len(16).unwrap();
         assert!(prepared.read(&pool,settings.max_journal_bytes).is_err());
-        drop(pool);drop(inner);drop(partition);std::fs::remove_dir_all(root).unwrap();
+        drop(pool);drop(inner);partition.finish_service_shutdown().await.unwrap();drop(partition);std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]
@@ -242,7 +242,7 @@ mod tests {
         assert!(encoded_length(&prepared.state,20_000).is_ok());
         let error=prepared.read(&pool,20_000).err().unwrap();
         assert!(error.to_string().contains("expanded payload budget"),"{error}");
-        drop(pool);drop(inner);drop(partition);std::fs::remove_dir_all(root).unwrap();
+        drop(pool);drop(inner);partition.finish_service_shutdown().await.unwrap();drop(partition);std::fs::remove_dir_all(root).unwrap();
     }
 
 }

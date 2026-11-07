@@ -1,8 +1,8 @@
 # 持久化、对象存储与恢复
 
-本地 Segment 已由 PR #71 合入；SQLite/S3 协调、远端 checkpoint、保留与共同备份已由 [PR #72](https://github.com/TheLudlows/anyseek/pull/72) 合入；[PR #73](https://github.com/TheLudlows/anyseek/pull/73) 和 [PR #74](https://github.com/TheLudlows/anyseek/pull/74) 的维护路径、审计修复及无缓存验收也已合入。实现与剩余验收统一见 [路线与验收证据](roadmap.md)，配置见 [服务指南](../anyseek/src/server/README.md)。
+本文集中说明本地 WAL/Segment 与 SQLite/S3 的持久化、checkpoint、备份和回收协议。请求语义见[Record 契约](record-model.md)，配置见[服务指南](../anyseek/src/server/README.md)，实现与剩余验收见[路线](roadmap.md)。
 
-[#98](https://github.com/TheLudlows/anyseek/issues/98) 将 Tenant/Catalog 与 S3 authority 统一到 SQLite。Catalog 格式为 5，authority schema 为 3，authority 备份快照为 2；旧 Catalog 日志及旧数据库格式不提供迁移。验收状态见 [路线与验收证据](roadmap.md)。
+Tenant/Catalog 与 S3 authority 共用 SQLite。Catalog 格式为 5，authority schema 为 3，authority 备份快照为 2；旧 Catalog 日志及旧数据库格式不提供迁移。
 
 ## 本地 Segment 与共同视图
 
@@ -12,7 +12,7 @@
 
 `record/view.rs` 在 partition guard 下捕获冻结段与可变 tail 的派生拓扑，在 guard 外评分，最终回到当前权威状态重验版本、删除及 TTL。全文按选中的活动身份构建跨段 N/df/字段长度上下文，每个通道先形成全局排名再融合。异步消费者可处于不同进度，不能将权威 visible_seq 当作完整索引水位，也不能承诺查询、回表及返回统计来自同一不可变业务快照；最终重验可能缩短结果页。
 
-认证 checkpoint 可复用冻结段；compaction 重建完整等价闭包。可变 tail 按字节和 128 次原生更新额度准入，派生缓存封存/轮换不推进或替换 WAL 权威，恢复依据完整已提交 suffix。权威 checkpoint 则先完成构建、校验及同步，再发布选择证书并安装视图。发布后应用失败保持 fenced，恢复只采用认证选择结果；退休失败不回滚已提交状态。
+认证 checkpoint 可复用冻结段；compaction 重建完整等价闭包。可变 tail 按字节和 128 次原生更新额度准入。全文可查增量在原生物化完成前参与查询，工作区在 WAL 前预留；其可见发布、物化交接和派生缓存封存/轮换都不推进或替换 WAL 权威，恢复依据完整已提交 suffix。尾段和 owner 保护详见[架构](architecture.md#wal-支撑的可查全文尾段)。权威 checkpoint 先完成构建、校验及同步，再发布选择证书并安装视图；发布后应用失败保持 fenced，退休失败不回滚已提交状态。
 
 私有批量构建结束时，`finish_build` 复用有界小段合并，再由 Tantivy 按活跃文件引用执行 GC，之后封存并收集库存。1,024 文件上限保留；不得直接删除仍被旧读者、构建或备份引用的文件。预算不足或无法进一步合并时仍可能安全拒绝，不承诺任意规模都可构建。
 
@@ -26,7 +26,7 @@ SQLite 是唯一可变协调权威，保存 head/owner epoch、提交和索引�
 
 普通写入先登记上传身份，再完成不可变 PUT、读回长度/字节/SHA-256 校验，最后由 SQLite 事务条件发布 head 与回执，再应用本地权威状态并同步或排队派生索引。`/ingest` 不等待两个索引消费者追平。对象缺失或校验失败不会回退为旧缓存成功。
 
-## 1. 远端检查点与 Segment 发布
+## 远端检查点与 Segment 发布
 
 复用 `anchor::Reference` 的认证闭包及规范 payload pool，Segment 包含 Tantivy 原生文件与独立向量/元数据组件。远端 checkpoint descriptor 映射所选 anchor/Segment/payload 文件到有界对象块，保存原文件长度和 SHA-256，不再制作一套正文/向量镜像。对象块按不可变文件身份和内容摘要命名，未变化的所选文件可以复用。
 
@@ -37,17 +37,17 @@ SQLite 是唯一可变协调权威，保存 head/owner epoch、提交和索引�
 3. SQLite 以 expected head version、owner epoch 和精确 committed seq 条件发布 manifest、indexed seq、log base，并清空已覆盖的 live WAL tip。
 4. 再发布本地恢复证书与共同检索视图。SQLite 发布后的本地失败保持 fenced，重开时采用远端选择结果。
 
-同步维护在完整当前 cut 上推进检查点；C1 已支持后台 Indexer 在固定已提交 cut 构建、条件发布，并保留期间新增 tail，详见下文。冷恢复下载并验证完整所选文件，直接加载已有 Segment，然后重放检查点之后的 tail。即使本地 seq 相同，也必须采用权威选择的新 manifest，因为同序号维护可能改变 历史 GC 切点 等状态。
+同步维护在完整当前 cut 上推进检查点；后台 Indexer 在固定已提交 cut 构建、条件发布，并保留期间新增 tail，详见下文。冷恢复下载并验证完整所选文件，直接加载已有 Segment，然后重放检查点之后的 tail。即使本地 seq 相同，也必须采用权威选择的新 manifest，因为同序号维护可能改变历史 GC 切点等状态。
 
-### 有界校验对象缓存（C2，PR #76 已合入）
+### 有界校验对象缓存
 
 `*.object-cache` 位于对应 SQLite 权威库旁，是完全可丢弃的派生缓存。容量为每库 256 MiB、4096 个块；按最早插入淘汰，不把命中频率写回磁盘。缓存身份绑定 endpoint/bucket/region、完整对象 key、SHA-256 和长度；不保存凭据。每次命中重新检查长度和 hash；损坏作为 miss 删除，无法访问或锁竞争时直接回源。远端流按认证长度有界累积，过长、缺失或校验失败不能入缓存。
 
 私有临时文件完整写入并同步后同目录原子发布；跨进程非阻塞文件锁保护扫描、删除与发布；锁文件在缓存目录旁，清空缓存不能替换锁 inode。临时文件、孤儿块计入清理，删除失败不释放额度；启动后不要求缓存持久化成功。PUT 和不确定 PUT 的确认始终从远端读回，不能用缓存代替后端持久化证明。SQLite 仍独立验证当前 owner/head/水位，缓存命中不授予读取或输出权限。
 
-缓存只返回自有字节，不供 mmap；materialize 后的 Segment 位于独立目录，由现有认证流程映射与保护。淘汰、损坏和清空缓存均不删除在用 Segment mmap。预取和直接映射缓存块暂不实现。C3-2 已提供分级准入与显式缓冲/I/O 预算；跨 collection 的缓存总容量及 C3-3 完整资源隔离验收仍待完成；该缓存上限不是全服务磁盘或 RSS 硬上限。
+缓存只返回自有字节，不供 mmap；materialize 后的 Segment 位于独立目录，由现有认证流程映射与保护。淘汰、损坏和清空缓存均不删除在用 Segment mmap。预取和直接映射缓存块暂不实现。服务已有分级准入与显式缓冲/I/O 预算，跨 collection 缓存总容量和完整资源隔离验收仍待完成；该缓存上限不是全服务磁盘或 RSS 硬上限。
 
-### 有界后台 cut 发布（PR #75 已合入）
+### 有界后台 cut 发布
 
 `RecordPartition::start_index_committed` 在准入后返回 owned job，`finish` 等待结果；丢弃句柄不取消已接受工作。`index_committed` 是等待式包装。HTTP PATCH 在集合生命周期屏障内启动任务，屏障外等待；已认证任务不因凭据撤销而中断，失败 fence 的输出保护仍保留。
 
@@ -65,9 +65,9 @@ SQLite 新增每 partition 一行 `index_builds`，只保存单调 build epoch�
 
 凭据撤销不排空已认证的数据工作，也不再维护 Grant revision 或 Catalog 输出授权许可。已接收的工作仍归 owned task 所有，调用方取消不提前释放屏障。异常工作只关闭后续 Catalog 操作，不建立新的角色/权限系统；Record 数据保护保持独立。
 
-C3-1 已合入。C3-2 已通过 PR #78 合入，提供前台/恢复/后台分级准入、共享/每集合显式缓冲与 I/O 额度；取消后的 owned task 和传输 Bytes 保留租约。S3 GET 的租约随返回缓冲，而非下载函数返回就结束；PUT 读后验证仍访问远端。能证明 SQLite 发布前的预算拒绝为 Busy，其他不确定错误继续 fenced；既有 reader/build/backup 保护与 GC 闭包不变。默认值与范围见[服务指南](../anyseek/src/server/README.md)。服务缓存总容量及完整 C3-3 隔离验收未完成。
+前台、恢复和后台采用分级准入、共享/每集合显式缓冲与 I/O 额度；取消后的 owned task 和传输 Bytes 保留租约。S3 GET 的租约随返回缓冲，而非下载函数返回就结束；PUT 读后验证仍访问远端。能证明 SQLite 发布前的预算拒绝为 Busy，其他不确定错误继续 fenced；既有 reader/build/backup 保护与 GC 闭包不变。默认值与范围见[服务指南](../anyseek/src/server/README.md)，组合隔离验收见[路线](roadmap.md)。
 
-## 2. 日志与回执历史保留
+## 日志与回执历史保留
 
 完整 checkpoint 包含当前记录的正文/向量/普通元数据、技术版本与墓碑、TTL/时间水位、近期操作回执、认证 GC 切点及独立恢复 scope；不包含业务来源历史。因此 `log_base_seq` 可推进至该 checkpoint cut。新 WAL 链从新 base 开始；旧链的不可变 predecessor 边不修改，仍被备份或其他 pin 保护时不能删除。
 
@@ -75,7 +75,7 @@ C3-1 已合入。C3-2 已通过 PR #78 合入，提供前台/恢复/后台分级
 
 物理删除不只看 indexed seq：checkpoint 已认证的提交基准、幂等及回执裁剪状态、当前存储根、对象引用闭包、读者/构建/备份 pin 必须共同满足。当前单机读者和构建受 partition guard 保护；多节点租约/外部 indexer 尚不在本批。
 
-## 3. 上传、存储引用与 GC
+## 上传、存储引用与 GC
 
 - PUT 前持久登记 key、长度和摘要，响应丢失/进程退出也有可回收的对象身份；上传登记本身不提交记录。
 - 所有远端 checkpoint 成员和 WAL predecessor 均登记依赖，当前 bootstrap 也是 GC root。
@@ -87,7 +87,7 @@ C3-1 已合入。C3-2 已通过 PR #78 合入，提供前台/恢复/后台分级
 
 对象库存与 tombstone 是协调元数据，不是 payload 副本。后续需量化长期元数据规模与冷恢复/对象请求成本；当前不承诺无界容量。
 
-## 4. 共同备份与恢复
+## 共同备份与恢复
 
 ### 备份
 
@@ -111,15 +111,9 @@ metadata snapshot 和 descriptor 使用不可变对象；备份 ID 按 Tenant、
 
 完整服务备份完成后，同一操作重试先核验 manifest 与完成见证，直接返回原回执，避免每次重新物化全部输入而再次超过 HTTP 期限。这是已完成操作的结果查询；恢复仍须重新验证完整归档闭包。未完成的归档继续既有发布/修复协议。
 
-## 维护与独立恢复
+## 维护发布与失败边界
 
-checkpoint 与索引尾段封存仍通过 anchor 发布协议选择权威闭包；S3 模式由 SQLite 选择远端 manifest，旧 owner epoch 和失败后的输出 fencing 继续防止陈旧写者或不可信响应。
-
-独立备份恢复校验源闭包，在目标集合新代次（完整服务恢复使用独立 bucket） 发布完整远端状态后才由 catalog 激活。恢复保留版本和回执、更新历史恢复 scope，不自动恢复历史普通 Key；不能据旧备份证明后续没有删除。
-
-完整服务归档保留 collection 与其备份的恢复输入；普通 restore 的持久意图、备份 pin、私有目录清理和安全对象 GC 仍然有效。
-
-维护审计的发布点与失败边界如下。普通写入和 TTL共用缓存追加入口；SQLite 已明确提交成功时，缓存追加失败返回 `durable_pending` 并保持输出封锁，重开恢复原回执。SQLite 提交结果未知仍为 `outcome_unknown`，不能据此另发新操作。
+S3 模式由 SQLite 选择远端 manifest，owner epoch 与失败 fence 阻止陈旧写者和不可信输出。普通写入和 TTL 共用缓存追加入口；SQLite 已明确提交成功时，缓存追加失败返回 `durable_pending` 并保持输出封锁，重开恢复原回执。SQLite 提交结果未知仍为 `outcome_unknown`，不能据此另发新操作。
 
 | 路径 | 持久发布与恢复依据 | 失败/重试边界 |
 | --- | --- | --- |
@@ -136,7 +130,7 @@ checkpoint 与索引尾段封存仍通过 anchor 发布协议选择权威闭包�
 - `scripts/record_service_smoke.py`：默认本地后端、HTTP、授权与恢复；独立 UI 浏览器流程见[控制台指南](../console/README.md#验证)；`--cold-restarts --section …` 将同一组语义用于 S3，每次重启删除 collection 与 `*.object-cache` 两类缓存。
 - `scripts/s3_storage_smoke.py --faults`：真实服务进程连接可丢弃 HTTP 测试后端，覆盖远端发布前后、缓存追加失败、无缓存查询、历史 GC 切点、四个备份中断边界、恢复重试、独立 GC 和完整服务归档。
 - `scripts/s3_acceptance.py`：统一执行上述存储矩阵、六组共享语义（启用 --faults 时）与不可变对象/共同备份合同；`--backend real` 只接受专用测试配置。命令及报告边界见[开发指南](development.md)。
-- 性能证据入口和未完成验收集中在 [路线与验收证据](roadmap.md)；完整矩阵的触发及覆盖范围见 [CI 指南](ci-validation.md)。旧阶段 CI 不替代当前源码与依赖变更的验证。
+- 性能证据入口和未完成验收集中在[路线](roadmap.md)；完整矩阵的触发及覆盖范围见[开发指南](development.md#完整验收)。旧阶段 CI 不替代当前源码与依赖变更的验证。
 
 HTTP fixture 不等于真实 S3 服务认证，实际 endpoint、系统/文件系统崩溃与硬断电单独待验收。SQLite 为单主机持久卷权威，不提供跨主机 HA 或权威卷丢失零 RPO。
 

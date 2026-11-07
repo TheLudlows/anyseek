@@ -11,7 +11,7 @@ pub(crate) struct NativePackage {
     cut: Cut,
     analysis: [u8; 32],
     #[serde(skip)]
-    pin: Option<Arc<crate::record::package_pins::Pin>>,
+    _pin: Option<Arc<crate::record::package_pins::Pin>>,
 }
 fn fingerprint(config: &RecordConfig) -> Result<[u8; 32], RecordError> {
     Ok(
@@ -128,7 +128,7 @@ impl NativePackage {
                     closure,
                     cut,
                     analysis,
-                    pin: Some(pin),
+                    _pin: Some(pin),
                 })
             };
             handle.block_on(async move {

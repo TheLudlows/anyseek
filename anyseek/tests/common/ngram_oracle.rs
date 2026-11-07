@@ -9,15 +9,15 @@ use anyseek::{
 };
 use serde_json::{Value, json};
 use anyseek::record::{RecordPartition, RecordConfig, RecordQuery, RecordWrite, ExpectedVersion, OperationId};
-const JOURNAL_LIMIT: u64 = 64 * 1024 * 1024;
-async fn create_records(path: &std::path::Path, index: IndexMetaObject, schema: &[anyseek::index::SchemaField]) -> RecordPartition {
+pub(super) const JOURNAL_LIMIT: u64 = 64 * 1024 * 1024;
+pub(super) async fn create_records(path: &std::path::Path, index: IndexMetaObject, schema: &[anyseek::index::SchemaField]) -> RecordPartition {
     RecordPartition::create(path, RecordConfig {
         history: Default::default(), index, schema: schema.to_vec(), embedding_space_id: None,
         max_records: 1000, max_record_bytes: 64*1024, max_operations: 10000,
         max_journal_bytes: JOURNAL_LIMIT, max_candidates: 1000,
     }).await.unwrap()
 }
-async fn add(index: &RecordPartition, docs: &[Value], total: usize) {
+pub(super) async fn add(index: &RecordPartition, docs: &[Value], total: usize) {
     for (ordinal, document) in docs.iter().enumerate() {
         let id = format!("{:020}", total - docs.len() + ordinal);
         index.write(RecordWrite {
@@ -214,91 +214,4 @@ pub async fn exercise(proximity: bool) {
         failures.len(),
         failures.join("\n")
     );
-}
-
-/// Preserve the established committed-DF quantization while refreshing its source.
-pub async fn exercise_quantized_df() {
-    for policy in [
-        FieldLengthNormalization::Shared,
-        FieldLengthNormalization::PerField,
-    ] {
-        let label = format!("component-quantization-{policy:?}-{}", std::process::id());
-        let path = std::env::temp_dir().join(&label);
-        assert!(!path.exists());
-        let meta = IndexMetaObject {
-            name: label,
-            lexical_similarity: LexicalSimilarity::Bm25f,
-            tokenizer: TokenizerType::TantivySimpleV1,
-            text_normalization: TextNormalization::None,
-            field_length_normalization: policy,
-            stop_words: StopwordType::None,
-            frequent_words: FrequentwordType::English,
-            ngram_indexing: 1,
-            clustering: Clustering::None,
-            inference: Inference::None,
-        };
-        let schema: Vec<anyseek::index::SchemaField> = serde_json::from_value(
-            json!([{"field":"a","field_type":"Text","index_lexical":true,"store":false}]),
-        )
-        .unwrap();
-        let mut index = create_records(&path, meta, &schema).await;
-        let mut docs = vec![json!({"a":"of neutral"}); 100];
-        docs[0] = json!({"a":"the of"});
-        add(&index, &docs, 100).await;
-        index.compact_journal().await.unwrap();
-        for stage in 0..6 {
-            if stage == 1 {
-                add(&index, &vec![json!({"a":"of neutral"}); 4], 104).await;
-            }
-            if stage == 2 || stage == 5 {
-                index.compact_journal().await.unwrap();
-            }
-            if stage == 3 {
-
-                drop(index);
-                index = RecordPartition::open(&path, JOURNAL_LIMIT).await.unwrap();
-            }
-            if stage == 4 {
-                add(&index, &[json!({"a":"the of"})], 105).await;
-            }
-            // Record has always used active exact DF, overriding compressed
-            // physical posting DF (legacy Shard::scoring_df with active view).
-            // Retain the boundary-sized corpus, but assert that public contract.
-            let n = if stage == 0 {
-                100.0
-            } else if stage < 4 {
-                104.0
-            } else {
-                105.0
-            };
-            let df_the = if stage < 4 { 1.0 } else { 2.0 };
-            let df_of = n;
-            let expected = ((n - df_the + 0.5) / (df_the + 0.5) + 1.0_f64).ln()
-                + ((n - df_of + 0.5) / (df_of + 0.5) + 1.0_f64).ln();
-            for _repeat in 0..2 {
-                let r = index
-                    .query(RecordQuery {
-                        text: "\"the of\"".into(), vector: None, temporal: None, query_type: QueryType::Union, mode: SearchMode::Lexical, offset: 0, length: 100, result_type: ResultType::TopkCount, fields: vec![], filters: vec![], sort:
-                        vec![],
-                    }).await.unwrap();
-                let want = if stage >= 4 {
-                    vec![0, 104]
-                } else {
-                    vec![0]
-                };
-                assert_eq!(r.hits.iter().map(|x| x.record.record_id.parse::<usize>().unwrap()).collect::<Vec<_>>(), want);
-                assert_eq!(r.count_total, want.len());
-                for hit in r.hits {
-                    assert!(
-                        (hit.score as f64 - expected).abs() < 2e-5,
-                        "stage={stage} got={} expected={expected}",
-                        hit.score
-                    );
-                }
-            }
-        }
-
-        drop(index);
-        std::fs::remove_dir_all(path).unwrap();
-    }
 }

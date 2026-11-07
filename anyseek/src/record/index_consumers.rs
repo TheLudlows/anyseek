@@ -70,13 +70,6 @@ pub(super) struct Input {
     _scope: Option<crate::resources::Lease>,
 }
 impl Input {
-    pub fn admitted(
-        native: &lexical::runtime::Runtime,
-        identity: lexical::Identity,
-        document: &Document,
-    ) -> Result<Self, RecordError> {
-        let mut input=Self::admitted_visible(native,identity,document,None)?;input.publish_native=false;Ok(input)
-    }
     pub fn admitted_visible(native:&lexical::runtime::Runtime,identity:lexical::Identity,document:&Document,visible:Option<lexical::memory::Admission>)->Result<Self,RecordError>{
         // Copy only lexical fields. Vectors and canonical bodies remain owned by
         // their respective components and Record; this is transient work input.
@@ -112,14 +105,6 @@ impl Input {
             _memory: memory,
             _scope: scope,
         })
-    }
-    pub fn vector(
-        config: &RecordConfig,
-        identity: lexical::Identity,
-        ordinal: usize,
-        document: &Document,
-    ) -> Result<Self, RecordError> {
-        Self::vector_with_credit(config,identity,ordinal,document,None)
     }
     pub fn vector_with_credit(config:&RecordConfig,identity:lexical::Identity,ordinal:usize,
         document:&Document,component:Option<ComponentCredit>)->Result<Self,RecordError>{

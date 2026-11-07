@@ -1,6 +1,5 @@
-use anyseek::record::RecordSearch;
 #[path = "common/records.rs"] mod records;
-use anyseek::record::{RecordPartition, RecordQuery};
+use anyseek::record::RecordPartition;
 
 // Stored records remain lossless when presentation leaves the search core.
 use anyseek::server::api_types::{SearchRequestObject, GetDocumentRequest};
@@ -11,18 +10,22 @@ use anyseek::{
     vector::Inference,
 };
 use serde_json::json;
-use std::{collections::HashSet, fs, path::Path, time::Duration};
+use std::{fs, path::Path};
 
 #[test]
 fn retired_presentation_options_are_rejected() {
-    for highlights in [json!([]), json!([{"field":"body","highlight_markup":true}])] {
-        assert!(serde_json::from_value::<SearchRequestObject>(json!({
-            "query":"raw", "highlights":highlights})).is_err());
-        assert!(serde_json::from_value::<GetDocumentRequest>(json!({
-            "highlights":highlights})).is_err());
-    }
-    for query_terms in [json!([]), json!(["raw"])] {
-        assert!(serde_json::from_value::<GetDocumentRequest>(json!({"query_terms":query_terms})).is_err());
+    // Unknown fields are rejected before their values are interpreted.
+    let error = serde_json::from_value::<SearchRequestObject>(json!({
+        "query":"raw", "highlights":[{"field":"body","highlight_markup":true}]
+    })).unwrap_err().to_string();
+    assert!(error.contains("unknown field `highlights`"), "{error}");
+    for (field, value) in [
+        ("highlights", json!([{"field":"body","highlight_markup":true}])),
+        ("query_terms", json!(["raw"])),
+    ] {
+        let error = serde_json::from_value::<GetDocumentRequest>(json!({field:value}))
+            .unwrap_err().to_string();
+        assert!(error.contains(&format!("unknown field `{field}`")), "{error}");
     }
     assert!(serde_json::from_value::<GetDocumentRequest>(json!({})).is_ok());
     assert!(serde_json::from_value::<GetDocumentRequest>(json!({"fields":"body"})).is_ok());
@@ -57,10 +60,10 @@ async fn stored_records_and_projection_survive_reopen() {
         if stage==1 {index.compact_journal().await.unwrap();}
         assert_eq!(index.get("00000000000000000000").await.unwrap().unwrap().document.as_ref(),Some(&input));
     }
-    drop(index);
+    records::close(index).await;
     let reopened=RecordPartition::open(path,records::JOURNAL_LIMIT).await.unwrap();
     assert_eq!(reopened.get("00000000000000000000").await.unwrap().unwrap().document.as_ref(),Some(&input));
     // Presentation projection belongs to HTTP; Record returns exact Payload.
-    drop(reopened);fs::remove_dir_all(path).unwrap();
+    records::close(reopened).await;fs::remove_dir_all(path).unwrap();
 
 }

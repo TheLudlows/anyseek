@@ -86,7 +86,7 @@
   "record::query::tests::independent_lexical_order_joins_by_revision",
   "record::query::tests::captured_candidates_survive_cache_rebuild_with_new_physical_rows",
   "record::query::tests::captured_candidate_rejects_same_body_version_vector_patch",
-  "record::query::tests::candidate_and_filter_revalidation_fence_failed_component_after_capture",
+  "record::query::tests::captured_query_fences_failed_components_and_bounds_output",
   "record::anchor::tests::incomplete_identities_are_rejected_on_package_open",
   "record::maintenance::tests::receipt_gc_checkpoint_recovery_resolves_publication_failures",
   "record::maintenance::tests::receipt_gc_preserves_history_and_retry_window_and_persists_rollback_floor",

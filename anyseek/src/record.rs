@@ -2157,7 +2157,7 @@ mod tests {
         let receipt=p.write(write("unrelated","b","beta",ExpectedVersion::Match(1))).await.unwrap();
         assert_eq!(receipt.version,2,"unrelated expiry must not block ordinary writes");
         assert_eq!(p.inner.lock().await.state.records["a"].version,1);
-        drop(p);std::fs::remove_dir_all(root).unwrap();
+        p.finish_service_shutdown().await.unwrap();drop(p);std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]
@@ -2257,7 +2257,7 @@ mod tests {
         assert!(p.write(bad).await.is_err());
         let mut bad = patch.clone(); bad.expected = ExpectedVersion::Any; assert!(p.write(bad).await.is_err());
         p.inner.lock().await.fail_after_durable = true;
-        assert!(matches!(p.write(patch.clone()).await, Err(RecordError::DurablePending(2)))); drop(p);
+        assert!(matches!(p.write(patch.clone()).await, Err(RecordError::DurablePending(2)))); p.finish_service_shutdown().await.unwrap();drop(p);
         let p = RecordPartition::open(&root, config().max_journal_bytes).await.unwrap();
         assert_eq!(p.write(patch).await.unwrap().version, 1);
         assert_eq!(p.get("r").await.unwrap().unwrap().document.unwrap()["body"], "alpha");
@@ -2266,7 +2266,7 @@ mod tests {
         left.vector_patch = Some(serde_json::from_value(serde_json::json!({"vector":[2.0,0.0]})).unwrap());
         let mut right = left.clone(); right.operation_id = OperationId::new("right".into());
         let (a,b) = tokio::join!(p.write(left),p.write(right)); assert_ne!(a.is_ok(), b.is_ok());
-        drop(p); std::fs::remove_dir_all(root).unwrap();
+        p.finish_service_shutdown().await.unwrap();drop(p); std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]
@@ -2280,12 +2280,12 @@ mod tests {
         let mut delete = write("delete", "s", "", ExpectedVersion::Match(1)); delete.document = None;
         assert!(matches!(p.write(delete).await, Err(RecordError::DurablePending(_))));
         assert!(output.deliver(|| ()).is_err());
-        assert!(p.get("d").await.is_err()); drop(p);
+        assert!(p.get("d").await.is_err()); p.finish_service_shutdown().await.unwrap();drop(p);
         let p = RecordPartition::open(&root, config().max_journal_bytes).await.unwrap();
         assert!(p.get("s").await.unwrap().is_none());
         assert!(p.get("d").await.unwrap().is_some());
         assert_eq!(p.statistics().await.unwrap().active_records, 1);
-        drop(p); std::fs::remove_dir_all(root).unwrap();
+        p.finish_service_shutdown().await.unwrap();drop(p); std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -2499,7 +2499,7 @@ mod tests {
             .unwrap()
             .insert("nested".into(), nested(64));
         partition.write(accepted.clone()).await.unwrap();
-        drop(partition); // Windows enforces the journal owner byte-range lock.
+        partition.finish_service_shutdown().await.unwrap();drop(partition); // Windows enforces the journal owner byte-range lock.
         let wal = std::fs::read(location.join("generation-0000000000000000").join("wal")).unwrap();
         partition = RecordPartition::open(&location, config().max_journal_bytes)
             .await
@@ -2516,7 +2516,7 @@ mod tests {
                 Err(RecordError::Rejected(_))
             ));
             assert_eq!(query(&partition, SearchMode::Lexical).await.visible_seq, 1);
-            drop(partition);
+            partition.finish_service_shutdown().await.unwrap();drop(partition);
             assert_eq!(
                 std::fs::read(location.join("generation-0000000000000000").join("wal")).unwrap(),
                 wal
@@ -2526,7 +2526,7 @@ mod tests {
                 .unwrap();
         }
         partition.checkpoint(&snapshot).await.unwrap();
-        drop(partition);
+        partition.finish_service_shutdown().await.unwrap();drop(partition);
         for directory in [&location, &snapshot] {
             let recovered = RecordPartition::open(directory, config().max_journal_bytes)
                 .await
@@ -2536,7 +2536,7 @@ mod tests {
                 accepted.document
             );
             assert!(recovered.get("bad").await.unwrap().is_none());
-            drop(recovered);
+            recovered.finish_service_shutdown().await.unwrap();drop(recovered);
             std::fs::remove_dir_all(directory).unwrap();
         }
     }
@@ -2617,7 +2617,7 @@ mod tests {
             .write(write("first", "id", "alpha", ExpectedVersion::Absent))
             .await
             .unwrap();
-        drop(partition);
+        partition.finish_service_shutdown().await.unwrap();drop(partition);
         let output = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
                 "--ignored",
@@ -2710,7 +2710,7 @@ mod tests {
             .write(write("first", "id", "alpha", ExpectedVersion::Absent))
             .await
             .unwrap();
-        drop(partition);
+        partition.finish_service_shutdown().await.unwrap();drop(partition);
         let unrelated = location.join("cache-not-a-generation");
         std::fs::create_dir(&unrelated).unwrap();
         for _ in 0..5 {
@@ -2740,7 +2740,7 @@ mod tests {
                     .is_err()
             );
             assert_eq!(query(&recovered, SearchMode::Lexical).await.hits.len(), 1);
-            drop(recovered);
+            recovered.finish_service_shutdown().await.unwrap();drop(recovered);
         }
         std::fs::remove_dir_all(location).unwrap();
     }
@@ -2950,7 +2950,7 @@ mod tests {
             },
         )
         .await;
-        drop(partition);
+        partition.finish_service_shutdown().await.unwrap();drop(partition);
         let restored = RecordPartition::open(&location, config().max_journal_bytes)
             .await
             .unwrap();
@@ -2976,7 +2976,7 @@ mod tests {
             actual.hits[0].record.document,
             expected.hits[0].record.document
         );
-        drop(restored);
+        restored.finish_service_shutdown().await.unwrap();drop(restored);
         std::fs::remove_dir_all(location).unwrap();
     }
 
@@ -3236,12 +3236,12 @@ mod tests {
         .await;
         assert_eq!(result.hits.len(), 1);
         assert_eq!(result.hits[0].record.version, 3);
-        drop(partition);
+        partition.finish_service_shutdown().await.unwrap();drop(partition);
         let restored = RecordPartition::open(&location, 128 * 1024 * 1024)
             .await
             .unwrap();
         assert_eq!(restored.get("a").await.unwrap().unwrap().version, 3);
-        drop(restored);
+        restored.finish_service_shutdown().await.unwrap();drop(restored);
         std::fs::remove_dir_all(location).unwrap();
     }
 
@@ -3341,7 +3341,7 @@ mod tests {
                     .await,
                 Err(RecordError::RecoveryRequired)
             ));
-            drop(partition);
+            partition.finish_service_shutdown().await.unwrap();drop(partition);
             let restored = RecordPartition::open(&location, config().max_journal_bytes)
                 .await
                 .unwrap();
@@ -3358,7 +3358,7 @@ mod tests {
             .await;
             assert_eq!(result.hits.len(), 1);
             assert_eq!(result.hits[0].record.version, 2);
-            drop(restored);
+            restored.finish_service_shutdown().await.unwrap();drop(restored);
             std::fs::remove_dir_all(location).unwrap();
         }
     }
@@ -3511,7 +3511,7 @@ mod tests {
                 assert_eq!(result.statistics.physical_versions, 5);
                 partition.inner.lock().await.index.test_index().commit().await.unwrap();
             } else if step == 1 {
-                drop(partition);
+                partition.finish_service_shutdown().await.unwrap();drop(partition);
                 partition = RecordPartition::open(&location, config().max_journal_bytes)
                     .await
                     .unwrap();
@@ -3528,7 +3528,7 @@ mod tests {
                     .unwrap();
             }
         }
-        drop(partition);
+        partition.finish_service_shutdown().await.unwrap();drop(partition);
         std::fs::remove_dir_all(location).unwrap();
     }
 
@@ -3609,7 +3609,7 @@ mod tests {
                 );
             }
             let expected = ranked(&partition, "alpha beta", SearchMode::Lexical, 10).await;
-            drop(partition);
+            partition.finish_service_shutdown().await.unwrap();drop(partition);
             let recovered = RecordPartition::open(&location, config().max_journal_bytes)
                 .await
                 .unwrap();
@@ -3617,8 +3617,8 @@ mod tests {
                 ranked(&recovered, "alpha beta", SearchMode::Lexical, 10).await,
                 expected
             );
-            drop(recovered);
-            drop(clean);
+            recovered.finish_service_shutdown().await.unwrap();drop(recovered);
+            clean.finish_service_shutdown().await.unwrap();drop(clean);
             std::fs::remove_dir_all(location).unwrap();
             std::fs::remove_dir_all(clean_location).unwrap();
         }
@@ -3844,7 +3844,7 @@ mod tests {
             mutation::PreparedWrite::Replay(_)=>panic!("unexpected replay"),
         };
         remote.commit(&applied,&bytes).await.unwrap();
-        drop(source);
+        source.finish_service_shutdown().await.unwrap();drop(source);
         std::fs::remove_dir_all(&source_path).unwrap();
 
         let recovered=RecordPartition::open_s3_with_remote(
@@ -3858,7 +3858,7 @@ mod tests {
         let mut tombstone=write("delete-remote","b","",ExpectedVersion::Match(1));
         tombstone.document=None;
         recovered.write(tombstone).await.unwrap();
-        drop(recovered);
+        recovered.finish_service_shutdown().await.unwrap();drop(recovered);
         std::fs::remove_dir_all(&target_path).unwrap();
 
         // Reopen from a missing local cache. SQLite/S3 bootstrap plus committed
@@ -3879,7 +3879,7 @@ mod tests {
         assert_eq!(recovered.get("a").await.unwrap().unwrap().document.unwrap()["body"],"alpha remote updated");
         assert!(recovered.get("b").await.unwrap().is_none());
         assert_eq!(recovered.statistics().await.unwrap().visible_seq,4);
-        drop(recovered);
+        recovered.finish_service_shutdown().await.unwrap();drop(recovered);
         std::fs::remove_dir_all(&target_path).unwrap();
         let _=std::fs::remove_file(&authority_path);
         let _=std::fs::remove_file(authority_path.with_extension("sqlite-wal"));

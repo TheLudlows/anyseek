@@ -13,7 +13,7 @@ use anyseek::{
     vector::Inference,
 };
 use serde_json::{Value, json};
-use std::{collections::HashSet, fs, path::Path, time::Duration};
+use std::{fs, path::Path, time::Duration};
 
 fn schema() -> Vec<SchemaField> {
     serde_json::from_value(json!([
@@ -46,7 +46,7 @@ async fn create(path: &Path) -> RecordPartition {
     records::create(path, meta, (&schema()).to_vec()).await
 }
 
-async fn search(index: &RecordPartition, options: Value, realtime: bool) -> RecordSearch {
+async fn search(index: &RecordPartition, options: Value) -> RecordSearch {
     let mut value =
         json!({"query":"common", "length":20, "sort":[{"field":"price","order":"Ascending"}]});
     value
@@ -84,8 +84,8 @@ async fn search(index: &RecordPartition, options: Value, realtime: bool) -> Reco
     result
 }
 
-async fn check_prices(index: &RecordPartition, options: Value, realtime: bool, expected: &[f64]) {
-    let result = search(index, options.clone(), realtime).await;
+async fn check_prices(index: &RecordPartition, options: Value, expected: &[f64]) {
+    let result = search(index, options.clone()).await;
     assert_eq!(result.count_total, expected.len(), "{options}");
     let mut prices = Vec::new();
     for result in result.hits {
@@ -95,20 +95,18 @@ async fn check_prices(index: &RecordPartition, options: Value, realtime: bool, e
     assert_eq!(prices, expected, "{options}");
 }
 
-async fn check_metadata(index: &RecordPartition, realtime: bool) {
-    check_prices(index, json!({}), realtime, &[10., 20., 30., 40.]).await;
-    check_prices(index, json!({"query":""}), realtime, &[10., 20., 30., 40.]).await;
+async fn check_metadata(index: &RecordPartition, stage: &str) {
+    check_prices(index, json!({}), &[10., 20., 30., 40.]).await;
+    check_prices(index, json!({"query":""}), &[10., 20., 30., 40.]).await;
     check_prices(
         index,
         json!({"query":"alpha beta","operator":"or"}),
-        realtime,
         &[10., 20., 30., 40.],
     )
     .await;
     check_prices(
         index,
         json!({"query":"common alpha","operator":"and"}),
-        realtime,
         &[10., 30.],
     )
     .await;
@@ -134,7 +132,6 @@ async fn check_metadata(index: &RecordPartition, realtime: bool) {
             check_prices(
                 index,
                 json!({"query":query,"operator":"or","filter":[filter.clone()]}),
-                realtime,
                 &expected,
             )
             .await;
@@ -146,29 +143,27 @@ async fn check_metadata(index: &RecordPartition, realtime: bool) {
             {"String":{"field":"category","filter":["a"]}},
             {"Float":{"field":"price","filter":{"start":20.,"end":40.}}}
         ]}),
-        realtime,
         &[30.],
     )
     .await;
     check_prices(
         index,
         json!({"sort":[{"field":"date","order":"Descending"}]}),
-        realtime,
         &[40., 30., 20., 10.],
     )
     .await;
-    check_prices(index,json!({"sort":[{"field":"category","order":"Ascending"},{"field":"price","order":"Descending"}]}),realtime,&[30.,10.,40.,20.]).await;
+    check_prices(index,json!({"sort":[{"field":"category","order":"Ascending"},{"field":"price","order":"Descending"}]}),&[30.,10.,40.,20.]).await;
     // Cover both single-term-per-shard and multi-term-per-shard union paths.
     for query in ["alpha beta", "north south"] {
         for result_type in ["Count", "TopkCount"] {
             for filtered in [false, true] {
                 let result = search(index,json!({"query":query,"operator":"or","result_type":result_type,
-                    "filter": if filtered { json!([{"String":{"field":"category","filter":["a"]}}]) } else { json!([]) }}),realtime).await;
+                    "filter": if filtered { json!([{"String":{"field":"category","filter":["a"]}}]) } else { json!([]) }})).await;
                 let per_bin = if filtered { 1 } else { 2 };
                 assert_eq!(
                     result.count_total,
                     2 * per_bin,
-                    "{query} {result_type} realtime={realtime}"
+                    "{query} {result_type} stage={stage}"
                 );
             }
         }
@@ -214,20 +209,20 @@ async fn ordinary_metadata_survives_aggregate_removal() {
         records::insert(&index, vec![doc]).await.unwrap();
     }
     for _ in 0..200 {
-        if search(&index, json!({}), true).await.count_total == 4 {
+        if search(&index, json!({})).await.count_total == 4 {
             break;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    check_metadata(&index, true).await;
+    check_metadata(&index, "unsealed").await;
     index.compact_journal().await.unwrap();
-    check_metadata(&index, false).await;
-    drop(index);
+    check_metadata(&index, "checkpoint").await;
+    records::close(index).await;
     let reopened = RecordPartition::open(path, records::JOURNAL_LIMIT)
         .await
         .unwrap();
-    check_metadata(&reopened, false).await;
-    drop(reopened);
+    check_metadata(&reopened, "reopened").await;
+    records::close(reopened).await;
     fs::remove_dir_all(path).unwrap();
 
 }
@@ -384,15 +379,13 @@ async fn scalar_boundaries_nulls_and_sets_survive_wal_and_checkpoint() {
             (json!({"StringSet":{"field":"tags","filter":["a_b"]}}), 1),
             (json!({"StringSet":{"field":"tags","filter":["b_c"]}}), 1),
         ] {
-            let result = search(index, json!({"filter":[filter]}), true).await;
+            let result = search(index, json!({"filter":[filter]})).await;
             assert_eq!(result.count_total, count);
         }
         for order in ["Ascending", "Descending"] {
             let result = search(
                 index,
-                json!({"sort":[{"field":"rank","order":order}]}),
-                true,
-            )
+                json!({"sort":[{"field":"rank","order":order}]}))
             .await;
             let ranks: Vec<_> = result
                 .hits
@@ -422,13 +415,13 @@ async fn scalar_boundaries_nulls_and_sets_survive_wal_and_checkpoint() {
         }
     }
     verify(&index).await;
-    drop(index);
+    records::close(index).await;
     let index = RecordPartition::open(&path, records::JOURNAL_LIMIT)
         .await
         .unwrap();
     verify(&index).await;
     index.compact_journal().await.unwrap();
-    drop(index);
+    records::close(index).await;
     let index = RecordPartition::open(&path, records::JOURNAL_LIMIT)
         .await
         .unwrap();
@@ -466,7 +459,7 @@ async fn empty_string_sets_sort_with_nulls_after_wal_and_checkpoint_recovery() {
         ] {
             for query in ["common", ""] {
                 for length in [1, 3, 20] {
-                    let result = search(index, json!({"query":query,"length":length,"sort":[{"field":"tags","order":order},{"field":"rank","order":"Ascending"}]}), true).await;
+                    let result = search(index, json!({"query":query,"length":length,"sort":[{"field":"tags","order":order},{"field":"rank","order":"Ascending"}]})).await;
                     let ranks: Vec<_> = result
                         .hits
                         .iter()
@@ -487,13 +480,13 @@ async fn empty_string_sets_sort_with_nulls_after_wal_and_checkpoint_recovery() {
         }
     }
     verify(&index).await;
-    drop(index);
+    records::close(index).await;
     let index = RecordPartition::open(&path, records::JOURNAL_LIMIT)
         .await
         .unwrap();
     verify(&index).await;
     index.compact_journal().await.unwrap();
-    drop(index);
+    records::close(index).await;
     let index = RecordPartition::open(&path, records::JOURNAL_LIMIT)
         .await
         .unwrap();

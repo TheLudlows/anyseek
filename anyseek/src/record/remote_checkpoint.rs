@@ -33,7 +33,9 @@ struct IndexOnly {
     packages:Vec<segment::Package>,statistics:Vec<crate::active::ActiveStatistics>,files:Vec<File>,
 }
 struct Selected {
-    checkpoint:Checkpoint,checkpoint_ref:ObjectRef,index:Option<IndexOnly>,
+    checkpoint:Checkpoint,index:Option<IndexOnly>,
+    #[cfg(test)]
+    checkpoint_ref:ObjectRef,
     _metadata:Vec<crate::storage::build_budget::MemoryLease>,
 }
 fn safe_path(root: &Path, relative: &str) -> Result<PathBuf, RecordError> {
@@ -124,7 +126,7 @@ impl RemotePersistence {
         };
         let mut leases=vec![charge(bytes.len())?];
         let format:Header=serde_json::from_slice(&bytes).map_err(storage)?;
-        let (checkpoint,checkpoint_ref,index)=match format.format {
+        let (checkpoint,_checkpoint_ref,index)=match format.format {
             1=>(serde_json::from_slice::<Checkpoint>(&bytes).map_err(storage)?,selected.clone(),None),
             2=>{
                 let index:IndexOnly=serde_json::from_slice(&bytes).map_err(storage)?;
@@ -145,7 +147,9 @@ impl RemotePersistence {
             || checkpoint.seq!=head.log_base_seq || (index.is_none() && checkpoint.seq!=head.indexed_seq) {
             return Err(storage("invalid selected recovery checkpoint"));
         }
-        Ok(Selected{checkpoint,checkpoint_ref,index,_metadata:leases})
+        Ok(Selected{checkpoint,index,_metadata:leases,
+            #[cfg(test)] checkpoint_ref:_checkpoint_ref,
+        })
     }
     async fn verify_index_cut(&self,root:&Path,index:&mut IndexOnly,
         head:&crate::storage::sqlite_authority::PartitionHead,committed_tip:Option<ObjectRef>,
@@ -360,6 +364,8 @@ impl RemotePersistence {
         Ok((files,lease))
     }
 
+    // Build persisted index-only fixtures; production only reads this format.
+    #[cfg(test)]
     pub(super) async fn publish_derived_index(&mut self,root:&Path,config:&RecordConfig,state:&State,
         packages:Vec<segment::Package>,statistics:Vec<crate::active::ActiveStatistics>)->Result<(),RecordError> {
         let mut authority=self.authority.lock().await;
@@ -1889,6 +1895,7 @@ mod tests {
             .write(write("new", "b", "alpha target", ExpectedVersion::Absent))
             .await
             .unwrap();
+        restored.finish_service_shutdown().await.unwrap();
         drop(restored);
         let restored = RecordPartition::restore_s3_with_remote(
             &restored_root,
@@ -2462,6 +2469,8 @@ fn remote_read_error(error:object_store::Error)->RecordError {
 }
 
 impl Inner {
+    // Build persisted index-only fixtures; production only reads this format.
+    #[cfg(test)]
     pub(super) async fn publish_remote_index_tail(&mut self)->Result<(),RecordError> {
         if self.remote.is_none(){return Ok(());}
         let bytes=self.index.statistics_wire_length().await?;

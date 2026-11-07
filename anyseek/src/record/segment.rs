@@ -190,7 +190,7 @@ mod tests {
     }
     #[tokio::test]
     async fn shared_segment_statistics_match_effective_corpus_after_mutations() {
-        use super::super::tests::{path,config,write,query};
+        use super::super::tests::{path,config,write};
         let roots=[path(),path(),path()];
         let a=RecordPartition::create(&roots[0],config()).await.unwrap();
         let b=RecordPartition::create(&roots[1],config()).await.unwrap();

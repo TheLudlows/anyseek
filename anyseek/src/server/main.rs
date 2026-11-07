@@ -38,7 +38,7 @@ fn read_master_secret(value: Result<String, env::VarError>) -> Result<String, &'
     Ok(secret)
 }
 
-use anyseek::server::{api_schema, api_types};
+use anyseek::server::api_types;
 mod record_service;
 #[doc(hidden)]
 mod server;
