@@ -41,8 +41,8 @@ impl Runtime {
         let temporary=65536u64.checked_add(count.checked_mul(256).ok_or_else(||storage("visible manifest overflow"))?).and_then(|n|n.checked_add(id_bytes.checked_mul(8)?)).ok_or_else(||storage("visible manifest overflow"))?;
         let fields=self.config.schema.iter().filter(|field|field.index_lexical).count() as u64;
         let snapshot=65536u64.checked_add(count.checked_mul(128+fields*32).ok_or_else(||storage("visible snapshot overflow"))?).and_then(|n|n.checked_add(id_bytes)).ok_or_else(||storage("visible snapshot overflow"))?;
-        let row=RowWorkspace{analysis:Charge::admit(analysis_bytes)?,identity:Charge::admit(256+identity_bytes)?};
-        let publication=PublishWorkspace{temporary:Charge::admit(temporary)?,snapshot:Charge::admit(snapshot)?};
+        let row=RowWorkspace{analysis:crate::record::build_budget::admit_retained_memory(analysis_bytes)?,identity:crate::record::build_budget::admit_retained_memory(256+identity_bytes)?};
+        let publication=PublishWorkspace{temporary:crate::record::build_budget::admit_retained_memory(temporary)?,snapshot:crate::record::build_budget::admit_retained_memory(snapshot)?};
         let writer=match state.writer.upgrade(){Some(writer)=>writer,None=>self.directory.as_ref().ok_or_else(||storage("immutable progress reservation"))?.prepare_writer(WRITER_BYTES as u64)?};
         // Publish accounting only after every fallible admission. Cancellation
         // refunds the entire plan; no worker waits for later memory occupancy.
@@ -167,7 +167,8 @@ impl Runtime {
             {
                 let mut state=self.live.lock().map_err(|_|RecordError::RecoveryRequired)?;
                 if state.rows.len()<rows.len() || !state.rows.iter().zip(&rows).all(|(a,b)|Arc::ptr_eq(a,b)){return Err(storage("visible materialization prefix changed"));}
-                for row in state.rows.drain(..rows.len()).collect::<Vec<_>>(){state.bytes-=row.reservation.bytes;}
+                let released=state.rows.drain(..rows.len()).map(|row|row.reservation.bytes).sum::<u64>();
+                state.bytes-=released;
                 state.base=Some(snapshot.clone());
                 *self.published.write().map_err(|_|RecordError::RecoveryRequired)?=Some(Self::with_delta(&snapshot,&state.rows)?);
                 #[cfg(feature="fault-injection")]
@@ -183,9 +184,16 @@ impl Runtime {
         self.join_visible().await?;self.append_inner(identity,document,true,false,None,None).await
     }
     pub(crate) async fn join_visible(&self)->Result<(),RecordError>{
+        self.wait_visible().await?;
+        let state=self.live.lock().map_err(|_|RecordError::RecoveryRequired)?;
+        if state.error.is_some(){Err(RecordError::RecoveryRequired)}else{Ok(())}
+    }
+    // Authority-only backups need quiescent I/O, even when this disposable
+    // cache failed. Keep health validation in join_visible for index callers.
+    pub(crate) async fn wait_visible(&self)->Result<(),RecordError>{
         loop {
             let notified=self.live_done.notified();tokio::pin!(notified);notified.as_mut().enable();
-            {let state=self.live.lock().map_err(|_|RecordError::RecoveryRequired)?;if !state.running{return if state.error.is_some(){Err(RecordError::RecoveryRequired)}else{Ok(())};}}
+            {let state=self.live.lock().map_err(|_|RecordError::RecoveryRequired)?;if !state.running{return Ok(());}}
             notified.await;
         }
     }

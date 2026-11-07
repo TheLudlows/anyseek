@@ -847,6 +847,44 @@ mod tests {
             }
         }
     }
+    #[cfg(feature="fault-injection")]
+    #[tokio::test(flavor="multi_thread",worker_threads=2)]
+    async fn backup_joins_materializer_io_without_requiring_healthy_indexes() {
+        let scope=Arc::new(crate::resources::Governor::default())
+            .admit("backup-io".into(),crate::resources::Lane::Background,0).unwrap();
+        scope.clone().run(async {
+            let (p,_store,_root,_db,_clock)=source().await;
+            let native=p.inner.lock().await.index.test_index().read().await.segments[0].lexical.clone();
+            let pause=native.package_path().join(".test-visible-pause");
+            std::fs::write(&pause,b"pause").unwrap();
+            let request=write("backup-io","a","alpha",ExpectedVersion::Absent);
+            let receipt=p.write(request.clone()).await.unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(5),async {
+                while !pause.with_extension("started").exists(){tokio::task::yield_now().await;}
+            }).await.unwrap();
+            let held=scope.journal_io().await.unwrap();
+            std::fs::remove_file(pause).unwrap();
+            let backup=p.create_s3_backup("wait-io",100,1024*1024);
+            tokio::pin!(backup);
+            assert!(tokio::time::timeout(std::time::Duration::from_millis(30),&mut backup).await.is_err(),
+                "backup waits for its materializer instead of competing for the occupied I/O slot");
+            drop(held);
+            let (json,seq,_)=tokio::time::timeout(std::time::Duration::from_secs(10),&mut backup).await.unwrap().unwrap();
+            assert_eq!(seq,receipt.seq);
+            let bundle:crate::storage::s3_compatible::BackupBundle=serde_json::from_str(&json).unwrap();
+            let store=p.inner.lock().await.remote.as_ref().unwrap().store.clone();
+            let metadata=store.get_verified(&bundle.descriptor.metadata_snapshot).await.unwrap();
+            let snapshot:crate::storage::sqlite_authority::AuthorityBackupSnapshot=serde_json::from_slice(&metadata).unwrap();
+            assert_eq!(snapshot.heads[0].committed_seq,receipt.seq);
+            p.indexes.fail("disposable index failed after the committed cut");
+            let (_,seq,_)=p.create_s3_backup("failed-index",101,1024*1024).await.unwrap();
+            assert_eq!(seq,receipt.seq);
+            assert!(p.committed_progress().await.index_error.is_some(),"backup does not clear the failure fence");
+            assert_eq!(p.operation(&request.operation_id).await.unwrap(),Some(receipt));
+            p.finish_service_shutdown().await.unwrap();
+        }).await;
+    }
+
     #[tokio::test]
     async fn write_upload_unwind_fences_before_the_next_writer() {
         let (p,_store,root,_db,_clock)=source().await;

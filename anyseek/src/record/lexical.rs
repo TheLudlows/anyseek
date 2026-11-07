@@ -326,13 +326,8 @@ impl Candidate {
             .checked_mul(8)
             .and_then(|n| n.checked_add(64 * 1024))
             .ok_or_else(|| storage("lexical reader estimate overflow"))?;
-        let memory = crate::storage::build_budget::reserve_memory(estimate).map_err(storage)?;
         let scope = crate::resources::Scope::current();
-        let buffer = scope
-            .as_ref()
-            .map(|s| s.bytes(estimate))
-            .transpose()
-            .map_err(storage)?;
+        let memory = crate::resources::MemoryReservation::new(estimate,scope.as_ref()).map_err(storage)?;
         let _io = scope
             .as_ref()
             .map(|s| s.io())
@@ -419,7 +414,6 @@ impl Candidate {
             addresses:Arc::new(addresses),
             lengths:Arc::new(lengths),
             _memory:Arc::new(memory),
-            _buffer:buffer.map(Arc::new),
             _pin: None,
             _directory_owner: None,
         })
@@ -442,8 +436,7 @@ pub(super) struct Snapshot {
     addresses: Arc<Vec<Vec<usize>>>,
     lengths: Arc<Vec<Vec<Vec<u64>>>>,
     // Declared after native handles so the charge outlives their destruction.
-    _memory: Arc<crate::storage::build_budget::MemoryLease>,
-    _buffer: Option<Arc<crate::resources::Lease>>,
+    _memory: Arc<crate::resources::MemoryReservation>,
     _pin: Option<Arc<super::package_pins::Pin>>,
     _directory_owner: Option<directory::DirectoryOwner>,
 }

@@ -27,10 +27,7 @@ struct Ledger {
     written: u64,
     paths: BTreeSet<PathBuf>,
 }
-pub(super) struct WriterReservation {
-    _memory: crate::storage::build_budget::MemoryLease,
-    _buffer: Option<resources::Lease>,
-}
+pub(super) type WriterReservation = resources::MemoryReservation;
 struct Budget {
     io_gate: Arc<Mutex<()>>,
     cancelled: std::sync::atomic::AtomicBool,
@@ -40,15 +37,14 @@ struct Budget {
     failed_writes: std::sync::atomic::AtomicUsize,
     pin: Mutex<Option<Arc<crate::record::package_pins::Pin>>>,
     writer_memory: Mutex<Option<Arc<WriterReservation>>>,
-    pending_analysis: Mutex<Vec<WriterReservation>>,
+    pending_analysis: Mutex<Vec<resources::MemoryReservation>>,
     ledger: Mutex<Ledger>,
     bytes: u64,
     files: usize,
     scope: Option<resources::Scope>,
     // Native workers own Directory clones, so even an early error cannot free
     // the reservation while an internal worker still owns the candidate.
-    _memory: crate::storage::build_budget::MemoryLease,
-    _buffer: Option<resources::Lease>,
+    _memory: resources::MemoryReservation,
     // Directory clones retain the OS owner lock after a public handle drops.
     partition_owner: Mutex<Option<Arc<std::fs::File>>>,
 }
@@ -161,10 +157,7 @@ impl BudgetDirectory {
         if self.selected {return Err(storage("immutable native package"));}
         let reservation=self.budget.writer_memory.lock().map_err(|_|storage("native writer reservation poisoned"))?;
         if let Some(owner)=reservation.as_ref(){return Ok(owner.clone());}
-        crate::storage::build_budget::validate_single(bytes).map_err(storage)?;
-        let memory=crate::storage::build_budget::reserve_memory(bytes).map_err(crate::record::memory_error)?;
-        let buffer=self.budget.scope.as_ref().map(|scope|scope.bytes(bytes)).transpose().map_err(|error|if error.is_recoverable(){RecordError::Busy}else{storage(error)})?;
-        Ok(Arc::new(WriterReservation{_memory:memory,_buffer:buffer}))
+        Ok(Arc::new(crate::record::build_budget::admit_memory(bytes,self.budget.scope.as_ref())?))
     }
     pub(super) fn install_writer(&self,prepared:Arc<WriterReservation>)->Result<(),RecordError>{
         let mut reservation=self.budget.writer_memory.lock().map_err(|_|storage("native writer reservation poisoned"))?;
@@ -177,9 +170,8 @@ impl BudgetDirectory {
         if self.selected{return Err(storage("immutable native package"));}
         let mut reservation=self.budget.writer_memory.lock().map_err(|_|storage("native writer reservation poisoned"))?;
         if reservation.is_none(){
-            let memory=crate::storage::build_budget::reserve_memory(bytes).map_err(storage)?;
-            let buffer=self.budget.scope.as_ref().map(|scope|scope.bytes(bytes)).transpose().map_err(storage)?;
-            *reservation=Some(Arc::new(WriterReservation{_memory:memory,_buffer:buffer}));
+            let memory=resources::MemoryReservation::new(bytes,self.budget.scope.as_ref()).map_err(storage)?;
+            *reservation=Some(Arc::new(memory));
         }
         Ok(())
     }
@@ -187,11 +179,10 @@ impl BudgetDirectory {
     /// retain these leases through Directory clones, even if joining fails.
     pub(super) fn retain_analysis(
         &self,
-        memory: crate::storage::build_budget::MemoryLease,
-        buffer: Option<resources::Lease>,
+        memory: resources::MemoryReservation,
     ) -> Result<(), RecordError> {
         self.budget.pending_analysis.lock().map_err(|_| storage("native analysis ownership poisoned"))?
-            .push(WriterReservation { _memory: memory, _buffer: buffer });
+            .push(memory);
         Ok(())
     }
     /// A successful commit has joined the workers consuming the previous queue.
@@ -237,8 +228,7 @@ impl BudgetDirectory {
                 metadata=length.checked_mul(8).and_then(|n|metadata.checked_add(n)).ok_or_else(||storage("native selected metadata overflow"))?;
             }
         }
-        let memory=crate::storage::build_budget::reserve_memory(metadata).map_err(storage)?;
-        let buffer=scope.as_ref().map(|s|s.bytes(metadata)).transpose().map_err(storage)?;
+        let memory=resources::MemoryReservation::new(metadata,scope.as_ref()).map_err(storage)?;
         let inner=MmapDirectory::open(path).map_err(storage)?;
         drop(gate);drop(io);
         Ok(Self {inner,selected:true,budget:Arc::new(Budget {
@@ -247,7 +237,7 @@ impl BudgetDirectory {
             #[cfg(test)] fail_writes: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)] failed_writes: std::sync::atomic::AtomicUsize::new(0),
             pin:Mutex::new(None),partition_owner:Mutex::new(None),writer_memory:Mutex::new(None),pending_analysis:Mutex::new(Vec::new()),ledger:Mutex::new(Ledger {written:0,paths:BTreeSet::new()}),bytes:0,files:1,scope,
-            _memory:memory,_buffer:buffer,
+            _memory:memory,
         })})
     }
     fn with_scope(
@@ -261,12 +251,7 @@ impl BudgetDirectory {
         if std::fs::read_dir(path).map_err(storage)?.next().is_some() {
             return Err(storage("native candidate directory must be empty"));
         }
-        let memory = crate::storage::build_budget::reserve_memory(memory_bytes).map_err(storage)?;
-        let buffer = scope
-            .as_ref()
-            .map(|s| s.bytes(memory_bytes))
-            .transpose()
-            .map_err(storage)?;
+        let memory = resources::MemoryReservation::new(memory_bytes,scope.as_ref()).map_err(storage)?;
         Ok(Self {
             inner: MmapDirectory::open(path).map_err(storage)?,
             selected: false,
@@ -284,7 +269,6 @@ impl BudgetDirectory {
                 files,
                 scope,
                 _memory: memory,
-                _buffer: buffer,
             }),
         })
     }
@@ -492,7 +476,7 @@ mod tests {
         let directory=BudgetDirectory::persistent(&root.0,1024,8,0).unwrap();
         directory.retain_pin(crate::record::package_pins::Pin::acquire(&[root.0.clone()]).unwrap()).unwrap();
         directory.admit_writer(20_000_000).unwrap();
-        directory.retain_analysis(crate::storage::build_budget::reserve_memory(4096).unwrap(), None).unwrap();
+        directory.retain_analysis(resources::MemoryReservation::new(4096,None).unwrap()).unwrap();
         let worker=directory.clone();drop(directory);
         assert!(worker.budget.writer_memory.lock().unwrap().is_some());
         assert_eq!(worker.budget.pending_analysis.lock().unwrap().len(), 1);

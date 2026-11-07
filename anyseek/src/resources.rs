@@ -6,6 +6,8 @@
 //! workers; ordinary admission, bytes, and I/O requests still refuse immediately.
 use std::{collections::BTreeMap, future::Future, sync::{Arc, Condvar, LazyLock, Mutex, atomic::{AtomicBool, Ordering}}};
 pub(crate) mod lifecycle;
+mod memory;
+pub(crate) use memory::{MemoryError, MemoryReservation};
 pub use lifecycle::{Activity, Lifecycle, Task};
 
 /// Independent resource classes. Control capacity is never lent to data work.
@@ -172,16 +174,6 @@ impl Governor {
 }
 /// A reservation released only when its actual owner is dropped.
 pub struct Lease { governor: Arc<Governor>, subject: String, lane: Lane, amount: Usage }
-impl Lease {
-    /// Extend a retained byte reservation before its owner allocates more storage.
-    pub(crate) fn grow_bytes(&mut self, bytes: u64) -> Result<(), Busy> {
-        let next = self.amount.bytes.checked_add(bytes).ok_or_else(|| Busy::new("class=byte_overflow"))?;
-        let mut added = self.governor.reserve(&self.subject, self.lane, Usage { bytes, ..Usage::default() })?;
-        self.amount.bytes = next;
-        added.amount.bytes = 0;
-        Ok(())
-    }
-}
 impl Drop for Lease {
     fn drop(&mut self) {
         let mut ledger = self.governor.ledger.lock().unwrap_or_else(|e| e.into_inner());
@@ -212,6 +204,14 @@ impl JournalIo {
         let result = JOURNAL_IO.scope(self.scope.clone(), work).await;
         drop(self);
         result
+    }
+}
+/// File-only phases share one permit across their synchronous leaves. Native
+/// indexing and network work must stay outside this transaction.
+pub(crate) async fn file_transaction<T>(work: impl FnOnce() -> T) -> Result<T, Busy> {
+    match Scope::current() {
+        Some(scope) if !scope.has_file_io_loan() => Ok(scope.journal_io().await?.run(work)),
+        _ => Ok(work()),
     }
 }
 impl Scope {
@@ -340,6 +340,7 @@ mod tests {
                 assert!(scope.has_file_io_loan());
                 tokio::task::yield_now().await;
                 assert!(scope.file_io().unwrap().is_none());
+                file_transaction(|| assert!(scope.file_io().unwrap().is_none())).await.unwrap();
                 let child_scope = scope.clone();
                 assert!(spawn(async move {
                     !child_scope.has_file_io_loan() && child_scope.file_io().is_err()
@@ -447,20 +448,6 @@ mod tests {
         assert!(governor.admit("other".into(), Lane::Foreground, 1).is_err());
         assert!(governor.admit("a".into(), Lane::Control, 1).is_ok());
         drop(cold); drop(hot);
-        assert!(governor.ledger.lock().unwrap().subjects.is_empty());
-    }
-    #[test]
-    fn retained_bytes_grow_atomically_and_release_the_full_reservation() {
-        let governor = Arc::new(Governor::default());
-        let scope = governor.admit("native-identities".into(), Lane::Background, 0).unwrap();
-        let cap = governor.limits[Lane::Background.index()].subject_bytes;
-        let mut bytes = scope.bytes(cap - 1).unwrap();
-        assert!(bytes.grow_bytes(2).is_err());
-        bytes.grow_bytes(1).unwrap();
-        assert!(scope.bytes(1).is_err());
-        drop(bytes);
-        assert!(scope.bytes(cap).is_ok());
-        drop(scope);
         assert!(governor.ledger.lock().unwrap().subjects.is_empty());
     }
     // The async block intentionally yields the spawned handle so the ledger can be

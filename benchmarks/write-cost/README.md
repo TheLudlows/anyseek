@@ -36,6 +36,19 @@ python benchmarks/write-cost/summarize.py /dev/shm/write-cost-allocation
 
 ## 测量与验证口径
 
+### 写入发布路径的小规模检查
+
+`publication_probe.py` 使用 Python 标准库，可在 Windows/Linux 对固定的两个服务二进制分别执行。每组新建临时 local 根，三次预热后记录逐次 HTTP 延迟及 Busy 原请求重试，并验证查询计数和回执重放；每个批量默认三个独立进程。失败即停止，只有报告的 `all_requested_runs_completed=true` 才表示全部请求场景完成。
+
+```sh
+python benchmarks/write-cost/publication_probe.py --binary /absolute/before --out target/publication-before.json
+python benchmarks/write-cost/publication_probe.py --binary /absolute/after --out target/publication-after.json
+```
+
+先完成构建，再串行运行，输出路径须不存在；报告记录二进制 SHA-256。这个入口仅测新库、无向量的顺序同步新增，不代表历史规模、混合负载、饱和吞吐或生产尾延迟；debug 测量不能代替 release 与代表性持久设备验收。它与下述 #191 历史矩阵分别解释。
+
+### #191 历史矩阵
+
 - 标准 10k 档、1k/5k 初始记录、相同 249–251B 正文和 32 维预生成向量。初始数据只用 before 创建、checkpoint 并正常关闭；每次从逐文件 SHA-256 相同的副本开始。记录/回执保留使用默认两日，没有跨保留期 GC 或外部 embedding 服务成本。
 - 新增无向量正文 → Match(1) 向量补写（正文版本保持 1）→ Match(1) 替换正文与向量（版本 2）→ Match(2) 删除（版本 3）。固定 ID/Operation ID/批顺序；每种操作 5 个预热请求，单条 128 个正式请求、batch16 40 个正式请求。初始记录不变，同一临时记录集合完成四步。
 - 每个容量、批量、端点按 before/after/latest、latest/after/before 运行两个独立进程/版本。分位数在**单进程单场景**内计算，再报告两个进程指标的中位数；40 个 batch16 请求的 p99 实际就是最大值，不能当稳定生产尾部估计。

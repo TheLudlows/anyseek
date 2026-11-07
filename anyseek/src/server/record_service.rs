@@ -1137,23 +1137,6 @@ async fn batch(
     let p = s.record(&key, &id).await?;
     #[cfg(feature = "fault-injection")]
     let pause_collection = id.clone();
-    if request.writes.len() == 1 {
-        let write = request.writes.into_iter().next().unwrap();
-        let result = s.catalog.authorized_generation(key, id, p.generation, move |_| async move {
-            #[cfg(feature = "fault-injection")]
-            pause_authorized_for_test(&pause_collection).await?;
-            let operation_id = write.operation_id.clone();
-            let row = match p.write(write).await {
-                Ok(receipt) => json!({"operation_id":operation_id,"receipt":receipt,"code":"applied","expires_at":operation_id.expires_at_unix_seconds()}),
-                Err(error) => {
-                    let error = Error::from(error);
-                    json!({"operation_id":operation_id,"code":error.1,"message":error.2,"status":error.0.as_u16()})
-                }
-            };
-            Ok::<_, RecordError>(json!({"atomic":false,"results":[row]}))
-        }).await?;
-        return response(result.map_err(Error::from)?);
-    }
     let result = s.catalog.authorized_generation(key, id, p.generation, move |_| async move {
         #[cfg(feature = "fault-injection")]
         pause_authorized_for_test(&pause_collection).await?;
@@ -1169,17 +1152,14 @@ async fn batch(
                 for write in chunk { rows.push(json!({"operation_id":write.operation_id,"code":"not_attempted"})); }
                 continue;
             }
-            let (items, stop) = if chunk.len() == 1 {
-                // Preserve the existing single-write path without queue overhead.
-                (vec![CommittedItem::NotAttempted], None)
-            } else { match p.write_batch(&chunk).await {
+            let (items, stop) = match p.write_batch(&chunk).await {
                 Ok(batch) => (batch.results, batch.stop),
                 // Group admission/size rejection did not attempt publication.
                 // Fall back to independent writes, preserving their own limits.
                 Err(error @ (RecordError::Busy | RecordError::Rejected(_))) => (
                     chunk.iter().map(|_| CommittedItem::NotAttempted).collect(), Some(error)),
                 Err(error) => (chunk.iter().map(|_| CommittedItem::OutcomeUnknown).collect(), Some(error)),
-            }};
+            };
             let interrupted = stop.as_ref().is_some_and(stops_batch);
             let regroup = matches!(stop, Some(RecordError::Busy));
             let mut stop_reported = false;

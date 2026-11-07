@@ -45,13 +45,8 @@ impl NativePackage {
             )?)
             .ok_or_else(|| storage("native analysis estimate overflow"))
         })?;
-        let memory = crate::storage::build_budget::reserve_memory(estimate).map_err(storage)?;
         let scope = crate::resources::Scope::current();
-        let buffer = scope
-            .as_ref()
-            .map(|s| s.bytes(estimate))
-            .transpose()
-            .map_err(storage)?;
+        let memory = crate::resources::MemoryReservation::new(estimate,scope.as_ref()).map_err(storage)?;
         // Dictionary construction and token buffers start only after admission.
         let analyzer = super::query::Analyzer::new(config.index.clone())?;
         for (identity, document) in records {
@@ -96,7 +91,7 @@ impl NativePackage {
         // synchronous native writer. Its scope and leases live in this worker.
         crate::resources::spawn_blocking(move || {
             let work = async move {
-                let (_owner, _memory, _buffer) = (owner, memory, buffer);
+                let (_owner, _memory) = (owner, memory);
                 let _disk =
                     crate::storage::build_budget::ensure_scope(&root, limit).map_err(storage)?;
                 // The worker exclusively owns this randomly named candidate.

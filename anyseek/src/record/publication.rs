@@ -26,13 +26,10 @@ impl replay::Context<'_> {
             // Admit the full temporal/index input before cloning it. Five
             // bounded synthetic time fields add at most 8 KiB at the same 32x
             // logical expansion. Queue projections and analysis own other leases.
-            let (_input, _scope) = (|| -> Result<_, RecordError> {
+            let _input = (|| -> Result<_, RecordError> {
                 let bytes = build_budget::document_estimate(document, &[])?
                     .checked_add(8192).ok_or_else(|| storage("index input estimate overflow"))?;
-                let input = crate::storage::build_budget::reserve_memory(bytes).map_err(storage)?;
-                let scope = crate::resources::Scope::current()
-                    .map(|scope| scope.bytes(bytes)).transpose().map_err(storage)?;
-                Ok((input, scope))
+                crate::resources::MemoryReservation::new(bytes,crate::resources::Scope::current().as_ref()).map_err(storage)
             })().map_err(|error| {
                 log::error!("Record input admission failed at sequence {}: {:?}", receipt.seq, error);
                 RecordError::DurablePending(receipt.seq)

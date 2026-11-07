@@ -1165,6 +1165,9 @@ impl RecordPartition {
         if !inner.healthy {
             return Err(RecordError::RecoveryRequired);
         }
+        // The backup reads SQLite/S3 authority, independently of index health.
+        // Join admitted index I/O before competing for the same subject permit.
+        inner.index.join_pending_io().await?;
         let remote = inner.remote.as_mut().ok_or_else(|| RecordError::Rejected(
             "partition is not using S3 storage".into()
         ))?;
@@ -1450,15 +1453,17 @@ impl RecordPartition {
         let indexes = index_consumers::Cursors::recovered(inner.state.seq);
         Ok(Self {output,indexes,committed_queue:Arc::default(),writer:Arc::new(Mutex::new(())),inner:Arc::new(Mutex::new(inner)),admission:Arc::new(Semaphore::new(16))})
     }
-    /// Commit one Record operation and synchronously publish its index inputs.
+    /// Execute a one-item synchronous batch: success is durable and searchable.
     /// Dropping this future does not cancel an already spawned operation; query
     /// its original operation ID after an uncertain result.
     pub async fn write(&self, request: RecordWrite) -> Result<WriteReceipt, RecordError> {
-        let mut batch = self
-            .execute_writes(vec![request], write::IndexDelivery::Synchronous)
-            .await?;
-        if let Some(result) = batch.results.pop() {
-            return result;
+        let mut batch = committed::execute_with_delivery(
+            self.clone(), vec![request], write::IndexDelivery::Synchronous, None,
+        ).await?;
+        match batch.results.pop() {
+            Some(CommittedItem::Committed(receipt)) => return Ok(receipt),
+            Some(CommittedItem::Rejected(error)) => return Err(error),
+            _ => {},
         }
         Err(batch
             .stop
@@ -1842,6 +1847,7 @@ mod tests {
         let result = query(&p, SearchMode::Vector { similarity_threshold: None, ann_mode: AnnMode::All }).await;
         assert_eq!(result.hits.len(), 1);
         assert_eq!(result.hits[0].record.document.as_ref(), Some(&original));
+        p.finish_service_shutdown().await.unwrap();
         drop(p);
         std::fs::remove_dir_all(location).unwrap();
     }
@@ -1900,7 +1906,7 @@ mod tests {
         let temporary=tempfile::tempdir().unwrap();let root=temporary.path().join("records");
         let p=RecordPartition::create(&root,config()).await.unwrap();let (clock,now)=test_clock(&p).await;
         let seed=write("seed","seed","alpha",ExpectedVersion::Absent);let receipt=p.write(seed.clone()).await.unwrap();
-        // Hold both asynchronous consumers to make their owner lifetime observable.
+        // Arm both consumers: discarded writes and exact replays need no work.
         for lane in ["lexical","vector"] {
             std::fs::write(root.join(format!(".test-{lane}-consumer-pause")),b"pause").unwrap();
         }
@@ -1921,9 +1927,7 @@ mod tests {
         assert!(matches!(&result.results[..],[CommittedItem::Committed(r),CommittedItem::NotAttempted] if r==&receipt));
         assert!(p.operation(&request.operation_id).await.unwrap().is_none());
         {let inner=p.inner.lock().await;assert!(inner.background.is_none());assert!(!inner.maintenance_scheduled);assert!(inner.maintenance_requested.is_none());}
-        assert_eq!(Arc::strong_count(&p.inner),3,"partition plus the two paused consumers");
-        // A committed response does not join index workers, even for an empty
-        // publication. Explicitly finish owned consumers before testing reopen.
+        assert_eq!(Arc::strong_count(&p.inner),1,"no consumer task for an unchanged committed cut");
         for lane in ["lexical","vector"] {
             std::fs::remove_file(root.join(format!(".test-{lane}-consumer-pause"))).unwrap();
         }
@@ -2049,7 +2053,7 @@ mod tests {
         let sorted=p.query(q).await.unwrap();assert_eq!(sorted.hits.len(),1);assert_eq!(sorted.hits[0].channels[0].rank_basis,"requested_order");assert_eq!(sorted.hits[0].channels[0].rank,1);
         let browse=p.search(String::new(),None,SearchMode::Lexical,vec![],10).await.unwrap();assert!(browse.hits.iter().all(|h|h.channels[0].channel=="browse"&&h.channels[0].raw_score.is_none()));
         p.compact_journal().await.unwrap();drop(p);let p=RecordPartition::open(&root,config().max_journal_bytes).await.unwrap();let restored=query(&p,SearchMode::Hybrid{similarity_threshold:None,ann_mode:AnnMode::All, rrf: Default::default() }).await;assert!(restored.hits.iter().all(|h|h.channels.len()==2));
-        drop(p);std::fs::remove_dir_all(root).unwrap();
+        p.finish_service_shutdown().await.unwrap();drop(p);std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]
@@ -2073,7 +2077,7 @@ mod tests {
         clock.set(now+7*86_400_000);settle_maintenance(&p).await;
         let inner=p.inner.lock().await;assert!(inner.healthy);assert_eq!(inner.state.history.floor,0);
         assert!(inner.state.records["t"].expired_at_ms.is_some());drop(inner);
-        drop(p);std::fs::remove_dir_all(root).unwrap();
+        p.finish_service_shutdown().await.unwrap();drop(p);std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]
@@ -2179,7 +2183,7 @@ mod tests {
         p.compact_journal().await.unwrap();drop(p);let p=RecordPartition::open(&root,config().max_journal_bytes).await.unwrap();
         let result=p.query(RecordQuery {temporal:Some(TemporalFilter {event:Some(TimeRange::default()),..Default::default()}),text:"alpha".into(),vector:None,mode:SearchMode::Lexical,query_type:QueryType::Intersection,offset:0,length:0,result_type:ResultType::TopkCount,fields:vec![],filters:vec![],sort:vec![]}).await.unwrap();
         assert_eq!(result.count_total,2); assert!(result.hits.is_empty());
-        drop(p);std::fs::remove_dir_all(root).unwrap();
+        p.finish_service_shutdown().await.unwrap();drop(p);std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]
@@ -2206,7 +2210,7 @@ mod tests {
         p.compact_journal().await.unwrap();drop(p);
         let p=RecordPartition::open(&root,config().max_journal_bytes).await.unwrap();
         assert_eq!(p.get("s").await.unwrap().unwrap().version,5);
-        drop(p);std::fs::remove_dir_all(root).unwrap();
+        p.finish_service_shutdown().await.unwrap();drop(p);std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]
@@ -2244,7 +2248,7 @@ mod tests {
         late.vector_patch = Some(serde_json::from_value(serde_json::json!({"vector":[2.0,0.0]})).unwrap());
         assert!(p.write(late).await.is_err());
         assert_eq!(p.record_status("s").await.unwrap().unwrap().visibility, RecordVisibility::Visible);
-        drop(p); std::fs::remove_dir_all(root).unwrap(); std::fs::remove_dir_all(archive).unwrap();
+        p.finish_service_shutdown().await.unwrap();drop(p); std::fs::remove_dir_all(root).unwrap(); std::fs::remove_dir_all(archive).unwrap();
     }
     #[tokio::test]
     async fn optional_vectors_pending_recovery_and_race() {
@@ -2323,7 +2327,7 @@ mod tests {
             let inner = current.inner.lock().await;
             encode_entry(&Entry::Checkpoint { config:inner.config.clone(), state:inner.state.try_clone().unwrap() }).unwrap()
         };
-        drop(current); std::fs::remove_dir_all(&root).unwrap();
+        current.finish_service_shutdown().await.unwrap();drop(current); std::fs::remove_dir_all(&root).unwrap();
         let legacy = String::from_utf8(checkpoint).unwrap().replacen("RecordCheckpointV19", "RecordCheckpointV17", 1);
         let journal = PartitionJournal::create(&root, cfg.max_journal_bytes, legacy.as_bytes()).unwrap(); drop(journal);
         let error = RecordPartition::open(&root, cfg.max_journal_bytes).await.err().unwrap();
@@ -3187,6 +3191,9 @@ mod tests {
             native.flush().await.unwrap();
             shard.write().await.admission.set_bulk(false).unwrap();
             inner.locations.insert("a".into(), 65535);
+            // Raw fixture rows bypass the view's ordinal reservations. Rebuild
+            // that derived view before returning to authoritative publication.
+            inner.index=view::RetrievalView::single(inner.index.test_index().clone());
         }
         partition
             .write(write(
@@ -3397,6 +3404,7 @@ mod tests {
                 <= 4000
         );
         assert_eq!(query(&partition, SearchMode::Lexical).await.hits.len(), 1);
+        partition.finish_service_shutdown().await.unwrap();
         drop(partition);
         std::fs::remove_dir_all(location).unwrap();
     }
@@ -3662,6 +3670,8 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         assert_eq!(scores(actual), scores(expected));
+        partition.finish_service_shutdown().await.unwrap();
+        clean.finish_service_shutdown().await.unwrap();
         drop(partition);
         drop(clean);
         std::fs::remove_dir_all(path).unwrap();
@@ -3800,6 +3810,7 @@ mod tests {
             partition.write(expired).await.unwrap_err(),
             RecordError::OperationExpired
         );
+        partition.finish_service_shutdown().await.unwrap();
         drop(partition);
         std::fs::remove_dir_all(path).unwrap();
     }

@@ -8,7 +8,7 @@ impl Input {
         identity: lexical::Identity,
         document: &Document,
     ) -> Result<Self, RecordError> {
-        let mut input=Self::admitted_visible(native,identity,document,None)?;input.publish_native=false;Ok(input)
+        Self::admitted_visible(native,identity,document,None)
     }
     fn vector(
         config: &RecordConfig,

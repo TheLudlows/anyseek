@@ -69,10 +69,19 @@ impl RetrievalView {
         for native in runtimes {native.join_visible().await?;}
         Ok(())
     }
-    pub(super) async fn shutdown_workers(&self) -> Result<(), RecordError> {
+    async fn join_consumers(&self) -> Result<(), RecordError> {
         let vector = if let Some(worker) = &self.vector { worker.join_worker().await } else { Ok(()) };
         let lexical = if let Some(worker) = &self.lexical { worker.join_worker().await } else { Ok(()) };
-        vector.and(lexical)?;
+        vector.and(lexical)
+    }
+    pub(super) async fn join_pending_io(&self) -> Result<(),RecordError> {
+        self.join_consumers().await?;
+        let runtimes:Vec<_>=self.query.read().await.segments.iter().map(|s|s.lexical.clone()).collect();
+        for native in runtimes {native.wait_visible().await?;}
+        Ok(())
+    }
+    pub(super) async fn shutdown_workers(&self) -> Result<(), RecordError> {
+        self.join_consumers().await?;
         for index in [&self.query, &self.tail] {
             for segment in &index.read().await.segments {segment.admission.close();}
             let runtimes: Vec<_> = index.read().await.segments.iter().map(|segment| segment.lexical.clone()).collect();
@@ -670,8 +679,12 @@ mod tests {
             oracle.write(request).await.unwrap();
         }
         async fn rotate(partition: &RecordPartition, root: &Path) {
+            super::super::tests::wait_maintenance_idle(partition).await;
+            let _writer=partition.writer.lock().await;
             let mut inner = partition.inner.lock().await;
-            let target = root.join(format!("cache-{:032x}", rand::random::<u128>()));
+            inner.index.drain_indexes().await.unwrap();
+            inner.index.join_materializers().await.unwrap();
+            let target = root.join(format!("segment-{:032x}", rand::random::<u128>()));
             let (tail, _) = build_at(root, &target, &inner.config, &State::default())
                 .await
                 .unwrap();
