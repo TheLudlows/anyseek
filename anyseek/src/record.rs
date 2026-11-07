@@ -36,6 +36,7 @@ mod query;
 mod query_output;
 pub use query_output::QueryRecord;
 mod replay;
+mod proof_decode;
 mod indexer;
 mod maintenance;
 mod cache_merge;
@@ -91,6 +92,12 @@ impl std::fmt::Display for RecordError {
 impl std::error::Error for RecordError {}
 fn storage(error: impl std::fmt::Display) -> RecordError {
     RecordError::Storage(error.to_string())
+}
+
+// Only pure memory admission uses this classification. I/O, serialization,
+// permanent size bounds and corruption retain their original failure policy.
+pub(crate) fn memory_error(error:std::io::Error)->RecordError {
+    if crate::storage::build_budget::is_shared_memory_pressure(&error){RecordError::Busy}else{storage(error)}
 }
 
 /// Immutable collection configuration, persisted with authoritative state.
@@ -316,8 +323,9 @@ struct Inner {
     fail_after_durable: bool,
     #[cfg(test)]
     fail_publication_stage: u8,
-    // Fields drop in declaration order: release all index/mmap handles before
-    // releasing the partition lock, so a concurrent opener can clean caches.
+    // Fields drop in declaration order: release owned index/mmap handles before
+    // this journal reference. Background native writers and their fixed readers
+    // retain the same owner lock independently until their handles are gone.
     journal: PartitionJournal,
 }
 // A permit may outlive the last partition handle. It must not survive owner
@@ -851,8 +859,8 @@ async fn build_records_at(path:&Path,cache:&Path,config:&RecordConfig,sequence:u
     .await?;
     // Break legacy ownership cycles so a rejected candidate can release mapped
     // files on Windows. The partition owns the root for the complete query.
-    index.read().await.segments[0].vector.write().await.build_reservation=Some(reservation);
-    index.read().await.segments[0].vector.write().await.build_input_covered=true;
+    index.read().await.segments[0].vector.write().await.admission.install(reservation).map_err(storage)?;
+    index.read().await.segments[0].vector.write().await.admission.set_bulk(true).map_err(storage)?;
     for shard in &index.read().await.segments {
         let mut shard=shard.vector.write().await;
         shard.active=Some(crate::active::ActiveStatistics::default());
@@ -895,7 +903,7 @@ async fn build_records_at(path:&Path,cache:&Path,config:&RecordConfig,sequence:u
     log::info!("record_build stage=lexical_finished records={} elapsed_ms={}",records.len(),finish_started.elapsed().as_millis());
     index.commit().await.map_err(storage)?;
     log::info!("record_build stage=component_committed records={} elapsed_ms={}",records.len(),finish_started.elapsed().as_millis());
-    index.read().await.segments[0].vector.write().await.build_input_covered=false;
+    index.read().await.segments[0].vector.write().await.admission.set_bulk(false).map_err(storage)?;
     Ok((
         index,
         records.into_iter().map(|r| r.record_id.clone()).collect(),
@@ -1419,12 +1427,22 @@ impl RecordPartition {
                 #[cfg(test)]
                 fail_publication_stage: 0,
             };
+        let replayed_tail=!pending.is_empty();
         for entry in pending {
             inner.replay_anchor_tail(entry).await?;
+            #[cfg(feature="fault-injection")]
+            if std::env::var("ANYSEEK_RECOVERY_CRASH_SEQ").ok().and_then(|s|s.parse::<u64>().ok())==Some(inner.state.seq){std::process::abort();}
             #[cfg(test)]
             if path.join(".test-recovery-after-derived-seal").exists() && inner.index.detached_cache {
                 return Err(storage("injected recovery interruption after derived seal"));
             }
+        }
+        if replayed_tail {
+            #[cfg(feature="fault-injection")]
+            if std::env::var("ANYSEEK_RECOVERY_CRASH_STAGE").as_deref()==Ok("before_native_flush"){std::process::abort();}
+            inner.index.flush_replayed_native().await?;
+            #[cfg(feature="fault-injection")]
+            if std::env::var("ANYSEEK_RECOVERY_CRASH_STAGE").as_deref()==Ok("after_native_flush"){std::process::abort();}
         }
         validate_restored_state(&inner.config,&inner.state)?;
         history::validate_state(&inner.state)?;
@@ -1717,7 +1735,7 @@ mod tests {
         let receipt = receipt.unwrap();
         assert_eq!(receipt.seq, 1);
         assert_eq!(query(&p, SearchMode::Lexical).await.hits.len(), 1);
-        drop(p);
+        p.finish_service_shutdown().await.unwrap();drop(p);
         let p = scope.clone().run(RecordPartition::open(&location, config().max_journal_bytes)).await.unwrap();
         assert_eq!(scope.run(p.write(request)).await.unwrap(), receipt);
         assert_eq!(p.get("a").await.unwrap().unwrap().version, 1);
@@ -1912,7 +1930,7 @@ mod tests {
         p.inner.lock().await.index.drain_indexes().await.unwrap();
         assert_eq!(Arc::strong_count(&p.inner),1,"consumer joins must release both owners");
         let owner=Arc::downgrade(&p.inner);
-        drop(p);
+        p.finish_service_shutdown().await.unwrap();drop(p);
         assert!(owner.upgrade().is_none(),"no partition owner remains before reopen");
         let p=RecordPartition::open(&root,config().max_journal_bytes).await.unwrap();
         assert_eq!(p.write(seed).await.unwrap(),receipt);
@@ -1920,8 +1938,14 @@ mod tests {
     }
 
     pub(super) async fn commit_after_backpressure(p: &RecordPartition, requests: Vec<RecordWrite>) {
-        tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        // Test-only failure evidence: do not acquire a potentially blocked lock
+        // while diagnosing a timeout, and do not extend the original deadline.
+        use std::sync::atomic::{AtomicUsize,Ordering};
+        let stage=AtomicUsize::new(0);
+        let attempts=AtomicUsize::new(0);
+        let result=tokio::time::timeout(std::time::Duration::from_secs(20), async {
             loop {
+                stage.store(1,Ordering::Relaxed);attempts.fetch_add(1,Ordering::Relaxed);
                 match p.commit_writes(requests.clone()).await {
                     Ok(batch) => {
                         assert!(batch.results.iter().all(|item| matches!(item, CommittedItem::Committed(_) | CommittedItem::NotAttempted)));
@@ -1935,11 +1959,24 @@ mod tests {
                     Err(error) => panic!("unexpected commit error: {error:?}"),
                 }
                 // Retry the same operation IDs: a committed prefix is replayed.
+                stage.store(2,Ordering::Relaxed);
                 wait_maintenance_idle(p).await;
-                p.inner.lock().await.index.drain_indexes().await.unwrap();
+                stage.store(3,Ordering::Relaxed);
+                let mut inner=p.inner.lock().await;
+                stage.store(4,Ordering::Relaxed);
+                inner.index.drain_indexes().await.unwrap();drop(inner);
+                stage.store(5,Ordering::Relaxed);
                 tokio::time::sleep(std::time::Duration::from_millis(5)).await;
             }
-        }).await.expect("bounded committed backpressure retry");
+        }).await;
+        if result.is_err() {
+            let writer=p.writer.try_lock().is_ok();
+            let state=p.inner.try_lock().map(|inner|(inner.state.seq,inner.healthy,
+                inner.maintenance_requested,inner.maintenance_scheduled,inner.background.is_some()));
+            panic!("bounded committed backpressure retry: deadline_ms=20000 stage={} attempts={} writer_available={writer} inner={state:?} memory_used={}",
+                stage.load(Ordering::Relaxed),attempts.load(Ordering::Relaxed),
+                crate::storage::build_budget::used_memory_for_test());
+        }
     }
     pub(super) async fn write_after_maintenance(p:&RecordPartition,request:RecordWrite)->Result<WriteReceipt,RecordError> {
         tokio::time::timeout(std::time::Duration::from_secs(20),async {
@@ -2053,7 +2090,7 @@ mod tests {
         {let _writer=p.writer.lock().await;let mut inner=p.inner.lock().await;
             assert!(matches!(inner.expire_due().await,Err(RecordError::DurablePending(2))));}
         assert!(matches!(p.get("plain").await,Err(RecordError::RecoveryRequired)));
-        drop(p); let p=RecordPartition::open(&root,config().max_journal_bytes).await.unwrap();
+        p.finish_service_shutdown().await.unwrap();drop(p); let p=RecordPartition::open(&root,config().max_journal_bytes).await.unwrap();
         let (clock,_)=test_clock(&p).await;
         assert!(p.get("plain").await.unwrap().is_none());
         assert_eq!(p.inner.lock().await.state.records["plain"].version,2);
@@ -2062,11 +2099,11 @@ mod tests {
         let reuse=write("reuse","plain","beta",ExpectedVersion::Absent);
         let receipt=p.write(reuse.clone()).await.unwrap();assert_eq!(receipt.version,3);
         assert_eq!(p.write(reuse.clone()).await.unwrap(),receipt);
-        p.compact_journal().await.unwrap();drop(p);
+        p.compact_journal().await.unwrap();p.finish_service_shutdown().await.unwrap();drop(p);
         let p=RecordPartition::open(&root,config().max_journal_bytes).await.unwrap();
         assert_eq!(p.write(reuse).await.unwrap(),receipt);
         assert_eq!(p.get("plain").await.unwrap().unwrap().document.unwrap()["body"],"beta");
-        drop(p); std::fs::remove_dir_all(root).unwrap();
+        p.finish_service_shutdown().await.unwrap();drop(p); std::fs::remove_dir_all(root).unwrap();
     }
     #[tokio::test]
     async fn ttl_backup_cut_is_immutable_and_long_identity_rejected() {
@@ -2651,7 +2688,7 @@ mod tests {
             .write(write("first", "id", "alpha", ExpectedVersion::Absent))
             .await
             .unwrap();
-        drop(partition);
+        partition.finish_service_shutdown().await.unwrap();drop(partition);
         let output = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
                 "--ignored",
@@ -2998,7 +3035,7 @@ mod tests {
             let partition = RecordPartition::create(&location, config()).await.unwrap();
             let first = write("first", "a", "alpha original", ExpectedVersion::Absent);
             let receipt = partition.write(first.clone()).await.unwrap();
-            drop(partition);
+            partition.finish_service_shutdown().await.unwrap();drop(partition);
             let output = std::process::Command::new(std::env::current_exe().unwrap())
                 .args([
                     "--ignored",
@@ -3036,7 +3073,7 @@ mod tests {
                 .unwrap();
             // Prove recovery did not keep writing an older generation which a
             // second recovery would ignore in favor of an uncertified directory.
-            drop(restored);
+            restored.finish_service_shutdown().await.unwrap();drop(restored);
             let restored = RecordPartition::open(&location, config().max_journal_bytes)
                 .await
                 .unwrap();
@@ -3046,7 +3083,7 @@ mod tests {
                 "{stage}"
             );
             assert_eq!(query(&restored, SearchMode::Lexical).await.hits.len(), 1);
-            drop(restored);
+            restored.finish_service_shutdown().await.unwrap();drop(restored);
             std::fs::remove_dir_all(location).unwrap();
         }
     }
@@ -3060,7 +3097,7 @@ mod tests {
                 .write(write("a", "a", "alpha", ExpectedVersion::Absent))
                 .await
                 .unwrap();
-            drop(partition);
+            partition.finish_service_shutdown().await.unwrap();drop(partition);
             let worker = || {
                 let mut command = std::process::Command::new(std::env::current_exe().unwrap());
                 command
@@ -3092,12 +3129,12 @@ mod tests {
                 .write(write("b", "a", "alpha new", ExpectedVersion::Match(1)))
                 .await
                 .unwrap();
-            drop(recovered);
+            recovered.finish_service_shutdown().await.unwrap();drop(recovered);
             let recovered = RecordPartition::open(&location, config().max_journal_bytes)
                 .await
                 .unwrap();
             assert_eq!(recovered.get("a").await.unwrap().unwrap().version, 2);
-            drop(recovered);
+            recovered.finish_service_shutdown().await.unwrap();drop(recovered);
             std::fs::remove_dir_all(location).unwrap();
         }
     }
@@ -3126,7 +3163,7 @@ mod tests {
             let mut inner = partition.inner.lock().await;
             let shard = inner.index.test_index().read().await.segments[0].vector.clone();
             let native=inner.index.test_index().read().await.segments[0].lexical.clone();
-            shard.write().await.build_input_covered=true;
+            shard.write().await.admission.set_bulk(true).unwrap();
             for id in 1..65536 {
                 native.append(lexical::Identity{id:"a".into(),version:id as u64+1,revision:0},&original.document.clone().unwrap(),false).await.unwrap();
                 shard
@@ -3148,7 +3185,7 @@ mod tests {
                 inner.ordinals.push("a".into());
             }
             native.flush().await.unwrap();
-            shard.write().await.build_input_covered=false;
+            shard.write().await.admission.set_bulk(false).unwrap();
             inner.locations.insert("a".into(), 65535);
         }
         partition
@@ -3216,7 +3253,7 @@ mod tests {
             .write(write("a", "a", "alpha", ExpectedVersion::Absent))
             .await
             .unwrap();
-        drop(partition);
+        partition.finish_service_shutdown().await.unwrap();drop(partition);
         let worker = || {
             let mut command = std::process::Command::new(std::env::current_exe().unwrap());
             command
@@ -3266,12 +3303,12 @@ mod tests {
             .write(write("b", "a", "alpha new", ExpectedVersion::Match(1)))
             .await
             .unwrap();
-        drop(recovered);
+        recovered.finish_service_shutdown().await.unwrap();drop(recovered);
         let recovered = RecordPartition::open(&location, config().max_journal_bytes)
             .await
             .unwrap();
         assert_eq!(recovered.get("a").await.unwrap().unwrap().version, 2);
-        drop(recovered);
+        recovered.finish_service_shutdown().await.unwrap();drop(recovered);
         std::fs::remove_dir_all(location).unwrap();
     }
 
@@ -3666,6 +3703,15 @@ mod tests {
                 ))
                 .await
                 .unwrap();
+            // A successful visible write may still own native materialization.
+            // Finish setup in this process before handing the path to a child:
+            // package pins cannot protect its cache from another process's GC.
+            {
+                let inner=partition.inner.lock().await;
+                inner.index.drain_indexes().await.unwrap();
+                inner.index.join_materializers().await.unwrap();
+            }
+            partition.finish_service_shutdown().await.unwrap();
             drop(partition);
             let output = std::process::Command::new(std::env::current_exe().unwrap())
                 .args(["--ignored", "--exact", "record::tests::record_crash_worker"])
@@ -3707,6 +3753,12 @@ mod tests {
                     .version,
                 2
             );
+            {
+                let inner=recovered.inner.lock().await;
+                inner.index.drain_indexes().await.unwrap();
+                inner.index.join_materializers().await.unwrap();
+            }
+            recovered.finish_service_shutdown().await.unwrap();
             drop(recovered);
             std::fs::remove_dir_all(path).unwrap();
         }

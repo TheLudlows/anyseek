@@ -295,6 +295,7 @@ impl RecordPartition {
                     return Err(RecordError::RecoveryRequired);
                 }
                 inner.observe_time()?;
+                inner.index.attach_cursors(partition.indexes.clone());
                 let buffered = !matches!(delivery, IndexDelivery::Synchronous);
                 let synchronous = !matches!(delivery, IndexDelivery::Asynchronous);
                 if synchronous {
@@ -611,7 +612,17 @@ impl RecordPartition {
                 // TTL decision. Unrelated expired bodies await background GC.
                 let prior_deadline=input.previous
                     .filter(|r|temporal::visible(r,evaluation_time_ms)).and_then(|r|r.temporal.expire_at_ms);
-                let prepared = state_memory::Prepared::from_previous(input.previous, applied)?;
+                let mut prepared = state_memory::Prepared::from_previous(input.previous, applied)?;
+                if let Some(document)=&prepared.record.document {
+                    prepared.component=Some(inner.index.reserve_component(&prepared.record,&inner.config).await?);
+                    prepared.lexical=Some(if growth<=crate::storage::build_budget::EXPLICIT_BUFFERS {
+                        lexical::memory::Admission::Visible(inner.index.reserve_visible(document,&inner.config,&prepared.record.record_id,inner.journal.owner_guard()).await?)
+                    }else{
+                        // Later escrows must count this row even while an
+                        // asynchronous fallback has not published its base yet.
+                        lexical::memory::Admission::Fallback(inner.index.reserve_fallback(&prepared.record,inner.journal.owner_guard()).await?)
+                    });
+                }
                 let next_deadline=Some(&*prepared.record)
                     .filter(|r|r.document.is_some()).and_then(|r|r.temporal.expire_at_ms);
                 let container = candidate.advance(&input, applied, &prepared, *snapshot_bytes)?;
@@ -722,6 +733,8 @@ impl RecordPartition {
             matches!(plan, mutation::PreparedWrite::Append { applied, .. } if &applied.request.operation_id.nonce == nonce)))
             .and_then(|_|std::env::var("ANYSEEK_RECORD_FAULT").ok());
         #[cfg(feature = "fault-injection")]
+        if injected.as_deref() == Some("crash_before_append") {std::process::exit(86);}
+        #[cfg(feature = "fault-injection")]
         if injected.as_deref() == Some("busy_before_append") {
             return Err(RecordError::Busy);
         }
@@ -747,6 +760,7 @@ impl RecordPartition {
             let remote = inner.remote.as_mut().ok_or(RecordError::RecoveryRequired)?;
             uploaded.publish(remote).await?;
         }
+        inner.index.attach_cursors(self.indexes.clone());
         inner.append_operations(&payloads, sequence).await?;
         #[cfg(feature = "fault-injection")]
         if let Some(path) = std::env::var_os("ANYSEEK_RECORD_BATCH_TRACE") {
@@ -871,6 +885,205 @@ mod tests {
         assert_eq!(p.write(request).await.unwrap(),receipt);
     }
 
+    // Exercise cancellation at the Record ownership boundary, after the actual
+    // native add, rather than cancelling Runtime's own result receiver.
+    async fn owned_fallback_caller_cancellation(asynchronous:bool) {
+        let directory=tempfile::tempdir().unwrap();let root=directory.path().join("records");
+        let mut settings=config();settings.max_record_bytes=512*1024;settings.max_journal_bytes=16*1024*1024;
+        let p=RecordPartition::create(&root,settings.clone()).await.unwrap();
+        let native=p.inner.lock().await.index.test_index().read().await.segments[0].lexical.clone();
+        let gate=native.package_path().join(".test-fallback-native-block");
+        let vector_pause=root.join(".test-vector-consumer-pause");
+        std::fs::write(&gate,b"pause").unwrap();std::fs::write(&vector_pause,b"pause").unwrap();
+        let request=write("owned-large","large",&"alpha ".repeat(50_000),ExpectedVersion::Absent);
+        assert!(build_budget::document_estimate(request.document.as_ref().unwrap(),&settings.schema).unwrap()
+            >crate::storage::build_budget::EXPLICIT_BUFFERS);
+        let delivery=if asynchronous {IndexDelivery::Asynchronous}else{IndexDelivery::SynchronousBatch};
+        let caller={let owner=p.clone();let request=request.clone();tokio::spawn(async move {
+            owner.execute_writes(vec![request],delivery).await
+        })};
+        let (caller,ack)=if asynchronous {
+            let batch=tokio::time::timeout(std::time::Duration::from_secs(5),caller).await.unwrap().unwrap().unwrap();
+            assert_eq!(batch.stop,None);assert_eq!(batch.results.len(),1);
+            (None,Some(batch.results.into_iter().next().unwrap().unwrap()))
+        }else{(Some(caller),None)};
+        tokio::time::timeout(std::time::Duration::from_secs(5),async {
+            while !gate.with_extension("started").exists(){tokio::task::yield_now().await;}
+        }).await.unwrap();
+        assert_eq!(p.indexes.lexical.load(Ordering::Acquire),0,"native add is not yet published");
+        let cancelled=if let Some(caller)=caller {caller}else{
+            let (ready,started)=tokio::sync::oneshot::channel();let owner=p.clone();
+            let waiter=tokio::spawn(async move {
+                let inner=owner.inner.lock().await;
+                let mut drain=Box::pin(inner.index.drain_indexes());
+                assert!(futures::poll!(drain.as_mut()).is_pending(),"waiter must actually reach the running worker");
+                ready.send(()).unwrap();drain.await.unwrap();
+                // Match execute_writes' result type without invoking another write.
+                Ok::<BatchResult,RecordError>(BatchResult{results:vec![],stop:None})
+            });
+            started.await.unwrap();waiter
+        };
+        let occupied=crate::storage::build_budget::used_memory_for_test();
+        cancelled.abort();assert!(matches!(cancelled.await,Err(error) if error.is_cancelled()));
+        assert_eq!(crate::storage::build_budget::used_memory_for_test(),occupied,
+            "caller cancellation cannot refund the running native/component workspace");
+        assert!(gate.exists());assert_eq!(p.indexes.lexical.load(Ordering::Acquire),0);
+        let pressure=crate::storage::build_budget::fill_memory_for_test();
+        std::fs::remove_file(&gate).unwrap();std::fs::remove_file(&vector_pause).unwrap();
+        // A cancelled drain waiter relinquishes its JoinHandle; cursor progress
+        // AND released Inner ownership prove the detached service worker exited.
+        tokio::time::timeout(std::time::Duration::from_secs(5),async {
+            while p.indexes.lexical.load(Ordering::Acquire)<1 || p.indexes.vector.load(Ordering::Acquire)<1
+                || Arc::strong_count(&p.inner)!=1 {tokio::task::yield_now().await;}
+            let inner=p.inner.lock().await;
+            inner.index.drain_indexes().await.unwrap();inner.index.join_materializers().await.unwrap();
+            assert!(inner.healthy);assert!(!inner.output.read().unwrap().fenced);assert_eq!(inner.state.seq,1);
+            assert!(p.indexes.error().is_none());
+        }).await.unwrap();
+        assert_eq!(native.snapshot().await.unwrap().identities.len(),1,"exactly one native add despite cancellation");
+        drop(pressure);
+        let receipt=p.write(request.clone()).await.unwrap();assert_eq!(receipt.seq,1);
+        if let Some(ack)=ack {assert_eq!(receipt,ack);}
+        assert_eq!(p.write(request.clone()).await.unwrap(),receipt);
+        assert_eq!(p.search("alpha".into(),None,crate::search::SearchMode::Lexical,vec![],10).await.unwrap().count_total,1);
+        let next=write("after-cancel","next","beta",ExpectedVersion::Absent);
+        let next_receipt=p.write(next.clone()).await.unwrap();assert_eq!(next_receipt.seq,2);
+        {let inner=p.inner.lock().await;inner.index.drain_indexes().await.unwrap();inner.index.join_materializers().await.unwrap();}
+        p.finish_service_shutdown().await.unwrap();drop(native);drop(p);
+        let reopened=RecordPartition::open(&root,settings.max_journal_bytes).await.unwrap();
+        assert_eq!(reopened.write(request).await.unwrap(),receipt);assert_eq!(reopened.write(next).await.unwrap(),next_receipt);
+        assert_eq!(reopened.search("alpha".into(),None,crate::search::SearchMode::Lexical,vec![],10).await.unwrap().count_total,1);
+        assert_eq!(reopened.get("next").await.unwrap().unwrap().version,1);
+        reopened.finish_service_shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn synchronous_batch_caller_cancel_keeps_running_fallback_owned() {
+        owned_fallback_caller_cancellation(false).await;
+    }
+
+    #[tokio::test]
+    async fn acknowledged_async_index_waiter_cancel_keeps_running_fallback_owned() {
+        owned_fallback_caller_cancellation(true).await;
+    }
+
+    #[tokio::test]
+    async fn synchronous_fallback_temporal_patch_uses_exact_indexed_workspace() {
+        let directory=tempfile::tempdir().unwrap();let root=directory.path().join("records");
+        let mut settings=config();settings.max_record_bytes=512*1024;settings.max_journal_bytes=16*1024*1024;
+        let p=RecordPartition::create(&root,settings.clone()).await.unwrap();
+        struct Clock(std::sync::atomic::AtomicU64);
+        impl temporal::Clock for Clock {fn now_ms(&self)->Result<u64,RecordError>{Ok(self.0.load(std::sync::atomic::Ordering::SeqCst))}}
+        let now=SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64;
+        let clock=Arc::new(Clock(std::sync::atomic::AtomicU64::new(now)));p.inner.lock().await.clock=clock.clone();
+        let mut initial=write("temporal-large","large",&"alpha ".repeat(50_000),ExpectedVersion::Absent);
+        initial.document.as_mut().unwrap().remove("vector");
+        initial.temporal=Some(TemporalMetadata{event_time_ms:Some(now as i64-1_000),valid_from_ms:Some(now as i64-2_000),
+            valid_to_ms:Some(now as i64+86_400_000),expire_at_ms:Some(now+86_400_000)});
+        let first=p.write(initial.clone()).await.unwrap();
+        clock.0.store(now+1_000,std::sync::atomic::Ordering::SeqCst);
+        let mut patch=write("temporal-patch","large","",ExpectedVersion::Match(1));patch.document=None;
+        patch.vector_patch=Some(serde_json::from_value(serde_json::json!({"vector":[2.0,0.0]})).unwrap());
+        let second=p.write(patch.clone()).await.unwrap();
+        {let inner=p.inner.lock().await;assert!(inner.healthy);assert_eq!(inner.state.seq,2);
+            assert_eq!(inner.state.records["large"].ingested_at_ms,now);
+            assert_eq!(inner.state.records["large"].temporal.expire_at_ms,Some(now+86_400_000));}
+        p.finish_service_shutdown().await.unwrap();drop(p);
+        let reopened=RecordPartition::open(&root,settings.max_journal_bytes).await.unwrap();
+        assert_eq!(reopened.write(initial).await.unwrap(),first);assert_eq!(reopened.write(patch).await.unwrap(),second);
+        reopened.finish_service_shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn fallback_and_mixed_prefixes_finish_at_full_memory_with_old_snapshots() {
+        let directory=tempfile::tempdir().unwrap();let root=directory.path().join("records");
+        let mut settings=config();settings.max_record_bytes=512*1024;settings.max_journal_bytes=16*1024*1024;
+        let p=RecordPartition::create(&root,settings.clone()).await.unwrap();
+        let native=p.inner.lock().await.index.test_index().read().await.segments[0].lexical.clone();
+        let mut pinned=Vec::new();let mut accepted=Vec::new();let mut total=0;
+        for prefix in 0..3 {
+            for lane in ["lexical","vector"] {std::fs::write(root.join(format!(".test-{lane}-consumer-pause")),b"pause").unwrap();}
+            let id=format!("large-{prefix}");let large=write(&id,&id,&"alpha ".repeat(50_000),ExpectedVersion::Absent);
+            assert!(build_budget::document_estimate(large.document.as_ref().unwrap(),&settings.schema).unwrap()>crate::storage::build_budget::EXPLICIT_BUFFERS);
+            let small_id=format!("small-{prefix}");let small=write(&small_id,&small_id,"beta",ExpectedVersion::Absent);
+            let requests=match prefix {0=>vec![large],1=>vec![large,small],_=>vec![small,large]};
+            let result=tokio::time::timeout(std::time::Duration::from_secs(5),
+                p.execute_writes(requests.clone(),IndexDelivery::Asynchronous)).await.unwrap().unwrap();
+            assert_eq!(result.stop,None);assert_eq!(result.results.len(),requests.len());total+=requests.len();
+            for (request,result) in requests.into_iter().zip(result.results) {accepted.push((request,result.unwrap()));}
+            // The ACK precedes consumer work, and no memory headroom remains.
+            let pressure=crate::storage::build_budget::fill_memory_for_test();
+            for lane in ["lexical","vector"] {std::fs::remove_file(root.join(format!(".test-{lane}-consumer-pause"))).unwrap();}
+            tokio::time::timeout(std::time::Duration::from_secs(10),async {
+                let inner=p.inner.lock().await;inner.index.drain_indexes().await.unwrap();inner.index.join_materializers().await.unwrap();
+                assert!(inner.healthy);assert!(!inner.output.read().unwrap().fenced);
+            }).await.unwrap();
+            let snapshot=native.snapshot().await.unwrap();assert_eq!(snapshot.identities.len(),total);
+            pinned.push(snapshot);drop(pressure);
+        }
+        for (request,receipt) in &accepted {assert_eq!(p.write(request.clone()).await.unwrap(),*receipt);}
+        p.finish_service_shutdown().await.unwrap();drop(pinned);drop(native);drop(p);
+        let reopened=RecordPartition::open(&root,settings.max_journal_bytes).await.unwrap();
+        for (request,receipt) in accepted {assert_eq!(reopened.write(request).await.unwrap(),receipt);}
+        reopened.finish_service_shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn fallback_and_visible_escrows_cover_mixed_and_async_queued_prefixes() {
+        for (delivery,cross_batch) in [(IndexDelivery::Synchronous,false),
+            (IndexDelivery::SynchronousBatch,false),(IndexDelivery::Asynchronous,false),
+            (IndexDelivery::Asynchronous,true)] {
+            let delivery_name=match delivery {IndexDelivery::Synchronous=>"synchronous",IndexDelivery::SynchronousBatch=>"synchronous_batch",IndexDelivery::Asynchronous=>"asynchronous"};
+            eprintln!("fallback escrow case delivery={delivery_name} cross_batch={cross_batch} phase=start");
+            let directory=tempfile::tempdir().unwrap();let root=directory.path().join("records");
+            let mut settings=config();settings.max_record_bytes=512*1024;settings.max_journal_bytes=16*1024*1024;
+            // 50k legal tokens select the real >64MiB estimate fallback while
+            // remaining within wire, token, per-reservation and batch bounds.
+            let large=write("large","large",&"alpha ".repeat(50_000),ExpectedVersion::Absent);
+            assert!(build_budget::document_estimate(large.document.as_ref().unwrap(),&settings.schema).unwrap()
+                >crate::storage::build_budget::EXPLICIT_BUFFERS);
+            let small=write("small","small","beta",ExpectedVersion::Absent);
+            let p=RecordPartition::create(&root,settings.clone()).await.unwrap();
+            let requests=vec![large.clone(),small.clone()];
+            let receipts=if cross_batch {
+                // Force the next planner to run before the fallback can publish
+                // a new base. Async ACK must remain independent of this worker.
+                let pause=root.join(".test-lexical-consumer-pause");std::fs::write(&pause,b"pause").unwrap();
+                let first=tokio::time::timeout(std::time::Duration::from_secs(5),
+                    p.execute_writes(vec![large.clone()],delivery)).await.unwrap().unwrap();
+                assert_eq!(first.stop,None);assert_eq!(first.results.len(),1);
+                let second=tokio::time::timeout(std::time::Duration::from_secs(5),
+                    p.execute_writes(vec![small.clone()],delivery)).await.unwrap().unwrap();
+                assert_eq!(second.stop,None);assert_eq!(second.results.len(),1);
+                std::fs::remove_file(pause).unwrap();
+                vec![first.results[0].as_ref().unwrap().clone(),second.results[0].as_ref().unwrap().clone()]
+            }else{
+                let batch=p.execute_writes(requests.clone(),delivery).await.unwrap();
+                assert_eq!(batch.stop,None);assert_eq!(batch.results.len(),2);
+                batch.results.into_iter().map(Result::unwrap).collect::<Vec<_>>()
+            };
+            {let inner=p.inner.lock().await;inner.index.drain_indexes().await.unwrap();inner.index.join_materializers().await.unwrap();
+                assert!(inner.healthy);assert!(!inner.output.read().unwrap().fenced);assert_eq!(inner.state.seq,2);}
+            let native=p.inner.lock().await.index.test_index().read().await.segments[0].lexical.clone();
+            assert_eq!(native.snapshot().await.unwrap().identities.len(),2,"no repeated native append");
+            let retry=p.execute_writes(requests.clone(),delivery).await.unwrap();
+            assert_eq!(retry.stop,None);assert_eq!(retry.results,receipts.iter().cloned().map(Ok).collect::<Vec<_>>());
+            eprintln!("fallback escrow case delivery={delivery_name} cross_batch={cross_batch} phase=retry_complete inner_owners={}",Arc::strong_count(&p.inner));
+            // An async receipt replay still submits empty consumer batches.
+            // Service teardown requires those owned tasks to have drained.
+            {let inner=p.inner.lock().await;inner.index.drain_indexes().await.unwrap();inner.index.join_materializers().await.unwrap();}
+            assert_eq!(Arc::strong_count(&p.inner),1,"teardown must follow consumer joins");
+            eprintln!("fallback escrow case delivery={delivery_name} cross_batch={cross_batch} phase=shutdown");
+            p.finish_service_shutdown().await.unwrap();drop(native);drop(p);
+            let reopened=RecordPartition::open(&root,settings.max_journal_bytes).await.unwrap();
+            for (request,receipt) in requests.into_iter().zip(receipts) {assert_eq!(reopened.write(request).await.unwrap(),receipt);}
+            assert_eq!(reopened.get("large").await.unwrap().unwrap().version,1);
+            assert_eq!(reopened.get("small").await.unwrap().unwrap().version,1);
+            reopened.finish_service_shutdown().await.unwrap();
+            eprintln!("fallback escrow case delivery={delivery_name} cross_batch={cross_batch} phase=complete");
+        }
+    }
+
     #[tokio::test]
     async fn batch_reuses_ordered_values_across_vector_patch_and_body_updates() {
         let dir = tempfile::tempdir().unwrap();
@@ -908,7 +1121,7 @@ mod tests {
         assert!(matches!(result.results[4], Err(RecordError::Conflict(_))));
         assert_eq!(result.results[..4].iter().map(|r| r.as_ref().unwrap().version).collect::<Vec<_>>(), [1, 1, 2, 1]);
         p.inner.lock().await.index.drain_indexes().await.unwrap();
-        drop(p);
+        p.finish_service_shutdown().await.unwrap();drop(p);
         let p = RecordPartition::open(&root, settings.max_journal_bytes).await.unwrap();
         assert_eq!(p.get("s").await.unwrap().unwrap().document.unwrap()["body"], "updated");
         assert!(p.get("d").await.unwrap().is_some());
@@ -950,7 +1163,7 @@ mod tests {
         let scope = failure.scope.unwrap();
         assert_eq!(scope.persistence_attempted, vec![1, 2]);
         assert_eq!(scope.replayed, vec![(0, receipt)]);
-        drop(p);
+        p.finish_service_shutdown().await.unwrap();drop(p);
         let p = RecordPartition::open(&root, settings.max_journal_bytes)
             .await
             .unwrap();
@@ -1051,7 +1264,7 @@ mod tests {
             std::fs::remove_file(root.join(format!(".test-{lane}-consumer-pause"))).unwrap();
         }
         p.inner.lock().await.index.drain_indexes().await.unwrap();
-        drop(p);
+        p.finish_service_shutdown().await.unwrap();drop(p);
         let p = RecordPartition::open(&root, settings.max_journal_bytes)
             .await
             .unwrap();

@@ -1,4 +1,5 @@
 [
+  "record::lexical::directory::tests::directory_gates_share_aliases_and_isolate_other_directories",
   "record::output::tests::transport_output_waits_for_publication_and_cancellation_does_not_cancel_writer",
   "record::output::tests::transport_output_rejects_failed_publication_and_old_permit_after_recovery",
   "resources::lifecycle::tests::stopping_keeps_required_children_and_detached_output_owned",
@@ -198,5 +199,7 @@
   "record::write::planning::tests::local_prefix_matches_full_state_counts_replays_and_wire_budget",
   "record::committed::tests::synchronous_batch_keeps_same_id_conditions_vector_patch_and_recovery",
   "record::committed::tests::synchronous_batch_consumer_failure_keeps_unknown_scope_and_output_fence",
-  "record::committed::tests::synchronous_batch_cancelled_waiter_keeps_publication_owned"
+  "record::committed::tests::synchronous_batch_cancelled_waiter_keeps_publication_owned",
+  "record::remote_checkpoint::tests::cold_cache_eviction_waits_for_materializer_without_checkpointing",
+  "record::remote_checkpoint::tests::dropped_partition_keeps_cross_process_owner_until_materializer_exits"
 ]

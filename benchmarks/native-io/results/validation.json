@@ -1,0 +1,107 @@
+[
+  {
+    "name": "directory",
+    "command": "cargo test --locked -p anyseek --lib record::lexical::directory::tests",
+    "exit_code": 0,
+    "seconds": 0.5396671295166016,
+    "passed_cases": 9
+  },
+  {
+    "name": "core",
+    "command": "python3 scripts/ci_core_cases.py",
+    "exit_code": 0,
+    "seconds": 177.35578155517578,
+    "passed_cases": 203
+  },
+  {
+    "name": "write-path",
+    "command": "python3 scripts/ci_write_path_cases.py",
+    "exit_code": 0,
+    "seconds": 101.08110737800598,
+    "passed_cases": 46
+  },
+  {
+    "name": "oracles",
+    "command": "cargo test --locked -p anyseek --test bitmap_delete_consistency --test union_count_cross_block --test frequent_topk_consistency --test union_topk_fill_ranking --test union_topk_many_terms --test lexical_correctness",
+    "exit_code": 0,
+    "seconds": 137.07820773124695,
+    "passed_cases": 15
+  },
+  {
+    "name": "check-default",
+    "command": "cargo check --locked -p anyseek --all-targets",
+    "exit_code": 0,
+    "seconds": 57.462716579437256
+  },
+  {
+    "name": "check-no-default",
+    "command": "cargo check --locked -p anyseek --no-default-features --all-targets",
+    "exit_code": 0,
+    "seconds": 40.2928581237793
+  },
+  {
+    "name": "clippy",
+    "command": "cargo clippy --locked -p anyseek --all-targets",
+    "exit_code": 101,
+    "seconds": 27.839081525802612
+  },
+  {
+    "name": "static-boundary",
+    "command": "python3 scripts/check_console_boundary.py",
+    "exit_code": 0,
+    "seconds": 0.04914355278015137
+  },
+  {
+    "name": "static-retired",
+    "command": "python3 scripts/check_retired_dependencies.py",
+    "exit_code": 0,
+    "seconds": 2.619270086288452
+  },
+  {
+    "name": "static-partition",
+    "command": "python3 scripts/check_lexical_partition.py --source-only",
+    "exit_code": 0,
+    "seconds": 0.060030460357666016
+  },
+  {
+    "name": "static-s3",
+    "command": "python3 scripts/test_s3_acceptance.py",
+    "exit_code": 0,
+    "seconds": 0.2710387706756592
+  },
+  {
+    "name": "service-build",
+    "command": "cargo build --locked -p anyseek --bin anyseek_server",
+    "exit_code": 0,
+    "seconds": 59.070839166641235
+  },
+  {
+    "name": "service-smoke",
+    "command": "python3 scripts/record_service_smoke.py --server target/debug/anyseek_server",
+    "exit_code": 0,
+    "seconds": 109.99918508529663
+  },
+  {
+    "name": "baseline-clippy",
+    "source_sha": "014e66a8570685667d60197f543845a399186915",
+    "command": "CARGO_TARGET_DIR=/workspace/io-evidence/baseline-check-target cargo clippy --manifest-path /workspace/io-evidence/baseline-source/Cargo.toml --locked -p anyseek --all-targets",
+    "exit_code": 101,
+    "note": "Same two async_yields_async errors at resources/lifecycle.rs:146 and :156 as candidate."
+  },
+  {
+    "name": "clippy-scoped",
+    "command": "cargo clippy --locked -p anyseek --all-targets -- -A clippy::async_yields_async",
+    "exit_code": 0,
+    "note": "Explicit exception for the reproduced pre-existing lint only; existing warnings remain."
+  },
+  {
+    "name": "benchmark-runner-syntax",
+    "command": "python3 -m py_compile benchmarks/native-io/compare.py",
+    "exit_code": 0
+  },
+  {
+    "name": "diff-whitespace",
+    "command": "git diff --check",
+    "exit_code": 0
+  }
+]

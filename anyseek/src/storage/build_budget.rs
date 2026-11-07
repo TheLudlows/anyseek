@@ -44,6 +44,17 @@ fn exceeded() -> io::Error {
 fn io_admission() -> io::Result<Option<crate::resources::Lease>> {
     crate::resources::Scope::current().map(|scope| scope.file_io()).transpose().map(Option::flatten).map_err(io::Error::other)
 }
+#[derive(Debug)]
+struct SharedMemoryPressure {used:u64,requested:u64,limit:u64}
+impl std::fmt::Display for SharedMemoryPressure {
+    fn fmt(&self,f:&mut std::fmt::Formatter<'_>)->std::fmt::Result {
+        write!(f,"record build resource budget exceeded: class=shared used={} requested={} limit={}",self.used,self.requested,self.limit)
+    }
+}
+impl std::error::Error for SharedMemoryPressure {}
+pub(crate) fn is_shared_memory_pressure(error:&io::Error)->bool {
+    error.get_ref().is_some_and(|cause|cause.is::<SharedMemoryPressure>())
+}
 pub(crate) struct MemoryLease(u64, Arc<AtomicU64>);
 pub(crate) fn reserve_memory(bytes: u64) -> io::Result<MemoryLease> {
     reserve_from(&MEMORY, bytes)
@@ -60,13 +71,17 @@ fn reserve_from(counter: &Arc<AtomicU64>, bytes: u64) -> io::Result<MemoryLease>
         log::warn!("record build single reservation rejected: requested={bytes} limit={}", limits.single);
         return Err(io::Error::other(format!("record build resource budget exceeded: class=single requested={bytes} limit={}", limits.single)));
     }
+    #[cfg(test)]
+    if bytes>0 && proof_refusal_for_test() {
+        return Err(io::Error::other(SharedMemoryPressure{used:limits.shared,requested:bytes,limit:limits.shared}));
+    }
     counter
         .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
             used.checked_add(bytes).filter(|n| *n <= limits.shared)
         })
         .map_err(|used| {
             log::warn!("record build shared reservation rejected: used={used} requested={bytes} limit={}", limits.shared);
-            io::Error::other(format!("record build resource budget exceeded: class=shared used={used} requested={bytes} limit={}", limits.shared))
+            io::Error::other(SharedMemoryPressure{used,requested:bytes,limit:limits.shared})
         })?;
     Ok(MemoryLease(bytes, counter.clone()))
 }
@@ -430,6 +445,18 @@ pub(crate) fn fill_memory_except_for_test(leave:u64) -> Vec<MemoryLease> {
 mod tests {
     use super::*;
     #[test]
+    fn shared_memory_marker_does_not_classify_limits_or_error_text() {
+        let limits=memory_limits().unwrap();let counter=Arc::new(AtomicU64::new(limits.shared));
+        let shared=reserve_from(&counter,1).err().unwrap();
+        assert!(is_shared_memory_pressure(&shared));assert_eq!(counter.load(Ordering::Acquire),limits.shared);
+        let single=reserve_from(&counter,limits.single+1).err().unwrap();
+        assert!(!is_shared_memory_pressure(&single));
+        assert!(!is_shared_memory_pressure(&io::Error::other(shared.to_string())));
+        let counter=Arc::new(AtomicU64::new(0));let mut lease=reserve_from(&counter,1).unwrap();
+        assert!(!is_shared_memory_pressure(&lease.grow(u64::MAX).unwrap_err()));
+        assert_eq!(lease.bytes(),1);assert_eq!(counter.load(Ordering::Acquire),1);
+    }
+    #[test]
     fn admitted_transfer_is_conserved_across_shared_owner_and_rejection() {
         let counter = Arc::new(AtomicU64::new(0));
         let mut prepared = reserve_from(&counter, 1024).unwrap();
@@ -601,4 +628,25 @@ mod tests {
         assert_eq!(serial.disk.ledger.lock().unwrap().used,8);
         drop(candidate);drop(retained);drop(serial);fs::remove_dir_all(root).unwrap();
     }
+}
+
+// Synchronous, thread-local fault injection: no global budget mutation and no
+// interference with unrelated workers. A failed reservation never charges bytes.
+#[cfg(test)]
+thread_local! {static PROOF_REFUSAL:std::cell::Cell<Option<(usize,bool)>>=const {std::cell::Cell::new(None)};}
+#[cfg(test)]
+fn proof_refusal_for_test()->bool {
+    PROOF_REFUSAL.with(|state|match state.get(){
+        Some((0,false))=>{state.set(Some((0,true)));true},
+        Some((left,false))=>{state.set(Some((left-1,false)));false},
+        _=>false,
+    })
+}
+#[cfg(test)]
+pub(crate) fn refuse_shared_at_for_test<T>(ordinal:usize,run:impl FnOnce()->T)->(T,bool){
+    struct Reset(Option<(usize,bool)>);
+    impl Drop for Reset {fn drop(&mut self){PROOF_REFUSAL.with(|s|s.set(self.0));}}
+    let reset=Reset(PROOF_REFUSAL.with(|s|s.replace(Some((ordinal,false)))));
+    let value=run();let hit=PROOF_REFUSAL.with(|s|s.get().unwrap().1);
+    drop(reset);(value,hit)
 }

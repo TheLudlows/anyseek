@@ -326,18 +326,38 @@ pub(super) fn schema(config: &RecordConfig) -> Vec<SchemaField> {
     }
     schema
 }
+fn indexed_values(metadata:&TemporalMetadata,ingested:u64)->[i64;5] {
+    [metadata.event_time_ms.unwrap_or(MIN_TIME-1),ingested as i64,
+        metadata.valid_from_ms.unwrap_or(MIN_TIME),metadata.valid_to_ms.unwrap_or(MAX_TIME as i64+1),
+        metadata.expire_at_ms.map_or(MAX_TIME as i64+1,|at|at as i64)]
+}
 pub(super) fn indexed(document: &Document, metadata: &TemporalMetadata, ingested: u64) -> Document {
     let mut document = document.clone();
-    for (field, value) in FIELDS.into_iter().zip([
-        metadata.event_time_ms.unwrap_or(MIN_TIME - 1),
-        ingested as i64,
-        metadata.valid_from_ms.unwrap_or(MIN_TIME),
-        metadata.valid_to_ms.unwrap_or(MAX_TIME as i64 + 1),
-        metadata.expire_at_ms.map_or(MAX_TIME as i64 + 1,|at| at as i64),
-    ]) {
+    for (field,value) in FIELDS.into_iter().zip(indexed_values(metadata,ingested)) {
         document.insert(field.into(), value.into());
     }
     document
+}
+/// Exact wire length of the indexed document/projection without cloning either
+/// map or its values. The counter serializes borrowed fields and five stack
+/// integers; temporal overrides share the same value source as `indexed`.
+pub(super) fn indexed_length(document:&Document,metadata:&TemporalMetadata,ingested:u64,
+    selected:impl Fn(&str)->bool)->Result<usize,RecordError>{
+    struct Indexed<'a,F>{document:&'a Document,values:[i64;5],selected:F}
+    impl<F:Fn(&str)->bool> Serialize for Indexed<'_,F> {
+        fn serialize<S:serde::Serializer>(&self,serializer:S)->Result<S::Ok,S::Error>{
+            use serde::ser::SerializeMap;
+            let mut map=serializer.serialize_map(None)?;
+            for (field,value) in self.document {
+                if !FIELDS.contains(&field.as_str()) && (self.selected)(field) {map.serialize_entry(field,value)?;}
+            }
+            for (field,value) in FIELDS.into_iter().zip(self.values) {
+                if (self.selected)(field) {map.serialize_entry(field,&value)?;}
+            }
+            map.end()
+        }
+    }
+    checkpoint_codec::json_length(&Indexed{document,values:indexed_values(metadata,ingested),selected})
 }
 /// Applied before channel Top-K/counting, including count-only and browse.
 pub(super) fn expiry_filter(evaluation:u64)->FacetFilter {

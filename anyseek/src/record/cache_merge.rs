@@ -4,6 +4,15 @@ use super::*;
 use futures::FutureExt;
 use std::time::{Duration,Instant};
 
+fn verify_selected_packages(root:&Path,selected:&[segment::Package],limit:u64)->Result<(),RecordError>{
+    for package in selected {
+        package.verify(root,limit).map_err(|error|match error {
+            RecordError::Busy=>RecordError::Busy,
+            _=>RecordError::RecoveryRequired,
+        })?;
+    }
+    Ok(())
+}
 pub(super) const CAUSE:&str="derived_cache_merge";
 pub(super) const MAX_ROWS:usize=2*capacity::PACKAGE_RECORDS;
 const MAX_INPUT_BYTES:u64=32*1024*1024;
@@ -169,9 +178,7 @@ impl RecordPartition {
                 // Untouched packages/WAL remain authenticated by checkpoint
                 // and cold recovery; cache compaction cannot certify over them.
                 let limit=config.max_journal_bytes.checked_mul(64).and_then(|n|n.checked_add(32*1024*1024)).ok_or(RecordError::Busy)?;
-                for package in &selected {
-                    package.verify(&root,limit).map_err(|_|RecordError::RecoveryRequired)?;
-                }
+                verify_selected_packages(&root,&selected,limit)?;
                 let candidate={let _phase=maintenance::Phase::new("cache_merge_build_unlocked",snapshot.seq);
                     build_candidate(&root,&config,&snapshot).await?};
                 #[cfg(test)]
@@ -230,6 +237,20 @@ async fn pause(root:&Path,timeout:Duration) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn selected_package_memory_refusal_is_busy_but_corruption_still_fences() {
+        let root=tempfile::tempdir().unwrap();let id="a".repeat(32);
+        let path=root.path().join(format!("segment-{id}"));std::fs::create_dir(&path).unwrap();
+        std::fs::write(path.join("data"),b"valid").unwrap();
+        let package=segment::Package::seal(root.path(),&path,id,1024).unwrap();
+        let full=crate::storage::build_budget::fill_memory_for_test();
+        assert_eq!(verify_selected_packages(root.path(),std::slice::from_ref(&package),1024),Err(RecordError::Busy));
+        drop(full);
+        verify_selected_packages(root.path(),std::slice::from_ref(&package),1024).unwrap();
+        std::fs::write(path.join("data"),b"invalid").unwrap();
+        assert_eq!(verify_selected_packages(root.path(),std::slice::from_ref(&package),1024),Err(RecordError::RecoveryRequired));
+    }
+
     use crate::record::tests::{config,write};
     async fn rotate(partition:&RecordPartition) {
         let mut inner=partition.inner.lock().await;
@@ -254,8 +275,10 @@ mod tests {
     async fn derived_merge_catches_concurrent_update_delete_and_recovers_without_certificate() {
         let temporary=tempfile::tempdir().unwrap();let root=temporary.path().join("records");
         let p=fixture(&root).await;
-        let held={let inner=p.inner.lock().await;inner.index.test_index().read().await.segments[1].lexical.clone()};
-        let held=held.snapshot().await.unwrap();
+        let held={
+            let native={let inner=p.inner.lock().await;inner.index.test_index().read().await.segments[1].lexical.clone()};
+            native.snapshot().await.unwrap()
+        };
         std::fs::write(root.join(".test-cache-merge-pause"),b"pause").unwrap();
         let job=p.start_cache_merge_job(Duration::from_secs(20)).unwrap();started(&root).await;
         p.write(write("update","a","beta",ExpectedVersion::Match(1))).await.unwrap();
@@ -268,7 +291,7 @@ mod tests {
         assert_eq!(held.identities.len(),1);
         assert_eq!(p.search("alpha".into(),None,SearchMode::Lexical,vec![],10).await.unwrap().count_total,2);
         assert_eq!(p.get("a").await.unwrap().unwrap().version,2);
-        drop(p);
+        drop(held);p.finish_service_shutdown().await.unwrap();drop(p);
         let p=RecordPartition::open(&root,config().max_journal_bytes).await.unwrap();
         assert!(p.get("b").await.unwrap().is_none());
         assert_eq!(p.search("alpha".into(),None,SearchMode::Lexical,vec![],10).await.unwrap().count_total,2);

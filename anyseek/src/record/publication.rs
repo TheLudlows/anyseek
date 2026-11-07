@@ -8,10 +8,15 @@ use super::*;
 
 impl replay::Context<'_> {
     pub(super) async fn publish_prepared(&mut self,applied:&Applied,snapshot_bytes:usize,prepared:Option<state_memory::Prepared>)->Result<(),RecordError>{
+        self.publish_prepared_with_native(applied,snapshot_bytes,prepared,true).await
+    }
+    // Cold recovery has no readers and publishes the bounded native suffix at
+    // rotation boundaries and before returning the recovered partition.
+    pub(super) async fn publish_prepared_with_native(&mut self,applied:&Applied,snapshot_bytes:usize,prepared:Option<state_memory::Prepared>,publish_native:bool)->Result<(),RecordError>{
         let receipt = &applied.receipt;
         // Prepared owns the complete canonical document. Borrow it instead of
         // making an additional enrichment copy during index publication.
-        let prepared = prepared.ok_or_else(|| {
+        let mut prepared = prepared.ok_or_else(|| {
             log::error!("Record prepared ownership missing at sequence {}", receipt.seq);
             RecordError::DurablePending(receipt.seq)
         })?;
@@ -32,7 +37,7 @@ impl replay::Context<'_> {
                 log::error!("Record input admission failed at sequence {}: {:?}", receipt.seq, error);
                 RecordError::DurablePending(receipt.seq)
             })?;
-            let id=self.index.append(receipt.record_id.clone(),receipt.version,receipt.seq,temporal::indexed(document, &temporal::retained(self.state.records.get(&receipt.record_id), &applied.request, applied.observed_time_ms).map_err(|_| RecordError::DurablePending(receipt.seq))?, if applied.request.vector_patch.is_some() { self.state.records[&receipt.record_id].ingested_at_ms } else { applied.observed_time_ms })).await.map_err(|error| { log::error!("Record component publication failed at sequence {}: {:?}", receipt.seq, error); RecordError::DurablePending(receipt.seq) })?;
+            let id=self.index.append(receipt.record_id.clone(),receipt.version,receipt.seq,temporal::indexed(document, &temporal::retained(self.state.records.get(&receipt.record_id), &applied.request, applied.observed_time_ms).map_err(|_| RecordError::DurablePending(receipt.seq))?, if applied.request.vector_patch.is_some() { self.state.records[&receipt.record_id].ingested_at_ms } else { applied.observed_time_ms }),prepared.lexical.take(),prepared.component.take(),publish_native).await.map_err(|error| { log::error!("Record component publication failed at sequence {}: {:?}", receipt.seq, error); RecordError::DurablePending(receipt.seq) })?;
             #[cfg(test)]
             if self.fail_publication_stage == 1 {
                 return Err(RecordError::DurablePending(receipt.seq));

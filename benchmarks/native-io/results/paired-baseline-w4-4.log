@@ -1,0 +1,10 @@
+
+running 1 test
+workers=4 operations=800 wall_ms=1635.052
+wait sum_ms=2866.840 p50_ms=0.001089 p99_ms=98.677147
+hold sum_ms=1613.474 p50_ms=1.366415 p99_ms=11.115700
+atomic_write_including_file_sync sum_ms=1184.721 p50_ms=0.979149 p99_ms=8.098636
+directory_sync sum_ms=428.752 p50_ms=0.354141 p99_ms=2.370898
+test record::lexical::directory::diagnostic::directory_io_contention ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 456 filtered out; finished in 1.66s

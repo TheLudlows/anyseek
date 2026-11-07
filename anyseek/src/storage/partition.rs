@@ -37,7 +37,7 @@ pub(crate) struct PartitionJournal {
     generation: u64,
     max_bytes: u64,
     // Stable across generation replacement; released after every journal file.
-    _owner: File,
+    _owner: std::sync::Arc<File>,
 }
 pub(crate) struct CommittedCut {generation:u64, journal:super::journal::CommittedCut}
 impl CommittedCut {
@@ -104,6 +104,10 @@ fn remove_bounded(path: &Path, remaining: &mut usize, depth: usize) -> io::Resul
 }
 
 impl PartitionJournal {
+    /// Native work may outlive the public partition handle. Share the same
+    /// locked file description until its final file user has been released.
+    pub(crate) fn owner_guard(&self) -> std::sync::Arc<File> { self._owner.clone() }
+
     pub(crate) fn root(&self)->&Path {&self.path}
     pub(crate) fn validate_checkpoint_budget(length: usize, max_bytes: u64) -> io::Result<()> {
         let payload_budget=max_bytes.checked_sub(24+PUBLISHED.len() as u64).ok_or_else(||io::Error::other("checkpoint certificate budget exceeded"))?;
@@ -183,7 +187,7 @@ impl PartitionJournal {
             path: path.into(),
             generation: 0,
             max_bytes,
-            _owner: owner,
+            _owner: std::sync::Arc::new(owner),
         })
     }
     /// Complete only a certified-journal, never-served initial root. The caller
@@ -362,7 +366,7 @@ impl PartitionJournal {
             path: path.into(),
             generation,
             max_bytes,
-            _owner: owner,
+            _owner: std::sync::Arc::new(owner),
         };
         for generation in unpublished {
             // Never partially delete a directory which still participates in

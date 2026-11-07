@@ -1421,7 +1421,102 @@ mod tests {
         for (request,receipt) in receipts {assert_eq!(p.write(request).await.unwrap(),receipt);}
     }
 
+    #[tokio::test]
+    async fn cold_cache_eviction_waits_for_materializer_without_checkpointing() {
+        let (p, _, root, _, clock) = source().await;
+        let native = p.inner.lock().await.index.test_index().read().await.segments[0].lexical.clone();
+        let gate = native.package_path().join(".test-visible-workspace-ready");
+        std::fs::write(&gate, b"pause").unwrap();
+        let request = write("cold-owned", "r", "alpha", ExpectedVersion::Absent);
+        let receipt = p.write(request.clone()).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !gate.with_extension("started").exists() { tokio::task::yield_now().await; }
+        }).await.unwrap();
+        let before = { let inner = p.inner.lock().await;
+            inner.remote.as_ref().unwrap().authority.lock().await.read_head("source").unwrap().unwrap() };
+        drop(native);
+        let pending = cold(p, &root, clock); tokio::pin!(pending);
+        assert!(futures::poll!(pending.as_mut()).is_pending());
+        assert!(gate.exists(), "cold eviction must wait before deleting an active writer's files");
+        std::fs::remove_file(&gate).unwrap();
+        let reopened = pending.await;
+        { let inner = reopened.inner.lock().await;
+            assert_eq!(inner.remote.as_ref().unwrap().authority.lock().await.read_head("source").unwrap().unwrap(), before); }
+        assert_eq!(reopened.write(request).await.unwrap(), receipt);
+        assert_eq!(reopened.search("alpha".into(), None, SearchMode::Lexical, vec![], 10).await.unwrap().count_total, 1);
+        reopened.finish_service_shutdown().await.unwrap();
+    }
+
+    #[test]
+    #[ignore = "invoked by owner lifetime regression"]
+    fn materializer_owner_lock_probe_worker() {
+        let path = std::env::var_os("ANYSEEK_TEST_MATERIALIZER_OWNER").unwrap();
+        let file = std::fs::OpenOptions::new().read(true).write(true).open(path).unwrap();
+        if std::env::var_os("ANYSEEK_TEST_OWNER_LOCKED").is_some() {
+            assert!(matches!(file.try_lock(), Err(std::fs::TryLockError::WouldBlock)));
+        } else { file.try_lock().unwrap(); }
+    }
+
+    #[tokio::test]
+    async fn dropped_partition_keeps_cross_process_owner_until_materializer_exits() {
+        for pin_snapshot in [false, true] {
+        let root = super::super::tests::path();
+        let p = RecordPartition::create(&root, config()).await.unwrap();
+        let native = p.inner.lock().await.index.test_index().read().await.segments[0].lexical.clone();
+        native.flush().await.unwrap();
+        // Capture before binding the owner: the shared directory token must
+        // also protect an already-published empty base and its fixed readers.
+        let old_snapshot = if pin_snapshot { Some(native.snapshot().await.unwrap()) } else { None };
+        let running = Arc::downgrade(&native);
+        let gate = native.package_path().join(".test-visible-workspace-ready");
+        std::fs::write(&gate, b"pause").unwrap();
+        let request = write("owned-lock", "r", "alpha", ExpectedVersion::Absent);
+        let receipt = p.write(request.clone()).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !gate.with_extension("started").exists() { tokio::task::yield_now().await; }
+        }).await.unwrap();
+        drop(native); drop(p);
+        let probe = |locked: bool| {
+            let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+            command.args(["record::remote_checkpoint::tests::materializer_owner_lock_probe_worker", "--exact", "--ignored", "--nocapture"])
+                .env("ANYSEEK_TEST_MATERIALIZER_OWNER", root.join("owner"));
+            if locked { command.env("ANYSEEK_TEST_OWNER_LOCKED", "1"); }
+            else { command.env_remove("ANYSEEK_TEST_OWNER_LOCKED"); }
+            let output = command.output().unwrap();
+            assert!(output.status.success(), "{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+            assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+        };
+        probe(true);
+        std::fs::remove_file(&gate).unwrap();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while running.upgrade().is_some() { tokio::time::sleep(Duration::from_millis(1)).await; }
+        }).await.unwrap();
+        if pin_snapshot { probe(true); } // Fixed old readers retain the late-bound lock.
+        drop(old_snapshot);
+
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let file = std::fs::OpenOptions::new().read(true).write(true).open(root.join("owner")).unwrap();
+                match file.try_lock() {
+                    Ok(()) => break,
+                    Err(std::fs::TryLockError::WouldBlock) => tokio::time::sleep(Duration::from_millis(1)).await,
+                    Err(error) => panic!("owner probe: {error}"),
+                }
+            }
+        }).await.unwrap();
+        probe(false);
+        let reopened = RecordPartition::open(&root, config().max_journal_bytes).await.unwrap();
+        assert_eq!(reopened.write(request).await.unwrap(), receipt);
+        assert_eq!(reopened.search("alpha".into(), None, SearchMode::Lexical, vec![], 10).await.unwrap().count_total, 1);
+        reopened.finish_service_shutdown().await.unwrap(); drop(reopened);
+        std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
     async fn cold(p: RecordPartition, root: &Path, clock: Arc<Clock>) -> RecordPartition {
+        // Cold cache eviction is not process death: quiesce the old owner before
+        // deleting files. Dropping a public handle does not cancel materializers.
+        p.finish_service_shutdown().await.unwrap();
         let remote = p.inner.lock().await.remote.take().unwrap();
         drop(p);
         std::fs::remove_dir_all(root).unwrap();

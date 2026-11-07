@@ -1,0 +1,28 @@
+error: an async construct yields a type which is itself awaitable
+   --> anyseek/src/resources/lifecycle.rs:146:13
+    |
+144 |           let worker = root.run(async {
+    |  _____________________________________-
+145 | |             assert!(automatic(|| ()).is_none());
+146 | |             super::super::spawn(async move { Owner(Some(sent)) })
+    | |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    | |             |
+    | |             awaitable value not awaited
+    | |             help: consider awaiting this value: `super::super::spawn(async move { Owner(Some(sent)) }).await`
+147 | |         }).await;
+    | |_________- outer async construct
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#async_yields_async
+    = note: `#[deny(clippy::async_yields_async)]` on by default
+
+error: an async construct yields a type which is itself awaitable
+   --> anyseek/src/resources/lifecycle.rs:156:41
+    |
+156 |         let retained = root.run(async { super::super::spawn_background(async {}) }).await;
+    |                                       --^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^--
+    |                                       | |
+    |                                       | awaitable value not awaited
+    |                                       | help: consider awaiting this value: `super::super::spawn_background(async {}).await`
+    |                                       outer async construct
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#async_yields_async

@@ -133,6 +133,7 @@ impl RecordPartition {
                 if !inner.healthy { return Err(RecordError::RecoveryRequired); }
                 if inner.background.is_some() { return Err(RecordError::Busy); }
                 inner.index.drain_indexes().await?;
+                inner.index.join_materializers().await?;
                 if automatic {
                     let evaluation=inner.observe_time()?;
                     match inner.trim_history(evaluation).await {
@@ -216,7 +217,13 @@ impl RecordPartition {
                 if started.elapsed() >= timeout { return Err(RecordError::Busy); }
                 let source=if let Some(source)=source {
                     let source=source.collect(&owner,id,started+timeout).await?;
-                    source.verify(&root,&config,&snapshot).map_err(|error| {
+                    // Authentication only reads ordinary files and validates
+                    // state; it must not mistake a live materializer's permit
+                    // for corrupt authority and permanently fence the owner.
+                    #[cfg(test)]
+                    anchor::pause_file_io_for_test(&root,"proof").await?;
+                    let proof_io=crate::resources::io_scope(crate::resources::Lane::Background).journal_io().await.map_err(|_|RecordError::Busy)?;
+                    proof_io.run_async(async {source.verify(&root,&config,&snapshot)}).await.map_err(|error| {
                         if mode==JobMode::Compact && !matches!(error,RecordError::Busy) {
                             log::warn!("compact source authentication failed: {error}");
                             RecordError::RecoveryRequired
@@ -304,7 +311,9 @@ impl RecordPartition {
                             index:&mut candidate.index,ordinals:&mut candidate.ordinals,locations:&mut candidate.locations,
                             snapshot_bytes:&mut candidate.snapshot_bytes,
                             #[cfg(test)] fail_publication_stage:0};
-                        for bytes in raw {context.replay(serde_json::from_slice(&bytes).map_err(storage)?).await?;}
+                        let replayed=!raw.is_empty();
+                        for bytes in raw {context.replay_private(serde_json::from_slice(&bytes).map_err(storage)?).await?;}
+                        if replayed {context.index.flush_replayed_native().await?;}
                         intent.apply(&mut expected,&config)?;
                         state_proof::verify(&config,&expected,&candidate.state)?;
                     }
@@ -329,6 +338,7 @@ impl RecordPartition {
                     n.checked_add(b.len() as u64 + 24).ok_or_else(||storage("index tail size overflow")))?;
                 if bytes > config.max_journal_bytes { return Err(RecordError::Busy); }
                 inner.index.drain_indexes().await?;
+                inner.index.join_materializers().await?;
                 inner.healthy = false;
                 let fenced = {
                     let mut output = inner.output.write().map_err(|_|RecordError::RecoveryRequired)?;
@@ -587,6 +597,44 @@ mod tests {
         scope.run(p.write(write("second", "b", "alpha", ExpectedVersion::Absent))).await.unwrap();
     }
     #[tokio::test(flavor = "current_thread")]
+    async fn private_anchor_file_phases_wait_for_live_background_io() {
+      for stage in ["image","proof","load"] {
+        let temp=tempfile::tempdir().unwrap();let root=temp.path().join("records");
+        let scope=Arc::new(crate::resources::Governor::default())
+            .admit("private-image-io".into(),crate::resources::Lane::Background,0).unwrap();
+        let p=scope.clone().run(RecordPartition::create(&root,config())).await.unwrap();
+        let first=write("first","a","alpha",ExpectedVersion::Absent);
+        let first_receipt=scope.clone().run(p.write(first.clone())).await.unwrap();
+        scope.clone().run(p.compact_journal()).await.unwrap();
+        let pause=root.join(format!(".test-anchor-{stage}-io-pause"));
+        let started=root.join(format!(".test-anchor-{stage}-io-started"));
+        std::fs::write(&pause,b"pause").unwrap();
+        let owner=p.clone();let job=tokio::spawn(scope.clone().run(async move {owner.compact_journal().await}));
+        tokio::time::timeout(Duration::from_secs(5),async {
+            while !started.exists(){assert!(!job.is_finished(),"{stage}");tokio::time::sleep(Duration::from_millis(1)).await;}
+        }).await.unwrap();
+        let second=write("suffix","b","beta",ExpectedVersion::Absent);
+        let second_receipt=scope.clone().run(p.write(second.clone())).await.unwrap();
+        p.inner.lock().await.index.join_materializers().await.unwrap();
+        // Model an independently owned native worker's permit after ACK. The
+        // checkpoint must wait without holding another permit or mutating head.
+        let held=crate::resources::hold_io_for_test(&scope).await;
+        std::fs::remove_file(pause).unwrap();
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        assert!(!job.is_finished(),"private {stage} phase must wait for temporary I/O ownership");
+        drop(held);
+        tokio::time::timeout(Duration::from_secs(5),job).await.unwrap().unwrap().unwrap();
+        assert_eq!(scope.clone().run(p.write(first.clone())).await.unwrap(),first_receipt);
+        assert_eq!(scope.clone().run(p.write(second.clone())).await.unwrap(),second_receipt);
+        p.finish_service_shutdown().await.unwrap();drop(p);
+        let p=scope.clone().run(RecordPartition::open(&root,config().max_journal_bytes)).await.unwrap();
+        assert_eq!(scope.clone().run(p.write(first)).await.unwrap(),first_receipt);
+        assert_eq!(scope.clone().run(p.write(second)).await.unwrap(),second_receipt);
+        assert_eq!(p.search("alpha OR beta".into(),None,SearchMode::Lexical,vec![],10).await.unwrap().count_total,2);
+        p.finish_service_shutdown().await.unwrap();
+      }
+    }
+    #[tokio::test(flavor = "current_thread")]
     async fn checkpoint_io_loan_waits_after_native_work_and_preserves_suffix() {
         for background in [false, true] {
             let temp = tempfile::tempdir().unwrap(); let root = temp.path().join("records");
@@ -610,9 +658,14 @@ mod tests {
                 second = Some((request, receipt));
                 std::fs::remove_file(root.join(".test-indexer-pause")).unwrap();
             }
-            tokio::time::timeout(Duration::from_secs(5), async {
-                while !root.join(".test-journal-io-started").exists() { tokio::time::sleep(Duration::from_millis(1)).await; }
+            let reached = tokio::time::timeout(Duration::from_secs(5), async {
+                while !root.join(".test-journal-io-started").exists() {
+                    if task.is_finished() { return false; }
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+                true
             }).await.unwrap();
+            if !reached { panic!("checkpoint ended before I/O pause: {:?}", task.await); }
             let held = crate::resources::hold_io_for_test(&scope).await;
             std::fs::remove_file(root.join(".test-journal-io-pause")).unwrap();
             tokio::time::sleep(Duration::from_millis(20)).await;

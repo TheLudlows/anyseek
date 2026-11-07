@@ -71,6 +71,16 @@ pub(crate) fn document_estimate(
         .ok_or_else(|| storage("build estimate overflow"))?;
     Ok(n)
 }
+/// Match the synchronous native input without cloning the temporal document.
+/// Synthetic temporal fields are numeric, non-lexical metadata; token charges
+/// stay unchanged while the exact serialized-input contribution is replaced.
+pub(super) fn indexed_document_estimate(document:&Document,schema:&[SchemaField],metadata:&TemporalMetadata,ingested:u64)->Result<u64,RecordError>{
+    let raw=checkpoint_codec::json_length(document)? as u64;
+    let indexed=temporal::indexed_length(document,metadata,ingested,|_|true)? as u64;
+    document_estimate(document,schema)?.checked_sub(raw.checked_mul(32).ok_or_else(||storage("native input estimate overflow"))?)
+        .and_then(|n|n.checked_add(indexed.checked_mul(32)?)).ok_or_else(||storage("native indexed input estimate overflow"))
+}
+
 /// Retained vector/facet projection only. Canonical bodies belong to State/Payload;
 /// the full input Document has a distinct short-lived lease in component::append.
 /// 1024 bytes per row cover row metadata (<=64 x9 bytes including presence markers),
@@ -138,6 +148,23 @@ pub(super) fn write_estimate_for(previous: Option<&Record>, config: &RecordConfi
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn native_temporal_estimate_matches_complete_input_at_numeric_boundaries() {
+        let settings=crate::record::tests::config();
+        let document:Document=serde_json::from_value(serde_json::json!({"body":"alpha ".repeat(50_000),"vector":[2.0,0.0]})).unwrap();
+        let raw=document_estimate(&document,&settings.schema).unwrap();
+        for metadata in [TemporalMetadata::default(),TemporalMetadata{
+            event_time_ms:Some(i64::MIN),valid_from_ms:Some(i64::MIN),valid_to_ms:Some(i64::MAX),expire_at_ms:Some(u64::MAX),
+        }] {
+            for ingested in [0,999,1_000,u64::MAX] {
+                let indexed=temporal::indexed(&document,&metadata,ingested);
+                let exact=document_estimate(&indexed,&settings.schema).unwrap();
+                assert!(raw<exact,"the old raw-document reservation undercharged synchronous publication");
+                assert_eq!(indexed_document_estimate(&document,&settings.schema,&metadata,ingested).unwrap(),exact);
+            }
+        }
+    }
+
     #[test]
     fn nonindexed_body_is_transient_while_vectors_and_facets_stay_charged() {
         let small:Document=serde_json::from_value(serde_json::json!({"body":"a","vector":[1.0,2.0],"tag":["one","two"]})).unwrap();

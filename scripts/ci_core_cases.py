@@ -14,9 +14,16 @@ def main():
     assert names and len(names) == len(set(names))
     # One feature/profile build, then invoke its test binary without more cargo builds.
     with tempfile.TemporaryFile(mode="w+t", encoding="utf-8") as output:
-        subprocess.run(["cargo", "test", "-p", "anyseek", "--lib", "--locked",
+        build = subprocess.run(["cargo", "test", "-p", "anyseek", "--lib", "--locked",
                         "--no-run", "--message-format=json"],
-                       cwd=root, stdout=output, check=True)
+                       cwd=root, stdout=output)
+        if build.returncode:
+            output.seek(0)
+            for line in output:
+                item = json.loads(line)
+                if item.get("reason") == "compiler-message":
+                    print(item["message"].get("rendered", item["message"]["message"]), flush=True)
+            build.check_returncode()
         output.seek(0)
         binaries = []
         for line in output:

@@ -29,11 +29,52 @@ pub(super) struct RetrievalView {
     owner: std::sync::Weak<Mutex<Inner>>,
 }
 impl RetrievalView {
+    pub(super) async fn reserve_visible(&self,document:&Document,config:&RecordConfig,id:&str,owner:Arc<std::fs::File>)->Result<lexical::memory::Reservation,RecordError>{
+        let mut reservation=lexical::memory::Reservation::new(document,config,id)?;
+        let native=self.tail.read().await.segments[0].lexical.clone();
+        // Install before publication can start an independently owned materializer.
+        native.retain_partition_owner(owner)?;
+        // Empty base creation is fallible and must precede durable acceptance.
+        if !native.has_snapshot()? {native.flush().await?;}
+        native.reserve_visible(&mut reservation)?;Ok(reservation)
+    }
+    pub(super) async fn reserve_fallback(&self,record:&Record,owner:Arc<std::fs::File>)->Result<lexical::memory::Fallback,RecordError>{
+        let native=self.tail.read().await.segments[0].lexical.clone();
+        native.retain_partition_owner(owner)?;
+        if !native.has_snapshot()? {native.flush().await?;}
+        let document=record.document.as_ref().ok_or_else(||storage("fallback credit for tombstone"))?;
+        // Synchronous publication passes the full indexed document; asynchronous
+        // lexical input is a smaller projection covered by the same exact bound.
+        let analysis=build_budget::indexed_document_estimate(document,&native.config.schema,&record.temporal,record.ingested_at_ms)?;
+        native.reserve_fallback_estimated(analysis,&record.record_id)
+    }
+    pub(super) async fn reserve_component(&self,record:&Record,_config:&RecordConfig)->Result<index_consumers::ComponentCredit,RecordError>{
+        let document=record.document.as_ref().ok_or_else(||storage("component credit for tombstone"))?;
+        let admission=self.tail.read().await.segments[0].admission.clone();
+        // Borrowed counting avoids making unadmitted indexed/projection clones.
+        // Use the exact temporal values and actual segment projection consumed
+        // after publication, including retained ingestion time for vector patches.
+        let projection=temporal::indexed_length(document,&record.temporal,record.ingested_at_ms,|name|
+            admission.includes(name))? as u64;
+        let retained=projection.checked_mul(32).and_then(|n|n.checked_add(1024)).ok_or_else(||storage("component credit estimate overflow"))?;
+        let input=if self.batch {projection}else{temporal::indexed_length(document,&record.temporal,record.ingested_at_ms,|_|true)? as u64};
+        let input=input.checked_mul(32).ok_or_else(||storage("component input estimate overflow"))?;
+        index_consumers::ComponentCredit::from_estimates(&admission,input,retained,&record.record_id)
+    }
+    pub(super) fn attach_cursors(&mut self,cursors:Arc<index_consumers::Cursors>){self.cursors=Some(cursors);}
+    /// Checkpoint file transactions must not contend with this view's own
+    /// materializers for the same subject's bounded native I/O permits.
+    pub(super) async fn join_materializers(&self)->Result<(),RecordError>{
+        let runtimes:Vec<_>=self.query.read().await.segments.iter().map(|s|s.lexical.clone()).collect();
+        for native in runtimes {native.join_visible().await?;}
+        Ok(())
+    }
     pub(super) async fn shutdown_workers(&self) -> Result<(), RecordError> {
         let vector = if let Some(worker) = &self.vector { worker.join_worker().await } else { Ok(()) };
         let lexical = if let Some(worker) = &self.lexical { worker.join_worker().await } else { Ok(()) };
         vector.and(lexical)?;
         for index in [&self.query, &self.tail] {
+            for segment in &index.read().await.segments {segment.admission.close();}
             let runtimes: Vec<_> = index.read().await.segments.iter().map(|segment| segment.lexical.clone()).collect();
             for native in runtimes { native.shutdown().await?; }
         }
@@ -41,6 +82,11 @@ impl RetrievalView {
     }
     pub(super) fn retain_address_budget(&mut self,memory:crate::storage::build_budget::MemoryLease,scope:Option<crate::resources::Lease>) {
         self.merge_address_memory=Some(memory);self.merge_address_scope=scope;
+    }
+    /// Finish private cold-replay postings before a reader or merge can select them.
+    pub(super) async fn flush_replayed_native(&self)->Result<(),RecordError> {
+        let native=self.tail.read().await.segments[0].lexical.clone();
+        native.flush().await
     }
     pub(super) async fn capture_query(&self,length:usize)->Result<super::query::Handle,RecordError> {
         super::query::Handle::capture(&self.query,length).await
@@ -61,13 +107,12 @@ impl RetrievalView {
     pub(super) async fn can_admit(&self,bytes:u64,native_updates:usize)->bool {
         let root=self.tail.read().await;
         for segment in &root.segments {
-            if segment.lexical.needs_rotation(native_updates).await {return false;}
+            if segment.lexical.needs_rotation(native_updates).await || !segment.lexical.visible_admits(bytes) {return false;}
         }
         if self.reserved_rows.is_some() {
             return self.component_bytes.checked_add(bytes).is_some_and(|n|crate::storage::build_budget::validate_single(n).is_ok());
         }
-        let shard=root.segments[0].vector.read().await;
-        shard.build_reservation.as_ref().is_some_and(|r|r.can_grow(bytes))
+        root.segments[0].admission.can_grow(bytes)
     }
 
     pub(super) fn single(index: VectorIndexArc) -> Self {
@@ -171,6 +216,8 @@ impl RetrievalView {
         // shared retirement masks remain owned by their original components.
         drop(tail);
         drop(shards);
+        // No new plan can target the sealed generation; existing credits may finish.
+        root.segments[0].admission.close();
         root.segments.insert(0, tail_segment);
 
         // Both containers are exclusively borrowed. Every address was checked
@@ -227,14 +274,18 @@ impl RetrievalView {
         version: u64,
         revision: u64,
         document: Document,
+        visible:Option<lexical::memory::Admission>,
+        component:Option<index_consumers::ComponentCredit>,
+        publish_native:bool,
     ) -> Result<usize, RecordError> {
+        if !publish_native && (self.batch || visible.is_some()) {return Err(storage("private native replay mixed with live publication"));}
         if self.batch {
             self.initialize_async().await?;
             let local=self.reserved_rows.ok_or(RecordError::RecoveryRequired)?;
             let native=self.tail.read().await.segments[0].lexical.clone();
             let identity=lexical::Identity { id:key.clone(),version,revision };
-            let vector=index_consumers::Input::vector(&native.config,identity.clone(),local,&document)?;
-            let lexical=index_consumers::Input::admitted(&native,identity,&document)?;
+            let vector=index_consumers::Input::vector_with_credit(&native.config,identity.clone(),local,&document,component)?;
+            let lexical=index_consumers::Input::admitted_visible(&native,identity,&document,visible)?;
             let schema=retrieval_schema(&native.config);
             let growth=build_budget::component_estimate(&document,schema.iter().filter(|f|f.index_vector||f.facet).map(|f|f.field.as_str()))?
                 .checked_add(build_budget::identity_estimate(&key)?).ok_or_else(||storage("queued component growth overflow"))?;
@@ -244,12 +295,21 @@ impl RetrievalView {
             return local.checked_mul(self.query.read().await.segments.len()).ok_or_else(||storage("candidate address overflow"));
         }
         let shard = self.tail.read().await.segments[0].vector.clone();
-        {
-            let mut shard=shard.write().await;
-            if let Some(memory)=&mut shard.build_reservation {
-                memory.grow(build_budget::identity_estimate(&key)?).map_err(storage)?;
-            }
-        }
+        let (component_memory,mutation)={
+            let shard=shard.write().await;
+            let memory=match component {
+                Some(mut credit)=>{
+                    if credit.identity.bytes()<build_budget::identity_estimate(&key)? {return Err(storage("component identity credit bound exceeded"));}
+                    credit.append.pending.transfer(&shard.admission,credit.identity).map_err(storage)?;
+                    Some(credit.append)
+                },
+                None=>{
+                    shard.admission.grow(build_budget::identity_estimate(&key)?,false).map_err(storage)?;
+                    None
+                },
+            };
+            (memory,shard.admission.mutation())
+        };
         let key_for_native = key.clone();
         let local = {
             let mut shard = shard.write().await;
@@ -263,18 +323,25 @@ impl RetrievalView {
         };
         let native = self.tail.read().await.segments[0].lexical.clone();
         let identity = lexical::Identity { id:key_for_native, version, revision };
-        native.append(identity, &document, true).await?;
-        self.tail
-            .index_documents(vec![document])
-            .await
-            .map_err(storage)?;
+        match visible {
+            Some(lexical::memory::Admission::Visible(reservation))=>native.append_visible(identity,&document,reservation,true,self.cursors.clone()).await?,
+            Some(lexical::memory::Admission::Fallback(admission))=>native.append_fallback_admitted(identity,&document,admission,true).await?,
+            None if publish_native=>native.append(identity,&document,true).await?,
+            None=>native.append_replayed(identity,&document).await?,
+        }
+        match component_memory {
+            Some(memory)=>shard.write().await.append_with_memory(document,Some(memory)).await.map_err(storage)?,
+            None=>self.tail.index_documents(vec![document]).await.map_err(storage)?,
+        }
         if self.reserved_rows.is_some() {
             self.reserved_rows=Some(local+1);
-            self.component_bytes=shard.read().await.build_reservation.as_ref().map_or(0, |r|r.bytes());
+            self.component_bytes=shard.read().await.admission.bytes().map_err(storage)?;
         }
-        local
+        let address=local
             .checked_mul(self.query.read().await.segments.len())
-            .ok_or_else(|| storage("candidate address overflow"))
+            .ok_or_else(|| storage("candidate address overflow"))?;
+        mutation.complete();
+        Ok(address)
     }
     async fn initialize_async(&mut self) -> Result<(),RecordError> {
         if self.reserved_rows.is_some() {return Ok(());}
@@ -291,7 +358,7 @@ impl RetrievalView {
         let root=self.tail.read().await;
         let shard=root.segments[0].vector.read().await;
         self.reserved_rows=Some(shard.indexed_doc_count);
-        self.component_bytes=shard.build_reservation.as_ref().map_or(0,|r|r.bytes());
+        self.component_bytes=shard.admission.bytes().map_err(storage)?;
         let path=Path::new(&root.index_path_string).parent().ok_or_else(||storage("component parent missing"))?.to_owned();
         self.lexical=Some(index_consumers::Consumer::new_lexical(root.segments[0].lexical.clone(),cursors.clone(),path.clone(),self.owner.clone()));
         self.vector=Some(index_consumers::Consumer::new_vector(self.tail.clone(),root.segments[0].lexical.clone(),cursors,path,self.owner.clone()));
@@ -468,6 +535,7 @@ mod tests {
             query(&partition, SearchMode::Lexical).await.hits[0].score,
             expected
         );
+        partition.finish_service_shutdown().await.unwrap();
         drop(partition);
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -536,6 +604,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(query(&partition, SearchMode::Lexical).await.hits.len(), 2);
+        partition.finish_service_shutdown().await.unwrap();
         drop(partition);
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -584,6 +653,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(query(&partition, SearchMode::Lexical).await.hits.len(), 2);
+        partition.finish_service_shutdown().await.unwrap();
         drop(partition);
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -707,6 +777,8 @@ mod tests {
             partition.statistics().await.unwrap().physical_versions,
             oracle.statistics().await.unwrap().physical_versions
         );
+        partition.finish_service_shutdown().await.unwrap();
+        oracle.finish_service_shutdown().await.unwrap();
         drop(partition);
         drop(oracle);
         std::fs::remove_dir_all(root).unwrap();

@@ -34,17 +34,44 @@ impl<'de> Deserialize<'de> for Reference {
         // raw representation first: no Vec/String inventory is materialized
         // before its complete independent residency has been admitted.
         let raw=<&serde_json::value::RawValue>::deserialize(d)?;
-        let charge=metadata_charge(raw.get().len()).and_then(|n|n.checked_add(65536).ok_or_else(||storage("reference scratch overflow"))).map_err(serde::de::Error::custom)?;
-        let mut lease=crate::storage::build_budget::reserve_memory(charge).map_err(serde::de::Error::custom)?;
-        let data:ReferenceData=serde_json::from_str(raw.get()).map_err(serde::de::Error::custom)?;
-        if !valid(&data.id) || data.segments.iter().any(|s|!valid(&s.id)) || data.state_blocks.iter().any(|b|!valid(&b.id)) {
-            return Err(serde::de::Error::custom("invalid reference metadata identity"));
-        }
-        let needed=reference_shell_charge(data.segments.len(),data.state_blocks.len()).map_err(serde::de::Error::custom)?;
-        let owned=lease.split_off(needed).map_err(serde::de::Error::custom)?;
-        Ok(Self {metadata:Arc::new(ReferenceOwner{data,_lease:owned}),captured:Arc::default(),previous_capture:None})
+        Self::decode_proof(raw).map_err(serde::de::Error::custom)
     }
 }
+// Raw inventories defer their independent admission until outside Serde. These
+// wire helpers preserve the existing Reference/Inventory budgets and validation.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WireReference<'a> {
+    id:String,
+    #[serde(borrow)] files:&'a serde_json::value::RawValue,
+    #[serde(borrow)] segments:Vec<WirePackage<'a>>,
+    #[serde(borrow)] state_blocks:Vec<WirePackage<'a>>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WirePackage<'a> {
+    id:String,
+    #[serde(borrow)] files:&'a serde_json::value::RawValue,
+}
+impl Reference {
+    pub(super) fn decode_proof(raw:&serde_json::value::RawValue)->Result<Self,RecordError>{
+        let charge=metadata_charge(raw.get().len())?.checked_add(65536).ok_or_else(||storage("reference scratch overflow"))?;
+        let mut lease=crate::storage::build_budget::reserve_memory(charge).map_err(memory_error)?;
+        let wire:WireReference<'_>=serde_json::from_str(raw.get()).map_err(storage)?;
+        if !valid(&wire.id) || wire.segments.iter().any(|s|!valid(&s.id)) || wire.state_blocks.iter().any(|b|!valid(&b.id)) {
+            return Err(storage("invalid reference metadata identity"));
+        }
+        let needed=reference_shell_charge(wire.segments.len(),wire.state_blocks.len())?;
+        let data=ReferenceData {
+            id:wire.id,files:Inventory::decode_proof(wire.files)?,
+            segments:wire.segments.into_iter().map(|p|Ok(Frozen{id:p.id,files:Inventory::decode_proof(p.files)?})).collect::<Result<_,RecordError>>()?,
+            state_blocks:wire.state_blocks.into_iter().map(|p|Ok(StateFiles{id:p.id,files:Inventory::decode_proof(p.files)?})).collect::<Result<_,RecordError>>()?,
+        };
+        let owned=lease.split_off(needed).map_err(storage)?;
+        Ok(Self{metadata:Arc::new(ReferenceOwner{data,_lease:owned}),captured:Arc::default(),previous_capture:None})
+    }
+}
+
 fn reference_shell_charge(segments:usize,blocks:usize)->Result<u64,RecordError> {
     if segments>capacity::MAX_SEGMENTS || blocks>anchor_image::MAX_DELTAS {return Err(storage("reference metadata count exceeded"));}
     // IDs are validated as 32-byte hex before selected paths can be used.
@@ -72,8 +99,8 @@ fn read_manifest(path:&Path,limit:u64)->Result<(Manifest,crate::storage::build_b
     let length=file.metadata().map_err(storage)?.len();
     if length>limit {return Err(storage("anchor manifest byte budget exceeded"));}
     let length=usize::try_from(length).map_err(storage)?;
-    let parsed=crate::storage::build_budget::reserve_memory(metadata_charge(length)?).map_err(storage)?;
-    let _raw=crate::storage::build_budget::reserve_memory(length as u64).map_err(storage)?;
+    let parsed=crate::storage::build_budget::reserve_memory(metadata_charge(length)?).map_err(memory_error)?;
+    let _raw=crate::storage::build_budget::reserve_memory(length as u64).map_err(memory_error)?;
     let mut bytes=vec![0;length];
     file.read_exact(&mut bytes).map_err(storage)?;
     if file.read(&mut [0u8;1]).map_err(storage)?!=0 {return Err(storage("anchor manifest grew during read"));}
@@ -99,7 +126,8 @@ impl NativeReuse {
         let _phase=maintenance::Phase::new("compact_native_admission_locked",inner.state.seq);
         if inner.index.detached_cache || inner.anchor.as_ref().is_none_or(|previous|
             previous.segments.len()+inner.index.pending_seals.len()>=capacity::segments(&inner.config)) {return Ok(None);}
-        // Refuse known I/O saturation before preparing or sealing a successor.
+        inner.index.join_materializers().await?;
+        // Refuse known external I/O saturation before preparing or sealing a successor.
         // Actual handoff I/O retains its own admission and failure fencing.
         let probe=crate::resources::io_scope(crate::resources::Lane::Background).io().map_err(|_|RecordError::Busy)?;
         // Statistics await shard locks. Their writer may be awaiting I/O, so a
@@ -203,7 +231,7 @@ impl Frozen {
         let mut reservation=build_budget::admit(config,std::iter::empty()).map_err(|e|storage(format!("stage=frozen_component_base package={} {e}",self.id)))?;
         reservation.grow(estimate).map_err(storage)?;
         let index=crate::index::open_index(&path,config).await?;
-        index.read().await.segments[0].vector.write().await.build_reservation=Some(reservation);
+        index.read().await.segments[0].vector.write().await.admission.install(reservation).map_err(storage)?;
         {
             let index=index.read().await;
             if index.segments.len()!=1||!index.stored_field_names.is_empty(){return Err(storage("invalid frozen topology"));}
@@ -246,6 +274,13 @@ impl Reference {
         let _phase=maintenance::Phase::new("anchor_prepare",state.seq);
         let id=format!("{:032x}",rand::random::<u128>());
         let prepared=root.join(format!(".anchor-prepare-{id}"));
+        // State images are ordinary file transactions, independent of native
+        // indexing. An acknowledged live suffix may still own the subject's
+        // background I/O permit; wait before writing this private image.
+        #[cfg(test)]
+        pause_file_io_for_test(root,"image").await?;
+        let image_io=crate::resources::io_scope(crate::resources::Lane::Background).journal_io().await.map_err(|_|RecordError::Busy)?;
+        let image=image_io.run_async(async {
         std::fs::create_dir(&prepared).map_err(storage)?;
         let payload_budget = budget(config)?;
         // Reuse is an optimization, not a lifetime limit on further writes.
@@ -317,7 +352,10 @@ impl Reference {
         // Chain count is not a byte bound: repeated descriptors/long references
         // may exhaust a small configured authority before MAX_DELTAS. Measure
         // without constructing an encoded Vec or writing an oversized manifest.
-        if !checkpoint_codec::json_fits(&manifest,config.max_journal_bytes.min(16*1024*1024))? {
+        let manifest_fits=checkpoint_codec::json_fits(&manifest,config.max_journal_bytes.min(16*1024*1024))?;
+        #[cfg(test)]
+        let manifest_fits=manifest_fits && (manifest.state.deltas.is_empty() || !root.join(".test-anchor-force-base-fallback").exists());
+        if !manifest_fits {
             if !manifest.state.deltas.is_empty() {
                 log::info!("record_maintenance cause=manifest_byte_bound seq={} deltas={} byte_limit={}",state.seq,manifest.state.deltas.len(),config.max_journal_bytes.min(16*1024*1024));
                 // The failed candidate is private. Reuse its bounded Payload
@@ -331,13 +369,21 @@ impl Reference {
                 drop(metadata_lease);
                 drop(state_blocks);
                 drop(previous_capture);
-                return Box::pin(Self::prepare_encoded(root,config,encoded,payloads,previous,view,compact,None,None,native)).await;
+                // Return the fallback input so this file-only loan is dropped
+                // before recursively acquiring another one or entering native I/O.
+                return Ok(Err(payloads));
             }
             return Err(storage("complete anchor manifest byte budget exceeded"));
         }
         write_json(&prepared.join("manifest"),&manifest)?;
         drop(manifest);
         drop(image_lease);
+        Ok::<_,RecordError>(Ok((state_blocks,previous_capture,metadata_lease)))
+        }).await?;
+        let (state_blocks,previous_capture,mut metadata_lease)=match image {
+            Ok(metadata)=>metadata,
+            Err(payloads)=>return Box::pin(Self::prepare_encoded(root,config,encoded,payloads,previous,view,compact,None,None,native)).await,
+        };
         let mut segments=Vec::new();let mut statistics=Vec::new();
         let pending_count=native.map_or_else(||view.map_or(0,|v|v.pending_seals.len()),|capture|capture.pending.len());
         let reuse_native=!compact && (native.is_some() || view.is_some_and(|view|!view.detached_cache))
@@ -364,6 +410,10 @@ impl Reference {
         // Keep one empty physical segment so the query engine retains schema.
         if segments.is_empty(){let (segment,active)=Frozen::prepare(root,config,state,None).await?;segments.push(segment);statistics.push(active);}
         drop(native_phase);
+        // Native workers have finished. Borrow separately for the remaining
+        // file-only publication; never lend this permit to native operations.
+        let files_io=crate::resources::io_scope(crate::resources::Lane::Background).journal_io().await.map_err(|_|RecordError::Busy)?;
+        files_io.run_async(async {
         write_json(&prepared.join("statistics"),&Statistics{segments:statistics})?;
         let members=files(&prepared,closure_limit(config.max_journal_bytes)?)?;
         sync_tree(&prepared)?;
@@ -372,6 +422,7 @@ impl Reference {
         let needed=reference_shell_charge(data.segments.len(),data.state_blocks.len())?;
         let owned=metadata_lease.split_off(needed).map_err(storage)?;
         Ok(Self{metadata:Arc::new(ReferenceOwner{data,_lease:owned}),captured:Arc::default(),previous_capture})
+        }).await
     }
     /// Call only after this selected closure and the journal have authenticated,
     /// under the exclusive journal owner. Reclaim crash-left derived packages
@@ -407,15 +458,22 @@ impl Reference {
         let mut replayed=captured.try_clone()?;
         let expected=checkpoint_codec::json_digest(self)?;
         let mut first=true;
-        visit(&mut |bytes| {
+        #[derive(Debug)]
+        struct ProofVisitStop;
+        impl std::fmt::Display for ProofVisitStop {fn fmt(&self,f:&mut std::fmt::Formatter<'_>)->std::fmt::Result{f.write_str("source proof callback rejected")}}
+        impl std::error::Error for ProofVisitStop {}
+        let mut failure=None;
+        let visited=visit(&mut |bytes| {
+            if failure.is_some(){return Err(std::io::Error::other(ProofVisitStop));}
             let result=(||->Result<(),RecordError>{
                 let size=(bytes.len() as u64).checked_mul(32).ok_or_else(||storage("WAL proof decode overflow"))?;
-                let _decode=crate::storage::build_budget::reserve_memory(size).map_err(storage)?;
-                let entry:Entry=serde_json::from_slice(bytes).map_err(storage)?;
+                let _decode=crate::storage::build_budget::reserve_memory(size).map_err(memory_error)?;
                 if first {
                     first=false;
-                    return match entry {Entry::Anchor(reference) if checkpoint_codec::json_digest(&reference)?==expected=>Ok(()),_=>Err(storage("WAL proof authority mismatch"))};
+                    let reference=proof_decode::anchor(bytes)?;
+                    return if checkpoint_codec::json_digest(&reference)?==expected {Ok(())}else{Err(storage("WAL proof authority mismatch"))};
                 }
+                let entry=proof_decode::mutation(bytes)?;
                 replayed.admit_replay_frame(checkpoint_codec::json_length(&entry)?)?;
                 match entry {
                     Entry::Applied(op)=>apply(&mut replayed,&op),
@@ -423,8 +481,21 @@ impl Reference {
                     Entry::HistoryTrim(event)=>history::apply_trim(&mut replayed,&config.history,&event),
                     Entry::Anchor(_)|Entry::Checkpoint{..}=>Err(storage("authority in WAL suffix")),
                 }
-            })();result.map_err(|e|std::io::Error::other(e.to_string()))
-        }).map_err(storage)?;
+            })();
+            if let Err(error)=result {
+                failure.get_or_insert(error);
+                return Err(std::io::Error::other(ProofVisitStop));
+            }
+            Ok(())
+        });
+        if let Some(error)=failure {
+            return match visited {
+                Err(stopped) if stopped.get_ref().is_some_and(|cause|cause.is::<ProofVisitStop>())=>Err(error),
+                Err(io)=>Err(storage(io)), // Never hide a later real I/O failure behind Busy.
+                Ok(())=>Err(storage("source visitor ignored callback failure")),
+            };
+        }
+        visited.map_err(memory_error)?;
         if first{return Err(storage("missing WAL proof authority"));}
         state_proof::verify(config,live,&replayed)
     }
@@ -454,7 +525,7 @@ impl Reference {
         let mut limits=budget(manifest.state.config())?;limits.bytes=limits.bytes.min(authority_budget);
         // PoolReader retains a separate copy of the closure while Manifest is
         // still used. Admit that copy before clone, not under the State lease.
-        manifest_lease.grow(metadata_charge(checkpoint_codec::json_length(&manifest.payloads)?)?).map_err(storage)?;
+        manifest_lease.grow(metadata_charge(checkpoint_codec::json_length(&manifest.payloads)?)?).map_err(memory_error)?;
         let pool=PoolReader::open(root,manifest.payloads.clone(),limits).map_err(storage)?;
         Ok((path,manifest,pool,manifest_lease))
     }
@@ -492,6 +563,10 @@ impl Reference {
     async fn load_verified_encoded(&self,root:&Path,config:&RecordConfig,encoded:&checkpoint_codec::StateEncoding<'_>)->Result<VerifiedView,RecordError>{
         let state=encoded.state();
         let _phase=maintenance::Phase::new("candidate_authentication_and_load",state.seq);
+        #[cfg(test)]
+        pause_file_io_for_test(root,"load").await?;
+        let manifest_io=crate::resources::io_scope(crate::resources::Lane::Background).journal_io().await.map_err(|_|RecordError::Busy)?;
+        let (path,payloads)=manifest_io.run_async(async {
         let (path,manifest,pool,_manifest_lease)=self.authenticated_manifest(root,config.max_journal_bytes)?;
         if manifest.seq!=state.seq || serde_json::to_vec(manifest.state.config()).map_err(storage)?!=serde_json::to_vec(config).map_err(storage)? {
             return Err(storage("expected anchor identity mismatch"));
@@ -509,7 +584,10 @@ impl Reference {
             state_proof::verify(config,state,&replayed)?;
         }
         manifest.state.validate_encoded(encoded,config.max_journal_bytes)?;
-        let view=self.load_components(root,&path,config.max_journal_bytes,config,state,manifest.payloads).await?;
+        Ok::<_,RecordError>((path,manifest.payloads))
+        }).await?;
+        // Native reader admission below has its own I/O permit.
+        let view=self.load_components(root,&path,config.max_journal_bytes,config,state,payloads).await?;
         if self.captured.get().is_none() { let _=self.captured.set(state.try_clone()?); }
         Ok(view)
     }
@@ -568,7 +646,7 @@ pub(super) async fn snapshot_payload(root:&Path,config:&RecordConfig,state:&Stat
 
 impl Inner {
     pub(super) async fn replay_anchor_tail(&mut self,entry:Entry)->Result<(),RecordError>{
-        self.replay_context().replay(entry).await
+        self.replay_context().replay_private(entry).await
     }
 }
 
@@ -593,6 +671,7 @@ impl Inner {
         result
     }
     pub(super) async fn stage_stable_tail(&mut self)->Result<(),RecordError> {
+        self.index.join_materializers().await?;
         let root=self.journal.root().to_path_buf();
         let target=root.join(format!("segment-{:032x}",rand::random::<u128>()));
         let (successor,_)=build_at(&root,&target,&self.config,&State::default()).await?;
@@ -613,6 +692,9 @@ impl Inner {
     /// Recovery reconstructs pending packages from the complete committed suffix.
     pub(super) async fn maintain_index_tail(&mut self)->Result<(),RecordError> {
         self.index.drain_batch_prefix(self.state.seq).await?;
+        // The successor's disk ledger rescans this root. Finish this tail's
+        // background file writes before the serialized scan and later seal.
+        self.index.join_materializers().await?;
         if self.background.is_some(){return Err(RecordError::Busy);}
         // The certificate continues selecting its own immutable packages. The
         // live derived view has an independent finite component allowance plus
@@ -657,6 +739,7 @@ impl Inner {
     }
     async fn prepare_and_publish_anchor(&mut self,candidate:Option<State>,reuse:bool)->Result<u64,RecordError>{
         self.index.drain_batch_prefix(self.state.seq).await?;
+        self.index.join_materializers().await?;
         let _phase=maintenance::Phase::new("full_checkpoint",self.state.seq);
         if let Some(remote)=self.remote.as_ref() {
             if let Err(error)=remote.verify_seal_inputs(self.anchor.as_ref(),self.state.seq,&mut self.journal,self.config.max_journal_bytes).await {
@@ -712,7 +795,21 @@ impl Inner {
         let mut ordinals=loaded.ordinals;
         let mut locations=loaded.locations;
         let cache=root.join(format!("segment-{:032x}",rand::random::<u128>()));
-        let (tail,_)=build_at(&root,&cache,&self.config,&State::default()).await.map_err(|e|storage(format!("stage=anchor_empty_tail {e}")))?;
+        let (tail,_)= {
+            // Exercise the real component metadata admission after the empty
+            // build owner has been reserved, without perturbing earlier proof
+            // loading. The test pressure is released before candidate cleanup.
+            #[cfg(test)]
+            let _pressure=if root.join(".test-anchor-component-metadata-pressure").exists() {
+                let bytes=build_budget::admit(&self.config,std::iter::empty())?.bytes();
+                std::fs::write(root.join(".test-anchor-component-metadata-entered"),b"empty tail").map_err(storage)?;
+                Some(crate::storage::build_budget::fill_memory_except_for_test(bytes))
+            }else{None};
+            build_at(&root,&cache,&self.config,&State::default()).await
+        }.map_err(|error|match error {
+            RecordError::Busy=>RecordError::Busy,
+            error=>storage(format!("stage=anchor_empty_tail {error}")),
+        })?;
         index.rotate_tail(tail,&mut ordinals,&mut locations,view::RotationBudget{max_segments:64,max_address_slots:self.config.max_records.checked_add(self.config.max_operations).and_then(|n|n.checked_mul(64)).ok_or_else(||storage("view address budget overflow"))?}).await?;
         #[cfg(test)]
         if root.join(".test-anchor-reject-loaded").exists() {
@@ -854,6 +951,53 @@ mod tests {
         assert!(PoolReader::open(root.path(),closure,budget(&settings).unwrap()).is_err());
     }
 
+    #[tokio::test(flavor="current_thread")]
+    async fn recursive_base_fallback_releases_private_image_io_loan() {
+        let root=tempfile::tempdir().unwrap();let path=root.path().join("partition");
+        let scope=Arc::new(crate::resources::Governor::default())
+            .admit("recursive-image-io".into(),crate::resources::Lane::Background,0).unwrap();
+        let p=scope.clone().run(RecordPartition::create(&path,config())).await.unwrap();
+        let first=write("first","a","alpha",ExpectedVersion::Absent);
+        let receipt=scope.clone().run(p.write(first.clone())).await.unwrap();
+        scope.clone().run(p.compact_journal()).await.unwrap();
+        let second=write("second","b","beta",ExpectedVersion::Absent);
+        let second_receipt=scope.clone().run(p.write(second.clone())).await.unwrap();
+        std::fs::write(path.join(".test-anchor-force-base-fallback"),b"force byte-bound fallback branch").unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5),scope.clone().run(p.compact_journal())).await.unwrap().unwrap();
+        assert!(p.inner.lock().await.anchor.as_ref().unwrap().state_blocks.is_empty());
+        p.finish_service_shutdown().await.unwrap();drop(p);
+        let p=scope.clone().run(RecordPartition::open(&path,config().max_journal_bytes)).await.unwrap();
+        assert_eq!(scope.clone().run(p.write(first)).await.unwrap(),receipt);
+        assert_eq!(scope.clone().run(p.write(second)).await.unwrap(),second_receipt);
+        p.finish_service_shutdown().await.unwrap();
+    }
+    #[tokio::test]
+    async fn proof_visitor_cannot_ignore_failure_or_hide_real_io() {
+        let temp=tempfile::tempdir().unwrap();let root=temp.path().join("records");
+        let p=RecordPartition::create(&root,config()).await.unwrap();
+        p.write(write("a","a","alpha",ExpectedVersion::Absent)).await.unwrap();p.compact_journal().await.unwrap();
+        let (reference,state)={let inner=p.inner.lock().await;(inner.anchor.clone().unwrap(),inner.state.try_clone().unwrap())};
+        let ignored=reference.verify_suffix_with(&root,&config(),&state,&[],|accept|{let _=accept(b"bad JSON");Ok(())});
+        assert!(matches!(ignored,Err(RecordError::Storage(_))));
+        let io=reference.verify_suffix_with(&root,&config(),&state,&[],|_|Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof,"real read failure")));
+        assert!(matches!(io,Err(RecordError::Storage(_))));
+        let frame=encode_entry(&Entry::Anchor(reference.clone())).unwrap();
+        let replaced=reference.verify_suffix_with(&root,&config(),&state,&[],|accept|{
+            let (result,hit)=crate::storage::build_budget::refuse_shared_at_for_test(0,||accept(&frame));
+            assert!(hit);assert!(result.is_err());
+            // A broken visitor might continue or fail restoring its cursor.
+            // Neither path may replay additional frames or conceal real I/O.
+            assert!(accept(&frame).is_err());
+            Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof,"later real read failure"))
+        });
+        assert!(matches!(replaced,Err(RecordError::Storage(_))));
+        let busy=reference.verify_suffix_with(&root,&config(),&state,&[],|accept|{
+            crate::storage::build_budget::refuse_shared_at_for_test(0,||accept(&frame)).0
+        });
+        assert_eq!(busy,Err(RecordError::Busy));
+        let valid=reference.verify_suffix_with(&root,&config(),&state,&[],|accept|accept(&frame));
+        valid.unwrap();p.finish_service_shutdown().await.unwrap();
+    }
     #[tokio::test]
     async fn manifest_writer_and_reader_agree_at_exact_byte_boundary() {
         let root=tempfile::tempdir().unwrap();
@@ -952,6 +1096,42 @@ mod tests {
         assert_eq!(inner.state.operations.len(),2);
         assert_eq!(inner.state.records["a"].document.as_ref().unwrap()["body"],serde_json::json!("base-body"));
         assert_eq!(inner.state.records["b"].document.as_ref().unwrap()["body"],serde_json::json!("delta-body"));
+    }
+    #[tokio::test]
+    async fn anchor_component_metadata_pressure_stays_busy_and_retries_without_fencing() {
+        let root=tempfile::tempdir().unwrap();let path=root.path().join("partition");let settings=config();
+        let p=RecordPartition::create(&path,settings.clone()).await.unwrap();
+        let request=write("metadata-pressure","a","alpha",ExpectedVersion::Absent);
+        let receipt=p.write(request.clone()).await.unwrap();
+        p.compact_journal().await.unwrap();
+        let before_anchor=serde_json::to_vec(p.inner.lock().await.anchor.as_ref().unwrap()).unwrap();
+        let before_state=checkpoint_codec::json_digest(&p.inner.lock().await.state).unwrap();
+        let before_memory=crate::storage::build_budget::used_memory_for_test();
+        let marker=path.join(".test-anchor-component-metadata-pressure");
+        std::fs::write(&marker,b"reject actual metadata reserve").unwrap();
+        // compact_journal uses the background indexer; this is the production
+        // synchronous anchor path whose empty-tail context wrapper is under test.
+        assert!(matches!(p.inner.lock().await.publish_anchor().await,Err(RecordError::Busy)));
+        assert!(path.join(".test-anchor-component-metadata-entered").exists(),"must reach empty-tail constructor");
+        {
+            let inner=p.inner.lock().await;
+            assert!(inner.healthy);assert!(!inner.output.read().unwrap().fenced);
+            assert_eq!(serde_json::to_vec(inner.anchor.as_ref().unwrap()).unwrap(),before_anchor);
+            assert_eq!(checkpoint_codec::json_digest(&inner.state).unwrap(),before_state);
+            assert!(p.indexes.error().is_none());
+        }
+        assert!(crate::storage::build_budget::used_memory_for_test()<=before_memory,"failed candidate must release its owners");
+        std::fs::remove_file(marker).unwrap();
+        assert_eq!(p.write(request.clone()).await.unwrap(),receipt);
+        assert_eq!(query(&p,SearchMode::Lexical).await.hits.len(),1);
+        p.inner.lock().await.publish_anchor().await.unwrap();
+        p.compact_journal().await.unwrap();
+        p.finish_service_shutdown().await.unwrap();drop(p);
+        let reopened=RecordPartition::open(&path,settings.max_journal_bytes).await.unwrap();
+        assert_eq!(reopened.write(request).await.unwrap(),receipt);
+        assert_eq!(query(&reopened,SearchMode::Lexical).await.hits.len(),1);
+        assert!(reopened.inner.lock().await.healthy);
+        reopened.finish_service_shutdown().await.unwrap();
     }
     #[tokio::test]
     async fn incremental_state_closure_survives_rejection_gc_and_reopen() {
@@ -1105,7 +1285,7 @@ mod tests {
         for n in 0..129 {let req=write(&format!("op-{n}"),&format!("r-{n}"),"alpha",ExpectedVersion::Absent);let receipt=p.write(req.clone()).await.unwrap();receipts.push((req,receipt));}
         {let inner=p.inner.lock().await;assert_eq!(inner.anchor.as_ref().unwrap().id,selected,"native rotation must not replace the State checkpoint");assert!(inner.index.detached_cache);assert_eq!(inner.index.components().await.len(),3);}
         assert_eq!(p.search("alpha".into(),None,SearchMode::Lexical,vec![],200).await.unwrap().count_total,130);
-        drop(p);
+        p.finish_service_shutdown().await.unwrap();drop(p);
         std::fs::write(path.join(".test-recovery-after-derived-seal"),b"fail").unwrap();
         let mut leftovers=None;
         for _ in 0..3 {
@@ -1223,7 +1403,7 @@ mod tests {
         std::fs::remove_file(path.join(".test-anchor-reject-loaded")).unwrap();
         p.compact_journal().await.unwrap();
         {let inner=p.inner.lock().await;let chosen=inner.anchor.as_ref().unwrap().segments.iter().find(|s|s.id==sealed.id).expect("same native package identity, not rebuilt from bodies");assert_eq!(chosen.files.as_slice(),sealed.files.as_slice());assert!(inner.index.pending_seals.is_empty());}
-        drop(p);let p=RecordPartition::open(&path,settings.max_journal_bytes).await.unwrap();
+        drop(held);p.finish_service_shutdown().await.unwrap();drop(p);let p=RecordPartition::open(&path,settings.max_journal_bytes).await.unwrap();
         assert_eq!(p.write(b).await.unwrap(),receipt);
         assert_eq!(query(&p,SearchMode::Lexical).await.hits.len(),3);
     }
@@ -1527,4 +1707,16 @@ mod tests {
         assert_eq!(serde_json::to_vec(&files(&selected,closure_limit(config.max_journal_bytes).unwrap()).unwrap()).unwrap(),files_before);
         drop(restored);std::fs::remove_dir_all(root).unwrap();
     }
+}
+
+#[cfg(test)]
+pub(super) async fn pause_file_io_for_test(root:&Path,stage:&str)->Result<(),RecordError>{
+    let pause=root.join(format!(".test-anchor-{stage}-io-pause"));
+    if pause.exists(){
+        std::fs::write(root.join(format!(".test-anchor-{stage}-io-started")),b"private file admission").map_err(storage)?;
+        tokio::time::timeout(std::time::Duration::from_secs(10),async {
+            while pause.exists(){tokio::time::sleep(std::time::Duration::from_millis(1)).await;}
+        }).await.map_err(|_|RecordError::Busy)?;
+    }
+    Ok(())
 }
