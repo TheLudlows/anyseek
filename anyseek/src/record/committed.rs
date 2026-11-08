@@ -1,6 +1,8 @@
 //! Ordered non-atomic commits with synchronous or asynchronous index publication.
 use super::write::IndexDelivery;
 use super::*;
+mod independent;
+pub use independent::IndependentItem;
 
 /// Result of one input position, in request order.
 #[derive(Debug)]
@@ -290,7 +292,7 @@ pub(super) async fn execute(
     let _memory = crate::storage::build_budget::reserve_memory(bytes as u64)
         .map_err(|_| RecordError::Busy)?;
     use futures::FutureExt;
-    std::panic::AssertUnwindSafe(execute_owned(&partition, requests, IndexDelivery::Asynchronous))
+    std::panic::AssertUnwindSafe(execute_owned(&partition, &requests, IndexDelivery::Asynchronous))
         .catch_unwind().await
         .map_err(|_| RecordError::OutcomeUnknown("Record batch owner unwound".into()))
 }
@@ -301,13 +303,12 @@ pub(super) async fn execute_with_delivery(
     copy_memory: Option<crate::storage::build_budget::MemoryLease>,
 ) -> Result<CommittedBatch, RecordError> {
     let bytes = request_bytes(&requests)?;
-    let memory = crate::storage::build_budget::reserve_memory((bytes as u64)
-        * if matches!(delivery, IndexDelivery::Synchronous) { 32 } else { 1 })
+    let memory = crate::storage::build_budget::reserve_memory(bytes as u64)
         .map_err(|_| RecordError::Busy)?;
     crate::resources::spawn(async move {
         let _copy_memory = copy_memory;
         let _memory = memory;
-        execute_owned(&partition, requests, delivery).await
+        execute_owned(&partition, &requests, delivery).await
     })
     .await
     .map_err(|error| RecordError::OutcomeUnknown(error.to_string()))
@@ -317,7 +318,7 @@ pub(super) async fn execute_with_delivery(
 // Requests, suffix classification and all per-prefix leases stay in that owner.
 async fn execute_owned(
     partition: &RecordPartition,
-    requests: Vec<RecordWrite>,
+    requests: &[RecordWrite],
     delivery: IndexDelivery,
 ) -> CommittedBatch {
     let mut batch = CommittedBatch {
@@ -327,14 +328,15 @@ async fn execute_owned(
             .collect(),
         stop: None,
     };
-    let mut offset = 0;
-    while offset < requests.len() {
+    let mut input = match write::BoundedInputs::new(requests) {
+        Ok(input) => input,
+        Err(error) => { batch.stop = Some(error); return batch; }
+    };
+    while input.offset() < requests.len() {
+        let offset = input.offset();
         let end = requests.len();
         match partition
-            .execute_writes_detailed(
-                requests[offset..end].to_vec(),
-                delivery,
-            )
+            .execute_input(&input, delivery)
             .await
         {
             Ok(result) => {
@@ -345,7 +347,7 @@ async fn execute_owned(
                         Err(error) => CommittedItem::Rejected(error),
                     };
                 }
-                offset += count;
+                input.advance(count);
                 if let Some(error) = result.stop {
                     batch.stop = Some(error);
                     break;
@@ -468,7 +470,7 @@ mod tests {
         let gate = root.join(".test-write-owner-panic");
         std::fs::write(&gate, b"panic").unwrap();
         let request = write("owner-panic", "r", "alpha", ExpectedVersion::Absent);
-        let failure = p.execute_writes_detailed(vec![request.clone()], IndexDelivery::Synchronous).await.err().unwrap();
+        let failure = p.execute_writes_detailed(std::slice::from_ref(&request), IndexDelivery::Synchronous).await.err().unwrap();
         assert!(matches!(failure.error, RecordError::OutcomeUnknown(_)));
         assert!(failure.scope.is_none());
         for asynchronous in [false, true] {

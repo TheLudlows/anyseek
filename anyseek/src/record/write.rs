@@ -53,6 +53,35 @@ pub(super) fn definite(error: &RecordError) -> bool {
 const MAX_BATCH_RECORDS: usize = 64;
 const MAX_BATCH_BYTES: usize = 4 * 1024 * 1024;
 
+/// Immutable request windows share one measured byte prefix. Advancing after a
+/// definite decision must not clone or reserialize the unattempted suffix.
+pub(super) struct BoundedInputs<'a> {
+    requests: &'a [RecordWrite],
+    ends: [usize; MAX_BATCH_RECORDS + 1],
+    offset: usize,
+}
+impl<'a> BoundedInputs<'a> {
+    pub fn new(requests: &'a [RecordWrite]) -> Result<Self, RecordError> {
+        if requests.is_empty() || requests.len() > MAX_BATCH_RECORDS {
+            return Err(RecordError::Rejected("invalid Record batch size".into()));
+        }
+        let mut ends = [0usize; MAX_BATCH_RECORDS + 1];
+        for (i, request) in requests.iter().enumerate() {
+            ends[i + 1] = ends[i].checked_add(checkpoint_codec::json_length(request)?)
+                .filter(|total| *total <= MAX_BATCH_BYTES)
+                .ok_or_else(|| RecordError::Rejected("Record batch byte budget exceeded".into()))?;
+        }
+        Ok(Self { requests, ends, offset: 0 })
+    }
+    fn requests(&self) -> &[RecordWrite] { &self.requests[self.offset..] }
+    fn bytes(&self) -> usize { self.ends[self.requests.len()] - self.ends[self.offset] }
+    pub fn offset(&self) -> usize { self.offset }
+    pub fn advance(&mut self, count: usize) {
+        assert!(count <= self.requests.len() - self.offset);
+        self.offset += count;
+    }
+}
+
 #[derive(Clone, Copy)]
 pub(super) enum IndexDelivery {
     Synchronous,
@@ -87,7 +116,7 @@ impl RecordPartition {
         // write/commit_writes in production; the executor itself is now inline.
         let partition = self.clone();
         crate::resources::spawn(async move {
-            partition.execute_writes_detailed(requests, delivery).await
+            partition.execute_writes_detailed(&requests, delivery).await
         }).await
             .map_err(|error| RecordError::OutcomeUnknown(error.to_string()))?
             .map_err(|failure| {
@@ -100,25 +129,31 @@ impl RecordPartition {
             })
     }
 
-    /// Execute within an already-owned write task. The caller must not drop this
-    /// future on client cancellation: synchronous delivery and run_queue own it.
+    // Test adapter for low-level fault probes without an existing input window.
+    #[cfg(test)]
     pub(super) async fn execute_writes_detailed(
         &self,
-        requests: Vec<RecordWrite>,
+        requests: &[RecordWrite],
         delivery: IndexDelivery,
     ) -> Result<BatchResult, BatchFailure> {
-        if requests.is_empty() || requests.len() > MAX_BATCH_RECORDS {
-            return Err(RecordError::Rejected("invalid Record batch size".into()).into());
-        }
-        let bytes = requests.iter().try_fold(0usize, |total, request| {
-            total
-                .checked_add(checkpoint_codec::json_length(request)?)
-                .filter(|total| *total <= MAX_BATCH_BYTES)
-                .ok_or_else(|| RecordError::Rejected("Record batch byte budget exceeded".into()))
-        })?;
+        let input = BoundedInputs::new(requests)?;
+        self.execute_input(&input, delivery).await
+    }
+
+    /// Execute within an already-owned write task. The caller must not drop this
+    /// future on client cancellation: synchronous delivery and run_queue own it.
+    pub(super) async fn execute_input(
+        &self,
+        input: &BoundedInputs<'_>,
+        delivery: IndexDelivery,
+    ) -> Result<BatchResult, BatchFailure> {
+        let requests = input.requests();
+        let bytes = input.bytes();
         // Retain queue/planner ownership until the owned task finishes, even if
         // the caller cancels. The existing admission semaphore bounds waiters.
-        let memory = crate::storage::build_budget::reserve_memory(bytes as u64)
+        // The input stays with its owner. Admit one bounded planning window
+        // before cloning individual commands, never a repeated suffix Vec.
+        let memory = crate::storage::build_budget::reserve_memory((bytes as u64) * 32)
             .map_err(|_| RecordError::Busy)?;
         let permit = self
             .admission
@@ -285,7 +320,7 @@ impl RecordPartition {
     async fn prepare_batch<'writer>(
         &self,
         writer: &'writer tokio::sync::OwnedMutexGuard<()>,
-        requests: Vec<RecordWrite>,
+        requests: &[RecordWrite],
     ) -> Result<PreparedBatch<'writer>, RecordError> {
         // A guard from another partition cannot authorize this captured basis.
         if !Arc::ptr_eq(tokio::sync::OwnedMutexGuard::mutex(writer), &self.writer) {
@@ -338,7 +373,7 @@ impl RecordPartition {
                     &input,
                     &config,
                     snapshot,
-                    request,
+                    request.clone(),
                     current_epoch(),
                     evaluation_time_ms,
                 )?;
@@ -665,14 +700,14 @@ mod tests {
         let b=RecordPartition::create(&root.path().join("b"),config()).await.unwrap();
         let wrong=b.writer.clone().lock_owned().await;
         let request=write("new","r","alpha",ExpectedVersion::Absent);
-        assert!(matches!(a.prepare_batch(&wrong,vec![request.clone()]).await,Err(RecordError::RecoveryRequired)));
+        assert!(matches!(a.prepare_batch(&wrong,std::slice::from_ref(&request)).await,Err(RecordError::RecoveryRequired)));
         drop(wrong);
         let writer=a.writer.clone().lock_owned().await;
         let mut target=b.inner.lock().await;
         let mut scope=AttemptScope::default();
-        let prepared=a.prepare_batch(&writer,vec![request.clone()]).await.unwrap();
+        let prepared=a.prepare_batch(&writer,std::slice::from_ref(&request)).await.unwrap();
         assert!(matches!(a.commit_batch(&mut target,prepared,&mut scope,persistence::Prepared::Local).await,Err(RecordError::RecoveryRequired)),"wrong Inner guard");
-        let prepared=a.prepare_batch(&writer,vec![request.clone()]).await.unwrap();
+        let prepared=a.prepare_batch(&writer,std::slice::from_ref(&request)).await.unwrap();
         assert!(matches!(b.commit_batch(&mut target,prepared,&mut scope,persistence::Prepared::Local).await,Err(RecordError::RecoveryRequired)),"wrong writer guard");
         drop(target);drop(writer);
         assert_eq!(a.write(request).await.unwrap().seq,1);
@@ -927,7 +962,7 @@ mod tests {
         // including the vector-only revision followed by an ordinary body update.
         let writer=p.writer.clone().lock_owned().await;
         let mut oracle=p.inner.lock().await.state.try_clone().unwrap();
-        let prepared = p.prepare_batch(&writer, requests.clone()).await.unwrap();
+        let prepared = p.prepare_batch(&writer, &requests).await.unwrap();
         assert_eq!(prepared.publication.len(), 4);
         for (plan, retained) in prepared.plans.iter().zip(&prepared.publication) {
             let mutation::PreparedWrite::Append { applied, .. } = plan else { panic!("append expected") };
@@ -969,7 +1004,7 @@ mod tests {
         p.inner.lock().await.fail_after_durable = true;
         let failure = p
             .execute_writes_detailed(
-                vec![
+                &[
                     old,
                     new.clone(),
                     new.clone(),
@@ -1122,6 +1157,22 @@ mod tests {
         let receipt = p.operation(&request.operation_id).await.unwrap().unwrap();
         assert_eq!(p.write(request).await.unwrap(), receipt);
         assert_eq!(p.get("r").await.unwrap().unwrap().version, 1);
+    }
+
+    #[test]
+    fn bounded_input_windows_preserve_borrowed_storage_and_exact_byte_counts() {
+        let requests: Vec<_> = (0..MAX_BATCH_RECORDS).map(|i|
+            write(&format!("window-{i}"), "same", &"x".repeat(i + 1), ExpectedVersion::Any)).collect();
+        let mut input = BoundedInputs::new(&requests).unwrap();
+        for offset in 0..requests.len() {
+            assert_eq!(input.offset(), offset);
+            assert_eq!(input.requests().as_ptr(), requests[offset..].as_ptr());
+            assert_eq!(input.bytes(), requests[offset..].iter()
+                .map(|request| checkpoint_codec::json_length(request).unwrap()).sum::<usize>());
+            input.advance(1);
+        }
+        assert!(input.requests().is_empty());
+        assert_eq!(input.bytes(), 0);
     }
 
     #[tokio::test]
