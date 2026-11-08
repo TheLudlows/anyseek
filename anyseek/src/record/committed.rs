@@ -682,14 +682,17 @@ mod tests {
             write("b", "b", "alpha", ExpectedVersion::Absent)];
         let bytes = request_bytes(&requests).unwrap() as u64;
         let writer = p.writer.lock().await;
+        let permits = p.admission.available_permits();
         let used = crate::storage::build_budget::used_memory_for_test();
         let owner = p.clone();
         let commands = requests.clone();
         let task = tokio::spawn(async move { owner.write_batch(&commands).await });
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            // Partition, caller and the single detached execution owner.
-            while Arc::strong_count(&p.inner) != 3 { tokio::task::yield_now().await; }
+            // Admission follows the detached executor's planner reservation.
+            while p.admission.available_permits() == permits { tokio::task::yield_now().await; }
         }).await.unwrap();
+        // Partition, caller and the single detached execution owner.
+        assert_eq!(Arc::strong_count(&p.inner), 3);
         let queued = crate::storage::build_budget::used_memory_for_test();
         task.abort();
         assert!(task.await.unwrap_err().is_cancelled());
