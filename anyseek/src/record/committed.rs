@@ -284,7 +284,15 @@ pub(super) async fn execute(
     partition: RecordPartition,
     requests: Vec<RecordWrite>,
 ) -> Result<CommittedBatch, RecordError> {
-    execute_with_delivery(partition, requests, IndexDelivery::Asynchronous, None).await
+    // run_queue already owns this request, its resource context and activity.
+    // Keep the former executor budget and panic boundary without another task.
+    let bytes = request_bytes(&requests)?;
+    let _memory = crate::storage::build_budget::reserve_memory(bytes as u64)
+        .map_err(|_| RecordError::Busy)?;
+    use futures::FutureExt;
+    std::panic::AssertUnwindSafe(execute_owned(&partition, requests, IndexDelivery::Asynchronous))
+        .catch_unwind().await
+        .map_err(|_| RecordError::OutcomeUnknown("Record batch owner unwound".into()))
 }
 pub(super) async fn execute_with_delivery(
     partition: RecordPartition,
@@ -299,69 +307,233 @@ pub(super) async fn execute_with_delivery(
     crate::resources::spawn(async move {
         let _copy_memory = copy_memory;
         let _memory = memory;
-        let mut batch = CommittedBatch {
-            results: requests
-                .iter()
-                .map(|_| CommittedItem::NotAttempted)
-                .collect(),
-            stop: None,
-        };
-        let mut offset = 0;
-        while offset < requests.len() {
-            let end = requests.len();
-            match partition
-                .execute_writes_detailed(
-                    requests[offset..end].to_vec(),
-                    delivery,
-                )
-                .await
-            {
-                Ok(result) => {
-                    let count = result.results.len();
-                    for (position, result) in result.results.into_iter().enumerate() {
-                        batch.results[offset + position] = match result {
-                            Ok(receipt) => CommittedItem::Committed(receipt),
-                            Err(error) => CommittedItem::Rejected(error),
-                        };
-                    }
-                    offset += count;
-                    if let Some(error) = result.stop {
-                        batch.stop = Some(error);
-                        break;
-                    }
-                    if count == 0 {
-                        batch.stop = Some(RecordError::RecoveryRequired);
-                        break;
-                    }
-                }
-                Err(failure) => {
-                    if let Some(scope) = failure.scope {
-                        for position in scope.persistence_attempted {
-                            batch.results[offset + position] = CommittedItem::OutcomeUnknown;
-                        }
-                        for (position, receipt) in scope.replayed {
-                            batch.results[offset + position] = CommittedItem::Committed(receipt);
-                        }
-                    } else {
-                        for result in &mut batch.results[offset..end] {
-                            *result = CommittedItem::OutcomeUnknown;
-                        }
-                    }
-                    batch.stop = Some(failure.error);
-                    break;
-                }
-            }
-        }
-        batch
+        execute_owned(&partition, requests, delivery).await
     })
     .await
     .map_err(|error| RecordError::OutcomeUnknown(error.to_string()))
+}
+
+// Called only by the detached synchronous owner or the owned queue worker.
+// Requests, suffix classification and all per-prefix leases stay in that owner.
+async fn execute_owned(
+    partition: &RecordPartition,
+    requests: Vec<RecordWrite>,
+    delivery: IndexDelivery,
+) -> CommittedBatch {
+    let mut batch = CommittedBatch {
+        results: requests
+            .iter()
+            .map(|_| CommittedItem::NotAttempted)
+            .collect(),
+        stop: None,
+    };
+    let mut offset = 0;
+    while offset < requests.len() {
+        let end = requests.len();
+        match partition
+            .execute_writes_detailed(
+                requests[offset..end].to_vec(),
+                delivery,
+            )
+            .await
+        {
+            Ok(result) => {
+                let count = result.results.len();
+                for (position, result) in result.results.into_iter().enumerate() {
+                    batch.results[offset + position] = match result {
+                        Ok(receipt) => CommittedItem::Committed(receipt),
+                        Err(error) => CommittedItem::Rejected(error),
+                    };
+                }
+                offset += count;
+                if let Some(error) = result.stop {
+                    batch.stop = Some(error);
+                    break;
+                }
+                if count == 0 {
+                    batch.stop = Some(RecordError::RecoveryRequired);
+                    break;
+                }
+            }
+            Err(failure) => {
+                if let Some(scope) = failure.scope {
+                    for position in scope.persistence_attempted {
+                        batch.results[offset + position] = CommittedItem::OutcomeUnknown;
+                    }
+                    for (position, receipt) in scope.replayed {
+                        batch.results[offset + position] = CommittedItem::Committed(receipt);
+                    }
+                } else {
+                    for result in &mut batch.results[offset..end] {
+                        *result = CommittedItem::OutcomeUnknown;
+                    }
+                }
+                batch.stop = Some(failure.error);
+                break;
+            }
+        }
+    }
+    batch
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::record::tests::{config, write};
+    #[tokio::test]
+    async fn owned_entry_cancellation_keeps_context_leases_and_shutdown() {
+        // Global build accounting must be isolated from unrelated tests.
+        if std::env::var_os("ANYSEEK_WRITE_OWNER_CHILD").is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "record::committed::tests::owned_entry_cancellation_keeps_context_leases_and_shutdown", "--nocapture"])
+                .env("ANYSEEK_WRITE_OWNER_CHILD", "1").output().unwrap();
+            assert!(output.status.success() && String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"),
+                "{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+            return;
+        }
+        use crate::resources::{Governor, Lane, Lifecycle};
+        use std::time::Duration;
+        for entry in ["single", "batch", "ingest"] {
+            for io_wait in [false, true] {
+                let initial = crate::storage::build_budget::used_memory_for_test();
+                let dir = tempfile::tempdir().unwrap();
+                let root = dir.path().join("records");
+                let p = RecordPartition::create(&root, config()).await.unwrap();
+                let before = crate::storage::build_budget::used_memory_for_test();
+                let permits = p.admission.available_permits();
+                let scope = Arc::new(Governor::default()).admit("write-owner".into(), Lane::Foreground, 0).unwrap();
+                let lifecycle = Arc::new(Lifecycle::default());
+                let activity = lifecycle.enter().unwrap();
+                let mut held_io = Vec::new();
+                if io_wait {
+                    while let Ok(lease) = scope.io() { held_io.push(lease); }
+                    assert!(!held_io.is_empty());
+                }
+                let writer = if io_wait { None } else { Some(p.writer.lock().await) };
+                let requests = if entry == "single" {
+                    vec![write("a", "a", "alpha", ExpectedVersion::Absent)]
+                } else {
+                    vec![write("a", "a", "alpha", ExpectedVersion::Absent),
+                         write("b", "b", "alpha", ExpectedVersion::Absent)]
+                };
+                let owner = p.clone();
+                let commands = requests.clone();
+                let request_scope = scope.clone();
+                let mut caller = tokio::spawn(activity.run(request_scope.run(async move {
+                    match entry {
+                        "single" => { owner.write(commands.into_iter().next().unwrap()).await.unwrap(); }
+                        "batch" => { owner.write_batch(&commands).await.unwrap(); }
+                        _ => { owner.commit_writes(commands).await.unwrap(); }
+                    }
+                })));
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    while p.admission.available_permits() == permits { tokio::task::yield_now().await; }
+                }).await.unwrap();
+                // With I/O exhausted, completion would expose lost Scope propagation.
+                assert!(tokio::time::timeout(Duration::from_millis(30), &mut caller).await.is_err(), "{entry}, io={io_wait}");
+                lifecycle.stop();
+                caller.abort();
+                assert!(caller.await.unwrap_err().is_cancelled());
+                assert!(crate::storage::build_budget::used_memory_for_test() > before);
+                assert!(tokio::time::timeout(Duration::from_millis(30), lifecycle.drained()).await.is_err(),
+                    "cancelled caller released the accepted activity: {entry}, io={io_wait}");
+                drop(writer);
+                drop(held_io);
+                tokio::time::timeout(Duration::from_secs(10), lifecycle.drained()).await.unwrap();
+                assert_eq!(p.admission.available_permits(), permits);
+                assert_eq!(p.committed_admitted(), 0);
+                assert!(scope.io().is_ok());
+                assert_eq!(Arc::strong_count(&p.inner), 1, "writer/worker owner retained after drain");
+                let mut receipts = Vec::new();
+                for request in &requests { receipts.push(p.operation(&request.operation_id).await.unwrap().unwrap()); }
+                assert_eq!(p.search("alpha".into(), None, SearchMode::Lexical, vec![], 10).await.unwrap().hits.len(), requests.len());
+                p.finish_service_shutdown().await.unwrap();
+                drop(p);
+                assert_eq!(crate::storage::build_budget::used_memory_for_test(), initial, "leaked owner budget: {entry}, io={io_wait}");
+                let reopened = RecordPartition::open(&root, config().max_journal_bytes).await.unwrap();
+                for (request, receipt) in requests.into_iter().zip(receipts) { assert_eq!(reopened.write(request).await.unwrap(), receipt); }
+                assert_eq!(reopened.search("alpha".into(), None, SearchMode::Lexical, vec![], 10).await.unwrap().hits.len(), if entry == "single" {1} else {2});
+                reopened.finish_service_shutdown().await.unwrap();
+                drop(reopened);
+                assert_eq!(crate::storage::build_budget::used_memory_for_test(), initial);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn executor_unscoped_panic_keeps_unknown_classification_and_releases_owner() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("records");
+        let p = RecordPartition::create(&root, config()).await.unwrap();
+        let gate = root.join(".test-write-owner-panic");
+        std::fs::write(&gate, b"panic").unwrap();
+        let request = write("owner-panic", "r", "alpha", ExpectedVersion::Absent);
+        let failure = p.execute_writes_detailed(vec![request.clone()], IndexDelivery::Synchronous).await.err().unwrap();
+        assert!(matches!(failure.error, RecordError::OutcomeUnknown(_)));
+        assert!(failure.scope.is_none());
+        for asynchronous in [false, true] {
+            let result = if asynchronous { p.commit_writes(vec![request.clone()]).await }
+                else { p.write_batch(std::slice::from_ref(&request)).await };
+            let result = result.unwrap();
+            assert!(matches!(&result.results[..], [CommittedItem::OutcomeUnknown]));
+            assert!(matches!(result.stop, Some(RecordError::OutcomeUnknown(_))));
+        }
+        assert!(p.writer.try_lock().is_ok());
+        assert_eq!(p.committed_admitted(), 0);
+        assert!(p.operation(&request.operation_id).await.unwrap().is_none());
+        std::fs::remove_file(gate).unwrap();
+        let receipt = p.write(request.clone()).await.unwrap();
+        p.finish_service_shutdown().await.unwrap();
+        drop(p);
+        let reopened = RecordPartition::open(&root, config().max_journal_bytes).await.unwrap();
+        assert_eq!(reopened.write(request).await.unwrap(), receipt);
+        reopened.finish_service_shutdown().await.unwrap();
+    }
+
+    #[cfg(feature = "fault-injection")]
+    #[tokio::test]
+    async fn queue_panic_preserves_unattempted_pending_and_drains_activity() {
+        use std::time::Duration;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("records");
+        let p = RecordPartition::create(&root, config()).await.unwrap();
+        let writer = p.writer.lock().await;
+        let permits = p.admission.available_permits();
+        let lifecycle = Arc::new(crate::resources::Lifecycle::default());
+        let first = write("first", "a", "alpha", ExpectedVersion::Absent);
+        let second = write("pending", "b", "beta", ExpectedVersion::Absent);
+        let owner = p.clone(); let request = first.clone();
+        let active = tokio::spawn(lifecycle.enter().unwrap().run(async move { owner.commit_writes(vec![request]).await }));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while p.admission.available_permits() == permits { tokio::task::yield_now().await; }
+        }).await.unwrap();
+        let owner = p.clone(); let request = second.clone();
+        let pending = tokio::spawn(lifecycle.enter().unwrap().run(async move { owner.commit_writes(vec![request]).await }));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while p.committed_admitted() != 2 { tokio::task::yield_now().await; }
+        }).await.unwrap();
+        let gate = root.join(".test-committed-panic-after-publication");
+        std::fs::write(&gate, b"panic").unwrap();
+        lifecycle.stop();
+        drop(writer);
+        assert!(matches!(active.await.unwrap(), Err(RecordError::OutcomeUnknown(_))));
+        let result = pending.await.unwrap().unwrap();
+        assert!(matches!(&result.results[..], [CommittedItem::NotAttempted]));
+        assert!(matches!(result.stop, Some(RecordError::RecoveryRequired)));
+        tokio::time::timeout(Duration::from_secs(10), lifecycle.drained()).await.unwrap();
+        assert_eq!(p.committed_admitted(), 0);
+        assert_eq!(p.admission.available_permits(), permits);
+        assert_eq!(Arc::strong_count(&p.inner), 1);
+        let receipt = p.operation(&first.operation_id).await.unwrap().unwrap();
+        assert!(p.operation(&second.operation_id).await.unwrap().is_none());
+        std::fs::remove_file(gate).unwrap();
+        p.finish_service_shutdown().await.unwrap(); drop(p);
+        let reopened = RecordPartition::open(&root, config().max_journal_bytes).await.unwrap();
+        assert_eq!(reopened.write(first).await.unwrap(), receipt);
+        assert_eq!(reopened.write(second).await.unwrap().seq, receipt.seq + 1);
+        reopened.finish_service_shutdown().await.unwrap();
+    }
+
     #[tokio::test]
     async fn single_and_one_item_batch_are_visible_durable_and_replayable() {
         let directory = tempfile::tempdir().unwrap();
@@ -513,14 +685,14 @@ mod tests {
         let commands = requests.clone();
         let task = tokio::spawn(async move { owner.write_batch(&commands).await });
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            // Partition, caller, outer execution and inner queued execution.
-            while Arc::strong_count(&p.inner) != 4 { tokio::task::yield_now().await; }
+            // Partition, caller and the single detached execution owner.
+            while Arc::strong_count(&p.inner) != 3 { tokio::task::yield_now().await; }
         }).await.unwrap();
         let queued = crate::storage::build_budget::used_memory_for_test();
         task.abort();
         assert!(task.await.unwrap_err().is_cancelled());
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            while Arc::strong_count(&p.inner) != 3 { tokio::task::yield_now().await; }
+            while Arc::strong_count(&p.inner) != 2 { tokio::task::yield_now().await; }
         }).await.unwrap();
         let cancelled = crate::storage::build_budget::used_memory_for_test();
         drop(writer);

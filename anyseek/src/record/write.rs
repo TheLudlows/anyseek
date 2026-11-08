@@ -83,8 +83,13 @@ impl RecordPartition {
         requests: Vec<RecordWrite>,
         delivery: IndexDelivery,
     ) -> Result<BatchResult, RecordError> {
-        self.execute_writes_detailed(requests, delivery)
-            .await
+        // Low-level cancellation probes need the owner supplied by public
+        // write/commit_writes in production; the executor itself is now inline.
+        let partition = self.clone();
+        crate::resources::spawn(async move {
+            partition.execute_writes_detailed(requests, delivery).await
+        }).await
+            .map_err(|error| RecordError::OutcomeUnknown(error.to_string()))?
             .map_err(|failure| {
                 // Low-level tests inspect the original recovery error contract.
                 let BatchFailure {
@@ -95,6 +100,8 @@ impl RecordPartition {
             })
     }
 
+    /// Execute within an already-owned write task. The caller must not drop this
+    /// future on client cancellation: synchronous delivery and run_queue own it.
     pub(super) async fn execute_writes_detailed(
         &self,
         requests: Vec<RecordWrite>,
@@ -118,11 +125,18 @@ impl RecordPartition {
             .clone()
             .try_acquire_owned()
             .map_err(|_| RecordError::Busy)?;
-        let partition = self.clone();
-        crate::resources::spawn(async move {
+        let partition = self;
+        // Preserve the old JoinError boundary around writer acquisition and
+        // cleanup. Publication panics below retain their attempted-item scope;
+        // a panic outside it has no trustworthy scope, just like task failure.
+        std::panic::AssertUnwindSafe(async move {
             let _permit = permit;
             let _memory = memory;
             let writer = partition.writer.clone().lock_owned().await;
+            #[cfg(test)]
+            if partition.inner.lock().await.journal.root().join(".test-write-owner-panic").exists() {
+                panic!("injected owner panic outside publication scope");
+            }
             let mut scope = AttemptScope::default();
             let result = std::panic::AssertUnwindSafe(async {
                 let mut inner = partition.inner.lock().await;
@@ -248,9 +262,10 @@ impl RecordPartition {
                 scope: Some(scope),
             })
         })
+        .catch_unwind()
         .await
-        .map_err(|error| BatchFailure {
-            error: RecordError::OutcomeUnknown(error.to_string()),
+        .map_err(|_| BatchFailure {
+            error: RecordError::OutcomeUnknown("Record batch executor unwound".into()),
             scope: None,
         })?
     }
