@@ -924,9 +924,15 @@ mod tests {
     }
     #[tokio::test]
     async fn unlocked_encoding_preserves_reads_writer_order_checkpoint_and_cancellation() {
-        assert_unlocked_preserves_reads_writer_order_checkpoint_and_cancellation("encode", false).await;
+        assert_unlocked_preserves_reads_writer_order_checkpoint_and_cancellation("encode", false, false).await;
     }
-    async fn assert_unlocked_preserves_reads_writer_order_checkpoint_and_cancellation(phase:&str, ttl:bool) {
+    #[tokio::test]
+    async fn committed_encoding_and_upload_cancellation_preserve_writer_and_cold_replay() {
+        for phase in ["encode", "upload"] {
+            assert_unlocked_preserves_reads_writer_order_checkpoint_and_cancellation(phase, false, true).await;
+        }
+    }
+    async fn assert_unlocked_preserves_reads_writer_order_checkpoint_and_cancellation(phase:&str, ttl:bool, asynchronous:bool) {
         let (p,_store,root,_db,clock)=source().await;
         let mut seed=write("seed","seed","seed",ExpectedVersion::Absent);
         if ttl { seed.temporal=Some(TemporalMetadata {expire_at_ms:Some(clock.0.load(Ordering::SeqCst)+100),..Default::default()}); }
@@ -934,7 +940,10 @@ mod tests {
         std::fs::write(root.join(format!(".test-write-{phase}-pause")),b"pause").unwrap();
         let first=write("off-lock-a","r","alpha",ExpectedVersion::Absent);
         let owner=p.clone();let request=first.clone();
-        let waiter=tokio::spawn(async move {owner.write(request).await});
+        let waiter=tokio::spawn(async move {
+            if asynchronous { owner.commit_writes(vec![request]).await.map(|_| ()) }
+            else { owner.write(request).await.map(|_| ()) }
+        });
         wait_write_phase(&root,phase).await;
         assert_eq!(tokio::time::timeout(Duration::from_secs(1),p.operation(&seed.operation_id)).await.unwrap().unwrap(),Some(receipt));
         assert!(p.operation(&first.operation_id).await.unwrap().is_none());
@@ -1039,7 +1048,7 @@ mod tests {
     #[tokio::test]
     async fn unlocked_upload_preserves_reads_writer_order_checkpoint_and_cancellation() {
         for ttl in [false,true] {
-            assert_unlocked_preserves_reads_writer_order_checkpoint_and_cancellation("upload", ttl).await;
+            assert_unlocked_preserves_reads_writer_order_checkpoint_and_cancellation("upload", ttl, false).await;
         }
     }
     #[tokio::test]
