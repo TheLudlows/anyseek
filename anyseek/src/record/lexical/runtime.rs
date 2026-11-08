@@ -12,6 +12,11 @@ use crate::record::build_budget::retained_memory;
 const ANALYSIS_BATCH_BYTES: u64 = 32 * 1024 * 1024;
 const ANALYSIS_BATCH_DOCUMENTS: usize = 128;
 
+enum RowInput<'a> {
+    Document(&'a Document),
+    Analyzed(&'a super::memory::Row),
+}
+
 // Every accepted row owns its native progress budget before WAL append.
 struct RowWorkspace { analysis: Charge, identity: Charge }
 struct PublishWorkspace { temporary: Charge, snapshot: Charge }
@@ -248,24 +253,26 @@ impl Runtime {
         publish: bool,
     ) -> Result<(), RecordError> {
         self.join_visible().await?;
-        self.append_inner(identity, document, publish, publish,None,None).await
+        self.append_inner(identity, RowInput::Document(document), publish, publish,None,None).await
     }
     /// Private replay retains the normal rotation count while delaying publication.
     pub(crate) async fn append_replayed(self: &Arc<Self>,identity:Identity,document:&Document)->Result<(),RecordError> {
         self.join_visible().await?;
-        self.append_inner(identity,document,false,true,None,None).await
+        self.append_inner(identity,RowInput::Document(document),false,true,None,None).await
     }
     async fn append_inner(
         self: &Arc<Self>,
         identity: Identity,
-        document: &Document,
+        input: RowInput<'_>,
         publish: bool,
         count_update: bool,
         workspace:Option<RowWorkspace>,
         fallback:Option<super::memory::Fallback>,
     ) -> Result<(), RecordError> {
-        let estimate =
-            crate::record::build_budget::document_estimate(document, &self.config.schema)?;
+        let estimate = match &input {
+            RowInput::Document(document) => crate::record::build_budget::document_estimate(document, &self.config.schema)?,
+            RowInput::Analyzed(row) => row.native_estimate,
+        };
         let (workspace,publication,writer,pending)=match fallback {
             Some(super::memory::Fallback{pending,workspace:Escrow{row,writer,publication}})=>{
                 if workspace.is_some(){return Err(storage("duplicate native progress ownership"));}
@@ -293,29 +300,38 @@ impl Runtime {
                 (workspace.analysis,Some(workspace.identity))
             },
             None=>{
+                if matches!(&input,RowInput::Analyzed(_)) {return Err(storage("analyzed row missing pre-WAL workspace"));}
                 let analysis=Charge::new(estimate,crate::resources::Scope::current().as_ref()).map_err(storage)?;
                 (analysis,None)
             }
         };
-        let analyzer = &self.analyzer;
-        let mut fields = Vec::new();
-        for field in self.config.schema.iter().filter(|f| f.index_lexical) {
-            let text = match document.get(&field.field) {
-                None => String::new(),
-                Some(value)
-                    if field.field_type == crate::index::FieldType::Json && value.is_object() =>
-                {
-                    let mut strings = Vec::new();
-                    crate::index::object_values_to_string_vec_recursive(value, &mut strings);
-                    strings.join(" ")
+        let fields = match input {
+            // Clone only after the pre-WAL RowWorkspace has been checked and
+            // moved into `analysis`. That owner follows the queued native doc;
+            // the original tokens stay charged to every pinned visible row.
+            RowInput::Analyzed(row) => row.analyzed.clone(),
+            RowInput::Document(document) => {
+                let mut fields = Vec::new();
+                for field in self.config.schema.iter().filter(|f| f.index_lexical) {
+                    let text = match document.get(&field.field) {
+                        None => String::new(),
+                        Some(value)
+                            if field.field_type == crate::index::FieldType::Json && value.is_object() =>
+                        {
+                            let mut strings = Vec::new();
+                            crate::index::object_values_to_string_vec_recursive(value, &mut strings);
+                            strings.join(" ")
+                        }
+                        Some(value) => value
+                            .as_str()
+                            .map(str::to_owned)
+                            .unwrap_or_else(|| value.to_string()),
+                    };
+                    fields.push(self.analyzer.field(&text).await);
                 }
-                Some(value) => value
-                    .as_str()
-                    .map(str::to_owned)
-                    .unwrap_or_else(|| value.to_string()),
-            };
-            fields.push(analyzer.field(&text).await);
-        }
+                fields
+            }
+        };
         self.blocking(data, move |owner, data| {
             #[cfg(feature="fault-injection")]
             if writer.is_some() && std::env::var("ANYSEEK_FALLBACK_CRASH_STAGE").as_deref()==Ok("before_native") {std::process::abort();}

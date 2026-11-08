@@ -52,5 +52,7 @@
   "record::committed::tests::owned_entry_cancellation_keeps_context_leases_and_shutdown",
   "record::committed::tests::executor_unscoped_panic_keeps_unknown_classification_and_releases_owner",
   "record::committed::tests::queue_panic_preserves_unattempted_pending_and_drains_activity",
-  "record::remote_checkpoint::tests::committed_encoding_and_upload_cancellation_preserve_writer_and_cold_replay"
+  "record::remote_checkpoint::tests::committed_encoding_and_upload_cancellation_preserve_writer_and_cold_replay",
+  "record::lexical::runtime::live::reuse_tests::visible_fields_are_analyzed_once_across_native_handoff",
+  "record::lexical::runtime::live::reuse_tests::retained_analysis_preserves_full_tokens_and_lexical_only_estimate"
 ]

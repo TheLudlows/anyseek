@@ -66,6 +66,7 @@ pub(super) struct Input {
     pub fields: Vec<Vec<String>>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct AnalyzedField {
     pub text: String,
     pub tokens: Vec<Token>,
