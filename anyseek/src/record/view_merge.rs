@@ -191,9 +191,17 @@ impl RetrievalView {
         &mut self, new_tail: VectorIndexArc, ordinals: &mut Vec<String>,
         locations: &mut BTreeMap<String, usize>, budget: RotationBudget,
     ) -> Result<(), RecordError> {
+        #[cfg(test)]
+        eprintln!("MERGE_DIAGNOSTIC drain_indexes");
         self.drain_indexes().await?;
+        #[cfg(test)]
+        eprintln!("MERGE_DIAGNOSTIC tail.commit");
         self.tail.commit().await.map_err(storage)?;
+        #[cfg(test)]
+        eprintln!("MERGE_DIAGNOSTIC lexical.seal");
         self.tail.read().await.segments[0].lexical.seal().await?;
+        #[cfg(test)]
+        eprintln!("MERGE_DIAGNOSTIC rotate_tail");
         self.rotate_tail(new_tail, ordinals, locations, budget).await?;
         self.detached_cache = true;
         Ok(())

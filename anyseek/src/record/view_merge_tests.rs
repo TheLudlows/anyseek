@@ -3,6 +3,7 @@ use crate::record::tests::{config, write};
 
 async fn freeze(p: &RecordPartition) {
     let mut inner = p.inner.lock().await;
+    eprintln!("MERGE_DIAGNOSTIC freeze seq={} root={}", inner.state.seq, inner.journal.root().display());
     let root = inner.journal.root().to_owned();
     let target = root.join(format!("cache-{:032x}", rand::random::<u128>()));
     let (tail, _) = build_at(&root, &target, &inner.config, &State::default()).await.unwrap();
@@ -116,6 +117,24 @@ async fn old_reader_retirement_survives_merge_rotation_and_second_merge() {
 
 #[tokio::test]
 async fn merge_keeps_unconsumed_tail_addresses_and_live_tokens() {
+    // Temporary Windows diagnostic: independent processes preserve the normal
+    // fixture/ledger isolation while increasing chances of observing the fence.
+    #[cfg(windows)]
+    if std::env::var_os("ANYSEEK_MERGE_RECOVERY_DIAGNOSTIC_CHILD").is_none() {
+        for round in 1..=32 {
+            eprintln!("MERGE_DIAGNOSTIC child {round}/32");
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "record::view::merge::tests::merge_keeps_unconsumed_tail_addresses_and_live_tokens",
+                    "--nocapture", "--test-threads=1"])
+                .env("ANYSEEK_MERGE_RECOVERY_DIAGNOSTIC_CHILD", "1")
+                .output().unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(output.status.success() && stdout.contains("test result: ok. 1 passed; 0 failed;"),
+                "merge diagnostic child {round}/32 failed: {}\nstdout:\n{stdout}\nstderr:\n{stderr}", output.status);
+        }
+        return;
+    }
     let temporary = tempfile::tempdir().unwrap();
     let root = temporary.path().join("records");
     let p = seeded(&root).await;
