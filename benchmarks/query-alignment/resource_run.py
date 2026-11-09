@@ -1,6 +1,6 @@
-import json,resource,subprocess,sys
+"""Compatibility path for the shared fresh-process resource wrapper."""
 from pathlib import Path
-p=subprocess.run(sys.argv[2:])
-r=resource.getrusage(resource.RUSAGE_CHILDREN)
-Path(sys.argv[1]).write_text(json.dumps({'max_rss_kib':r.ru_maxrss,'user_s':r.ru_utime,'system_s':r.ru_stime,'status':p.returncode}))
-sys.exit(p.returncode)
+import runpy
+
+if __name__ == '__main__':
+    runpy.run_path(str(Path(__file__).resolve().parents[1] / 'resource_run.py'), run_name='__main__')

@@ -10,7 +10,7 @@ def doc(i,rev=0):
  r=random.Random(SEED+i*7919+rev*104729)
  return {'body':'common tag'+chr(97+i%16)+' marker'+b.codeword(i+rev*1000000)+' '+' '.join('word'+chr(97+r.randrange(16)) for _ in range(24)),'serial':i,'group':i%16,'vector':[r.randrange(-16,17)/16 for _ in range(DIM)]}
 def commands(start,count,rev):
- return [{'operation_id':b.m.oid(EPOCH,f'query-validation-{i}-{rev}'),'record_id':f'r{i:06d}','expected':'Absent' if rev==0 else {'Match':1},'document':doc(i,rev)} for i in range(start,start+count)]
+ return [{'operation_id':b.oid(EPOCH,f'query-validation-{i}-{rev}'),'record_id':f'r{i:06d}','expected':'Absent' if rev==0 else {'Match':1},'document':doc(i,rev)} for i in range(start,start+count)]
 def dump(p,x):p.write_text(json.dumps(x,indent=2)+'\n')
 def write(s,rows):
  r,ms,a=b.request(s,'POST',b.path(C)+'/ingest',{'records':rows})
@@ -29,20 +29,20 @@ def seed():
  if p.exists():return p
  s=b.Server(ROOT/'bin/base-server',p,ROOT/'http-seed.log',[0,1])
  try:
-  s.call('POST','/api/v1/tenants',{'operation_id':b.m.oid(EPOCH,'tenant'),'tenant_id':'bench'},b.m.MASTER)
-  s.call('POST','/api/v1/apikey',{'operation_id':b.m.oid(EPOCH,'key'),'key_id':'bench','tenant_id':'bench','apikey_base64':b.m.KEY},b.m.MASTER)
+  s.call('POST','/api/v1/tenants',{'operation_id':b.oid(EPOCH,'tenant'),'tenant_id':'bench'},b.MASTER)
+  s.call('POST','/api/v1/apikey',{'operation_id':b.oid(EPOCH,'key'),'key_id':'bench','tenant_id':'bench','apikey_base64':b.KEY},b.MASTER)
   config={'index_name':'query-alignment-768','tokenizer':'TantivySimpleV1','schema':[{'field':'body','field_type':'Text','store':True,'index_lexical':True},{'field':'group','field_type':'Int','store':True,'filterable':True,'index_lexical':False},{'field':'serial','field_type':'Int','store':True,'filterable':True,'index_lexical':False},{'field':'vector','field_type':'Json','store':False,'index_lexical':False,'index_vector':True}],'vector':{'dimensions':DIM}}
-  s.call('POST','/api/v1/index',{'operation_id':b.m.oid(EPOCH,'collection'),'collection_id':C,'config':config,'capacity_profile':'standard_10k'})
+  s.call('POST','/api/v1/index',{'operation_id':b.oid(EPOCH,'collection'),'collection_id':C,'config':config,'capacity_profile':'standard_10k'})
   for i in range(0,N,16):write(s,commands(i,16,0))
   b.wait(s,C,N);b.request(s,'PATCH',b.path(C))
   dump(ROOT/'http-seed-signature.json',{m:sig(s,m) for m in ['lexical','hybrid','facet']})
  finally:s.close()
- dump(ROOT/'http-seed-files.json',b.m.files(p));return p
+ dump(ROOT/'http-seed-files.json',b.files(p));return p
 
 def run(version,mode,index,out,source):
  out.mkdir();data=out/'db';shutil.copytree(source,data)
  for i in range(WRITES*BATCH):doc(i,1)
- assert b.m.files(data)==json.loads((ROOT/'http-seed-files.json').read_text())
+ assert b.files(data)==json.loads((ROOT/'http-seed-files.json').read_text())
  s=b.Server(ROOT/f'bin/{version}-server',data,out/'server.log',[0,1]);errors=[];reads=[];writes=[];progress=[];success=False;sampler=None
  try:
   initial=sig(s,mode);assert initial==json.loads((ROOT/'http-seed-signature.json').read_text())[mode]

@@ -68,3 +68,11 @@ http-samples.json.gz contains all timed sample latencies,attempt statuses,progre
 
 ## Remaining scope
 No approximate-ANN recall study,real S3,hard power loss,long-run stability or arbitrary high-concurrency capacity claims. Only one high dimension/population was measured. Global allocator request-byte reductions are not resident-memory reductions. Hybrid/facet component-guard ownership and slow-query/consumer interference are a separate diagnostic/design task; no production restructuring of that path is included.
+
+## Shared runner maintenance
+The compatibility allocator entry now uses `../shared_query_compare.py` (three
+ABBA groups and resource sidecars remain its defaults). HTTP lifecycle/transport
+and explicit Busy retry helpers are shared with write-cost via
+`../shared_record_http.py`; workloads, thread-local status and sampling stay local.
+This consolidation does not replace the recorded raw samples or change their
+provenance. Runner regression checks are listed in `../README.md`.
