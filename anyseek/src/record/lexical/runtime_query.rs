@@ -117,7 +117,6 @@ pub(crate) async fn search(
     for segment in &root.segments {
         snapshots.push(segment.lexical.snapshot().await?);
     }
-    let mut selected = BTreeSet::new();
     let mut locations = BTreeMap::new();
     let n = shards.len();
     // Components expose stable logical identities. Native and vector rows can
@@ -137,17 +136,6 @@ pub(crate) async fn search(
             if vectors.insert(identity, (local * n + slot,
                 !crate::metadata_filter::is_facet_filter(shard, &compiled, local))).is_some() {
                 return Err(storage("duplicate live vector revision identity"));
-            }
-        }
-    }
-    for snapshot in &snapshots {
-        for identity in snapshot.identities.iter() {
-            if let Some(&(address, accepts)) = vectors.get(identity) {
-                selected.insert(identity.clone());
-                // Only accepted identities can become hits. This map is both
-                // the metadata gate and address lookup; corpus selection above
-                // still includes filtered rows for unchanged global statistics.
-                if accepts { locations.insert(identity.clone(), address); }
             }
         }
     }
@@ -181,10 +169,17 @@ pub(crate) async fn search(
             super::super::query::pause(path, ".test-lexical-capture-pause").await?;
         }
     }
-    let corpus = super::scoring::CorpusView::select(
+    let corpus = super::scoring::CorpusView::select_matching(
         &snapshots.iter().map(Arc::as_ref).collect::<Vec<_>>(),
         cut,
-        &selected,
+        |identity| {
+            if let Some(&(address, accepts)) = vectors.get(identity) {
+                // Filters gate hits only; every joined row remains in BM25.
+                // Snapshot ownership keeps these borrowed map keys alive.
+                if accepts { locations.insert(identity, address); }
+                true
+            } else { false }
+        },
     )?;
     let names = config
         .schema

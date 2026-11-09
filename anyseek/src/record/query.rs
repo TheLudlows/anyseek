@@ -406,6 +406,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn native_join_accepts_lag_but_rejects_unselected_vector_duplicates() {
+        let temporary = tempfile::tempdir().unwrap();
+        let p = RecordPartition::create(&temporary.path().join("records"), config()).await.unwrap();
+        for id in ["a", "b"] {
+            p.write(write(id, id, "alpha", ExpectedVersion::Absent)).await.unwrap();
+        }
+        let handle = p.inner.lock().await.index.capture_query(10).await.unwrap();
+        let native = lexical::runtime::Runtime::create(&temporary.path().join("lagging"), &config()).unwrap();
+        let doc = write("unused", "unused", "alpha", ExpectedVersion::Absent).document.unwrap();
+        native.append(lexical::Identity {id:"a".into(), version:1, revision:1}, &doc, true).await.unwrap();
+        native.seal().await.unwrap();
+        handle.index.write().await.segments[0].lexical = native;
+        for (keys, revisions, duplicate) in [
+            (["a", "b"], [(1,1), (1,2)], false),
+            (["a", "a"], [(1,1), (1,2)], false),
+            (["z", "z"], [(1,7), (1,7)], true),
+        ] {
+            {
+                let root = handle.index.read().await;
+                let mut shard = root.segments[0].vector.write().await;
+                let active = shard.active.as_mut().unwrap();
+                active.keys = keys.into_iter().map(str::to_owned).collect();
+                active.revisions = revisions.to_vec();
+            }
+            let result = lexical::runtime_query::search(&handle.index, "alpha".into(), None,
+                SearchMode::Lexical, QueryType::Union, 0, 10, ResultType::Count,
+                vec![], vec![], vec![], lexical::Cut {sequence:u64::MAX, evaluation_time_ms:u64::MAX}).await;
+            if duplicate {
+                assert!(matches!(result, Err(RecordError::Storage(message))
+                    if message == "duplicate live vector revision identity"));
+            } else { assert_eq!(result.unwrap().result_count_total, 1); }
+        }
+        // Restore the test-mutated metadata before ordinary shutdown.
+        {
+            let root = handle.index.read().await;
+            let mut shard = root.segments[0].vector.write().await;
+            let active = shard.active.as_mut().unwrap();
+            active.keys = vec!["a".into(), "b".into()];
+            active.revisions = vec![(1,1), (1,2)];
+        }
+        drop(handle);
+        p.finish_service_shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn candidate_deadline_is_rechecked_after_scoring_without_persistence() {
         struct Clock(std::sync::atomic::AtomicU64);
         impl temporal::Clock for Clock {fn now_ms(&self)->Result<u64,RecordError>{Ok(self.0.load(std::sync::atomic::Ordering::SeqCst))}}

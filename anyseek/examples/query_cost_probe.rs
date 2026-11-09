@@ -51,7 +51,7 @@ async fn main() {
     };
     assert_eq!(p.statistics().await.unwrap().active_records,n);
     let mut rows=vec![];
-    for label in ["lexical","count","facet","hybrid","vector","statistics"] {
+    for label in ["lexical","count","facet","selective","hybrid","vector","statistics"] {
         let mut samples=vec![];let mut oracle=None;
         for i in 0..70 {
             if std::env::var_os("ANYSEEK_QUERY_PROBE_TRACE").is_some() {eprintln!("CASE {label} {i}");}
@@ -63,7 +63,7 @@ async fn main() {
                 let mode=match label {
                     "hybrid"=>SearchMode::Hybrid {similarity_threshold:None,ann_mode:AnnMode::All,rrf:RrfOptions {keyword_candidates:Some(32),vector_candidates:Some(32),..Default::default()}},
                     "vector"=>SearchMode::Vector {similarity_threshold:None,ann_mode:AnnMode::All},_=>SearchMode::Lexical};
-                let r=p.query(RecordQuery {text:"alpha beta".into(),vector:matches!(label,"hybrid"|"vector").then_some(Embedding::F32(vec![1.0,0.0,0.0])),mode,query_type:QueryType::Union,offset:0,length:10,result_type:if label=="count" {ResultType::Count} else {ResultType::TopkCount},fields:vec![],filters:vec![],sort:if label=="facet" {vec![ResultSort {field:"rank".into(),order:SortOrder::Ascending}]} else {vec![]},temporal:None}).await.unwrap();
+                let r=p.query(RecordQuery {text:"alpha beta".into(),vector:matches!(label,"hybrid"|"vector").then_some(Embedding::F32(vec![1.0,0.0,0.0])),mode,query_type:QueryType::Union,offset:0,length:10,result_type:if label=="count" {ResultType::Count} else {ResultType::TopkCount},fields:vec![],filters:if label=="selective" {vec![anyseek::search::FacetFilter::Int {field:"rank".into(),filter:0..1}]} else {vec![]},sort:if label=="facet" {vec![ResultSort {field:"rank".into(),order:SortOrder::Ascending}]} else {vec![]},temporal:None}).await.unwrap();
                 let elapsed=start.elapsed().as_nanos();
                 (elapsed,json!({"count":r.count_total,"active":r.statistics.active_records,"physical":r.statistics.physical_versions,"hits":r.hits.iter().map(|h|json!([h.record.record_id,h.score.to_bits(),h.channels.iter().map(|c|json!([c.channel,c.rank,c.raw_score.map(f32::to_bits),c.rrf_contribution.map(f32::to_bits)])).collect::<Vec<_>>()])).collect::<Vec<_>>()}))
             };
