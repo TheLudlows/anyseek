@@ -1,0 +1,23 @@
+{
+  "platform": "Linux-6.18.57-x86_64-with-glibc2.41",
+  "clock_ticks": 100,
+  "cpu_max": "400000 100000\n",
+  "memory_max": "17179869184\n",
+  "cpu_affinity": [
+    0,
+    1
+  ],
+  "seed": "fixed repeated text; 24 unique records + 1 warm per profile",
+  "source_base": "ed3052f2afdbcf18392a76a4bd3816e4e96275a1",
+  "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+  "build": {
+    "profile": "release test",
+    "opt_level": 3,
+    "lto": false,
+    "codegen_units": 16,
+    "features": "default + fault-injection",
+    "panic": "test unwind"
+  },
+  "baseline_instrumentation_sha256": "27ba12600830f3808888a9ee376a475609f652d28c2276557b96b752a1cee14b",
+  "reproduction_patch_sha256": "650b66824461410540de7845c688de62e6262f8edb915862a0a954de174bf5e2"
+}

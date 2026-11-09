@@ -10,6 +10,8 @@ use ahash::{AHashMap, AHashSet};
 use tantivy::query::{AllQuery, BooleanQuery as NativeBooleanQuery, EmptyQuery, Occur, PhraseQuery as NativePhraseQuery, TermQuery as NativeTermQuery};
 
 pub(super) struct Analyzer {
+    #[cfg(test)]
+    pub(super) field_calls: std::sync::atomic::AtomicUsize,
     meta: IndexMetaObject,
     _memory: Option<crate::resources::MemoryReservation>,
     stop_words: AHashSet<String>,
@@ -55,6 +57,8 @@ impl Analyzer {
         let (stop_words, _, frequent) = crate::index::analysis_dictionaries(&meta);
         let standard = crate::tokenizer::standard::StandardAnalyzer::new(meta.tokenizer).map_err(storage)?;
         Ok(Self {
+            #[cfg(test)]
+            field_calls: Default::default(),
             meta,
             _memory: None,
             stop_words,
@@ -79,6 +83,8 @@ impl Analyzer {
         }
     }
     pub(super) async fn field(&self, input: &str) -> AnalyzedField {
+        #[cfg(test)]
+        self.field_calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut unique = AHashMap::new();
         let mut length = 0;
         analyze(

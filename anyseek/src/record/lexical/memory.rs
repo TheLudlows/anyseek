@@ -34,12 +34,15 @@ pub(crate) struct Row {
     pub identity: Arc<Identity>,
     pub lengths: Vec<u64>,
     pub postings: Vec<BTreeMap<String,Vec<u32>>>,
-    pub document: Document,
+    // The visible snapshot owns the original tokens; native indexing takes a
+    // separately charged copy, including offsets and multi-position grams.
+    pub analyzed: Vec<AnalyzedField>,
+    pub native_estimate: u64,
     pub reservation: Reservation,
 }
 impl Row {
     pub(super) async fn analyze(identity: Identity, document: &Document, config: &RecordConfig, analyzer: &super::query::Analyzer, reservation: Reservation)->Result<Arc<Self>,RecordError>{
-        let mut lengths=Vec::new();let mut postings=Vec::new();let mut retained=Document::new();
+        let mut lengths=Vec::new();let mut postings=Vec::new();let mut retained=Document::new();let mut analyzed=Vec::new();
         for field in config.schema.iter().filter(|f|f.index_lexical) {
             let text=match document.get(&field.field){
                 None=>String::new(),
@@ -49,10 +52,17 @@ impl Row {
             if let Some(value)=document.get(&field.field){retained.insert(field.field.clone(),value.clone());}
             let field=analyzer.field(&text).await;lengths.push(u64::from(field.length));
             let mut terms:BTreeMap<String,Vec<u32>>=BTreeMap::new();
-            for token in field.tokens {terms.entry(token.text).or_default().push(token.position as u32);}
-            postings.push(terms);
+            for token in &field.tokens {
+                if let Some(positions)=terms.get_mut(&token.text) {positions.push(token.position as u32);}
+                else {terms.insert(token.text.clone(),vec![token.position as u32]);}
+            }
+            postings.push(terms);analyzed.push(field);
         }
-        Ok(Arc::new(Self{identity:Arc::new(identity),lengths,postings,document:retained,reservation}))
+        // Preserve the old lexical-only native estimate. The full pre-WAL
+        // reservation may also include vectors; using it here changes drain
+        // cadence even though the native document has not changed.
+        let native_estimate=crate::record::build_budget::document_estimate(&retained,&config.schema)?;
+        Ok(Arc::new(Self{identity:Arc::new(identity),lengths,postings,analyzed,native_estimate,reservation}))
     }
     pub(super) fn positions(&self,fields:&[Field],field:Field,term:&str)->&[u32]{
         fields.iter().position(|f|*f==field).and_then(|i|self.postings[i].get(term)).map(Vec::as_slice).unwrap_or(&[])
