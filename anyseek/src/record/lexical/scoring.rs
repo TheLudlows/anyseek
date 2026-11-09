@@ -295,47 +295,60 @@ pub(super) struct CorpusView<'a> {
     views: Vec<ActiveView<'a>>,
 }
 impl<'a> CorpusView<'a> {
+    #[cfg(test)]
     pub(super) fn select(
         snapshots: &[&'a Snapshot],
         cut: Cut,
         identities: &BTreeSet<Identity>,
     ) -> Result<Self, RecordError> {
-        if snapshots.is_empty() || snapshots.len() > 64 || identities.len() > MAX_POPULATION {
+        if identities.len() > MAX_POPULATION {
             return Err(storage("native corpus topology budget exceeded"));
         }
-        if identities
-            .iter()
-            .map(|i| &i.id)
-            .collect::<BTreeSet<_>>()
-            .len()
-            != identities.len()
-        {
+        if identities.iter().map(|i| &i.id).collect::<BTreeSet<_>>().len() != identities.len() {
             return Err(storage("multiple active revisions across packages"));
         }
-        let mut found = BTreeSet::new();
-        let mut views = Vec::new();
+        let corpus = Self::select_matching(snapshots, cut, |identity| identities.contains(identity))?;
+        if corpus.views.iter().map(|view| view.live.len()).sum::<usize>() != identities.len() {
+            return Err(storage("selected revision absent from native corpus"));
+        }
+        Ok(corpus)
+    }
+
+    /// Join only matching native identities: asynchronous consumers may expose
+    /// different prefixes. Unselected rows do not affect the selected corpus.
+    /// Borrow snapshot identities and construct ordinal views in this one pass.
+    pub(super) fn select_matching(
+        snapshots: &[&'a Snapshot],
+        cut: Cut,
+        mut matches: impl FnMut(&'a Identity) -> bool,
+    ) -> Result<Self, RecordError> {
+        if snapshots.is_empty() || snapshots.len() > 64 {
+            return Err(storage("native corpus topology budget exceeded"));
+        }
+        let mut found = BTreeMap::new();
+        let mut views = Vec::with_capacity(snapshots.len());
         for snapshot in snapshots {
+            // Validate even when no identities match this package.
             if snapshot.cut.sequence > cut.sequence
                 || snapshot.cut.evaluation_time_ms > cut.evaluation_time_ms
                 || snapshot.names != snapshots[0].names
             {
                 return Err(storage("native corpus cut/schema mismatch"));
             }
-            let mut selected = BTreeSet::new();
-            for identity in snapshot
-                .identities
-                .iter()
-                .filter(|i| identities.contains(*i))
-            {
-                if !found.insert(identity.clone()) {
-                    return Err(storage("duplicate selected native revision"));
+            let mut live = BTreeSet::new();
+            for (ordinal, identity) in snapshot.identities.iter().enumerate() {
+                if !matches(identity) { continue; }
+                if let Some(previous) = found.insert(identity.id.as_str(), identity) {
+                    return Err(storage(if previous == identity {
+                        "duplicate selected native revision"
+                    } else { "multiple active revisions across packages" }));
                 }
-                selected.insert(identity.clone());
+                if found.len() > MAX_POPULATION {
+                    return Err(storage("native corpus topology budget exceeded"));
+                }
+                live.insert(ordinal);
             }
-            views.push(snapshot.active(snapshot.cut, &selected)?);
-        }
-        if &found != identities {
-            return Err(storage("selected revision absent from native corpus"));
+            views.push(snapshot.with_live(live));
         }
         Ok(Self { views })
     }

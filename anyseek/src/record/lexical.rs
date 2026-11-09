@@ -454,6 +454,7 @@ impl Snapshot {
     pub(super) fn native_segment_count(&self)->usize {self.searcher.segment_readers().len()}
     /// Exact revision selection, before both statistics and Top-K. Metadata
     /// filters are supplied separately and do not change corpus statistics.
+    #[cfg(test)]
     pub(super) fn active(
         &self,
         cut: Cut,
@@ -475,6 +476,11 @@ impl Snapshot {
         if live.len() != identities.len() {
             return Err(storage("active identity absent from lexical package"));
         }
+        Ok(self.with_live(live))
+    }
+
+    // Ordinals have already been validated against this fixed snapshot.
+    fn with_live(&self, live: BTreeSet<usize>) -> ActiveView<'_> {
         #[cfg(test)]
         let field_tokens = {
         let mut field_tokens = BTreeMap::new();
@@ -489,12 +495,12 @@ impl Snapshot {
         }
             field_tokens
         };
-        Ok(ActiveView {
+        ActiveView {
             snapshot: self,
             live,
             #[cfg(test)]
             field_tokens,
-        })
+        }
     }
 }
 

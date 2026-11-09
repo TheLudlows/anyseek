@@ -203,5 +203,7 @@
   "record::committed::tests::synchronous_batch_consumer_failure_keeps_unknown_scope_and_output_fence",
   "record::committed::tests::synchronous_batch_cancelled_waiter_keeps_publication_owned",
   "record::remote_checkpoint::tests::cold_cache_eviction_waits_for_materializer_without_checkpointing",
-  "record::remote_checkpoint::tests::dropped_partition_keeps_cross_process_owner_until_materializer_exits"
+  "record::remote_checkpoint::tests::dropped_partition_keeps_cross_process_owner_until_materializer_exits",
+  "record::query::tests::native_join_accepts_lag_but_rejects_unselected_vector_duplicates",
+  "record::lexical::tests::native_corpus_uses_one_selected_population_across_frozen_and_tail"
 ]
