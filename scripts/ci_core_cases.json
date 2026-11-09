@@ -109,6 +109,8 @@
   "record::view::merge::tests::same_version_vector_patch_retires_premerge_reader_row",
   "record::view::merge::tests::detached_merge_keeps_unrelated_authority_corruption_fail_closed",
   "storage::build_budget::tests::concurrent_rescan_preserves_inflight_charge_and_serial_rescan_refunds_retired_files",
+  "storage::build_budget::tests::disk_scan_accepts_retired_entry_without_weakening_capacity",
+  "storage::build_budget::tests::concurrent_disk_scan_keeps_charge_for_entry_retired_during_scan",
   "record::cache_merge::tests::derived_merge_catches_concurrent_update_delete_and_recovers_without_certificate",
   "record::cache_merge::tests::derived_candidate_failure_preserves_live_view_and_recovery",
   "record::cache_merge::tests::abandoned_cache_job_retains_owner_and_management_returns_busy",
