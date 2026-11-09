@@ -433,7 +433,7 @@ impl RetrievalView {
         sort: Vec<ResultSort>,
         cut: lexical::Cut,
     ) -> Result<crate::search::ResultObject, RecordError> {
-        lexical::runtime_query::search(&self.query,text,vector,mode,query_type,offset,length,result_type,fields,filters,sort,cut,&mut None).await
+        lexical::runtime_query::search(&self.query,text,vector,mode,query_type,offset,length,result_type,fields,filters,sort,cut).await
     }
     pub(super) async fn local_statistics(&self)->Result<Vec<crate::active::ActiveStatistics>,RecordError>{
         let root=self.query.read().await;

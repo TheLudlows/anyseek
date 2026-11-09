@@ -23,9 +23,7 @@ pub(crate) async fn search(
     filters: Vec<FacetFilter>,
     sort: Vec<ResultSort>,
     cut: Cut,
-    captured: &mut Option<Vec<super::super::query::Candidate>>,
 ) -> Result<ResultObject, RecordError> {
-    *captured = None;
     {
         let root = index.read().await;
         let config = &root.segments.first().ok_or_else(|| storage("empty retrieval view"))?.lexical.config;
@@ -155,7 +153,7 @@ pub(crate) async fn search(
             let (version, revision) = active.revisions[local];
             let identity = Identity { id: key.clone(), version, revision };
             if vectors.insert(identity, (local * n + slot,
-                !crate::metadata_filter::is_facet_filter(shard, &compiled, local), active.fingerprints[local])).is_some() {
+                !crate::metadata_filter::is_facet_filter(shard, &compiled, local))).is_some() {
                 return Err(storage("duplicate live vector revision identity"));
             }
         }
@@ -171,34 +169,25 @@ pub(crate) async fn search(
             Some(ResultSortIndex { idx, order: s.order.clone() })
         })
         .collect::<Vec<_>>();
-    // The captured root fixes physical addresses: append adds rows, retirement
-    // changes membership only, and merge/rotation install different components.
-    // A vector hit may already be retired and absent from `vectors`. Preserve
-    // its OLD physical identity, not the newer live row with the same ID.
-    let mut vector_identities = Vec::new();
-    if detached && hybrid {
-        for hit in &vector_result.results {
-            let active = shards[hit.doc_id % n].active.as_ref().unwrap();
-            let local = hit.doc_id / n;
-            let (version, revision) = *active.revisions.get(local)
-                .ok_or_else(|| storage("vector candidate revision absent"))?;
-            let fingerprint = *active.fingerprints.get(local)
-                .ok_or_else(|| storage("vector candidate fingerprint absent"))?;
-            vector_identities.push((hit.doc_id, Identity {
-                id: active.keys[local].clone(), version, revision,
-            }, fingerprint));
-        }
-    }
-    // Query-owned identities and small address entries only. Population and
-    // vector-candidate storage was admitted before allocation. Native snapshots,
-    // Handle/file pins and retirement tokens retain their existing ownership.
+    // Borrow query-owned live keys; no fingerprint copy or larger map value is
+    // needed during scoring. Final identities are captured by Handle::candidates
+    // from this fixed topology, whose physical metadata is append-only.
     let mut keys = if detached && (hybrid || result_type != ResultType::Count) {
-        vectors.iter().map(|(identity, (address, _, fingerprint))|
-            (*address, (identity, *fingerprint))).collect::<BTreeMap<_, _>>()
+        vectors.iter().map(|(identity, (address, _))| (*address, identity.id.as_str()))
+            .collect::<BTreeMap<_, _>>()
     } else { BTreeMap::new() };
-    for (address, identity, fingerprint) in &vector_identities {
-        keys.insert(*address, (identity, *fingerprint));
-    }
+    // A vector hit may have retired between phases and no longer join `vectors`.
+    // Only those missing addresses need an extra string. Never substitute the
+    // newer live row with the same logical ID. Admission above still covers all
+    // vector candidates, including these exceptional copies, before allocation.
+    let vector_keys = if detached && hybrid {
+        vector_result.results.iter().filter(|hit| !keys.contains_key(&hit.doc_id))
+            .map(|hit| {
+                let active = shards[hit.doc_id % n].active.as_ref().unwrap();
+                (hit.doc_id, active.keys[hit.doc_id / n].clone())
+            }).collect::<Vec<_>>()
+    } else { Vec::new() };
+    for (address, key) in &vector_keys { keys.insert(*address, key.as_str()); }
     let shards = if detached { drop(shards); Vec::new() } else { shards };
     // root/Handle and the fixed native snapshots still retain topology and file
     // pins. Only component guards end here, before analysis/statistics/scoring.
@@ -218,7 +207,7 @@ pub(crate) async fn search(
         &snapshots.iter().map(Arc::as_ref).collect::<Vec<_>>(),
         cut,
         |identity| {
-            if let Some(&(address, accepts, _)) = vectors.get(identity) {
+            if let Some(&(address, accepts)) = vectors.get(identity) {
                 // Filters gate hits only; every joined row remains in BM25.
                 // Snapshot ownership keeps these borrowed map keys alive.
                 if accepts { locations.insert(identity, address); }
@@ -377,27 +366,19 @@ pub(crate) async fn search(
     let returned = result.results.iter().map(|hit| hit.doc_id).collect::<BTreeSet<_>>();
     result.explanations.retain(|id, _| returned.contains(id));
     result.result_count = result.results.len();
-    if detached && hybrid {
-        // Only final candidates escape the workspace. Handle's existing bounded
-        // candidate lease retains these copies through authoritative revalidation.
-        *captured = Some(result.results.iter().map(|hit| {
-            let (identity, fingerprint) = keys[&hit.doc_id];
-            super::super::query::Candidate { identity: identity.clone(), fingerprint, hit: *hit }
-        }).collect());
-    }
     Ok(result)
 }
 
 // Same greater-is-better contract as result_ordering_root, restricted to
 // Record's stable ID and score sorts. Facet comparators keep their mmap guards.
 fn captured_ordering(
-    keys: &BTreeMap<usize, (&Identity, [u8; 32])>,
+    keys: &BTreeMap<usize, &str>,
     sorts: &[ResultSortIndex],
     a: crate::min_heap::Result,
     b: crate::min_heap::Result,
 ) -> std::cmp::Ordering {
-    let a_key = &keys.get(&a.doc_id).expect("selected query identity").0.id;
-    let b_key = &keys.get(&b.doc_id).expect("selected query identity").0.id;
+    let a_key = keys.get(&a.doc_id).expect("selected query identity");
+    let b_key = keys.get(&b.doc_id).expect("selected query identity");
     for sort in sorts {
         if sort.idx == usize::MAX {
             return if sort.order == SortOrder::Descending { a_key.cmp(b_key) }
@@ -488,13 +469,12 @@ mod candidate_tests {
         let handle = partition.inner.lock().await.index.capture_query(10).await.unwrap();
         let root = handle.index.read().await;
         let shards = futures::future::join_all(root.segments.iter().map(|s| s.vector.read())).await;
-        let mut identities = Vec::new();
+        let mut keys = BTreeMap::new();
         for (slot, shard) in shards.iter().enumerate() {
             for (local, key) in shard.active.as_ref().unwrap().keys.iter().enumerate() {
-                identities.push((local * shards.len() + slot, Identity {id:key.clone(),version:1,revision:1}));
+                keys.insert(local * shards.len() + slot, key.as_str());
             }
         }
-        let keys = identities.iter().map(|(address, id)| (*address,(id,[0;32]))).collect::<BTreeMap<_,_>>();
         let scores = [0.0, -0.0, 1.0, -1.0, f32::INFINITY, f32::NEG_INFINITY, f32::NAN];
         for ordering in [vec![], vec!["_id"], vec!["_score"], vec!["_score", "_id"], vec!["_id", "_score"]] {
             for descending in [false, true] {

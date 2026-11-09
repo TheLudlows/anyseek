@@ -76,6 +76,12 @@ async fn hybrid_capture_keeps_vector_only_identities_with_lagging_native_and_cou
             p.write(write(id,id,body,ExpectedVersion::Absent)).await.unwrap();
         }
         let handle=p.inner.lock().await.index.capture_query(10).await.unwrap();
+        let expected_fingerprints = {
+            let root=handle.index.read().await;let shard=root.segments[0].vector.read().await;
+            let active=shard.active.as_ref().unwrap();
+            active.keys.iter().cloned().zip(active.fingerprints.iter().copied())
+                .collect::<std::collections::BTreeMap<_,_>>()
+        };
         let native=lexical::runtime::Runtime::create(&dir.path().join("lag"),&config()).unwrap();
         native.append(lexical::Identity{id:"c".into(),version:1,revision:3},
             &write("unused","c","alpha",ExpectedVersion::Absent).document.unwrap(),true).await.unwrap();
@@ -83,20 +89,26 @@ async fn hybrid_capture_keeps_vector_only_identities_with_lagging_native_and_cou
         handle.index.write().await.segments[0].lexical=native;
         let gate=".test-hybrid-vector-phase-pause";std::fs::write(root.join(gate),b"pause").unwrap();
         let task=tokio::spawn(async move {
-            let q=query(vec![]);let mut captured=None;
+            let q=query(vec![]);
             let result=lexical::runtime_query::search(&handle.index,q.text,q.vector,q.mode,q.query_type,0,10,
                 if count {ResultType::Count}else{ResultType::TopkCount},vec![],vec![],vec![],
-                lexical::Cut{sequence:u64::MAX,evaluation_time_ms:u64::MAX},&mut captured).await;
-            (handle,result,captured)
+                lexical::Cut{sequence:u64::MAX,evaluation_time_ms:u64::MAX}).await;
+            (handle,result)
         });
         entered(&root,gate).await;
         p.write(write("update","a","gamma",ExpectedVersion::Match(1))).await.unwrap();
         let mut delete=write("delete","b","",ExpectedVersion::Match(1));delete.document=None;
         p.write(delete).await.unwrap();
         std::fs::remove_file(root.join(gate)).unwrap();
-        let (handle,result,captured)=task.await.unwrap();let result=result.unwrap();
+        let (handle,result)=task.await.unwrap();let result=result.unwrap();
         assert_eq!(result.result_count_total,3);
-        let captured=captured.expect("detached Hybrid captures final candidates, including Count");
+        // Even after scoring returns, later writes cannot rebind old addresses.
+        p.write(write("after-score","c","gamma",ExpectedVersion::Match(1))).await.unwrap();
+        let captured=handle.candidates(result.results.clone()).await.unwrap();
+        for candidate in &captured {
+            assert_eq!(candidate.fingerprint,expected_fingerprints[&candidate.identity.id]);
+        }
+        assert_eq!(p.get("c").await.unwrap().unwrap().version,2);
         if count {assert!(captured.is_empty());assert!(result.results.is_empty());}
         else {
             let identities=captured.iter().map(|c|(c.identity.id.as_str(),c.identity.version,c.identity.revision)).collect::<BTreeSet<_>>();
