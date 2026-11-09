@@ -68,7 +68,7 @@ impl Runtime {
         }
         // The blocking native task takes this owner, so cancellation of an
         // awaiting future cannot refund identity accounting before publication.
-        self.append_inner(identity,document,true,count_update,None,Some(admission)).await
+        self.append_inner(identity,RowInput::Document(document),true,count_update,None,Some(admission)).await
     }
     pub(crate) fn visible_enabled(&self)->bool{self.live.lock().map_or(true,|s|s.enabled)}
     pub(crate) fn visible_admits(&self,bytes:u64)->bool{self.live.lock().is_ok_and(|s|s.error.is_none()&&!s.closing&&(bytes>crate::storage::build_budget::EXPLICIT_BUFFERS || self.visible_bytes.load(std::sync::atomic::Ordering::Acquire).checked_add(bytes).is_some_and(|n|n<=crate::storage::build_budget::EXPLICIT_BUFFERS)))}
@@ -155,7 +155,7 @@ impl Runtime {
                     }).await.map_err(|_|storage("workspace ready test deadline"))?;
                 }
             }
-            for (row,workspace) in rows.iter().zip(row_work) {self.append_inner((*row.identity).clone(),&row.document,false,false,Some(workspace),None).await?;}
+            for (row,workspace) in rows.iter().zip(row_work) {self.append_inner((*row.identity).clone(),RowInput::Analyzed(row),false,false,Some(workspace),None).await?;}
             let data=OwnedData{guard:self.data.clone().lock_owned().await,_owner:self.clone(),unacknowledged:false};
             let (_,snapshot)=self.blocking(data,move |owner,data|owner.commit_snapshot_locked(data,publication)).await?;
             #[cfg(feature="fault-injection")]
@@ -181,7 +181,7 @@ impl Runtime {
         }
     }
     pub(crate) async fn append_fallback_queued(self:&Arc<Self>,identity:Identity,document:&Document)->Result<(),RecordError>{
-        self.join_visible().await?;self.append_inner(identity,document,true,false,None,None).await
+        self.join_visible().await?;self.append_inner(identity,RowInput::Document(document),true,false,None,None).await
     }
     pub(crate) async fn join_visible(&self)->Result<(),RecordError>{
         self.wait_visible().await?;
@@ -589,3 +589,6 @@ mod tests {
     }
 
 }
+
+#[cfg(all(test, feature="fault-injection"))]
+mod reuse_tests;

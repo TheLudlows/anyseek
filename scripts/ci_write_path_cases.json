@@ -53,6 +53,8 @@
   "record::committed::tests::executor_unscoped_panic_keeps_unknown_classification_and_releases_owner",
   "record::committed::tests::queue_panic_preserves_unattempted_pending_and_drains_activity",
   "record::remote_checkpoint::tests::committed_encoding_and_upload_cancellation_preserve_writer_and_cold_replay",
+  "record::lexical::runtime::live::reuse_tests::visible_fields_are_analyzed_once_across_native_handoff",
+  "record::lexical::runtime::live::reuse_tests::retained_analysis_preserves_full_tokens_and_lexical_only_estimate",
   "record::committed::independent::tests::independent_rejections_keep_100_64_limits_order_visibility_and_replay",
   "record::committed::independent::tests::independent_unknown_never_retries_and_recovers_original_receipts",
   "record::committed::independent::tests::independent_busy_still_admits_later_delete_and_regroups_suffix",
