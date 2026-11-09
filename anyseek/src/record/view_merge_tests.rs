@@ -240,3 +240,29 @@ async fn detached_merge_keeps_unrelated_authority_corruption_fail_closed() {
     let recovered = RecordPartition::open(&root, settings.max_journal_bytes).await.unwrap();
     assert_eq!(recovered.search("alpha".into(), None, SearchMode::Lexical, vec![], 10).await.unwrap().count_total, 5);
 }
+
+#[tokio::test]
+async fn hybrid_captured_reader_survives_merge_rotation_and_retirement() {
+    let temporary=tempfile::tempdir().unwrap();let root=temporary.path().join("records");
+    let p=seeded(&root).await;
+    let gate=".test-hybrid-capture-pause";std::fs::write(root.join(gate),b"pause").unwrap();
+    let held={let p=p.clone();tokio::spawn(async move {
+        p.search("alpha".into(),Some(Embedding::F32(vec![1.0,0.0])),
+            SearchMode::Hybrid{similarity_threshold:None,ann_mode:crate::vector_similarity::AnnMode::All,rrf:Default::default()},vec![],10).await
+    })};
+    entered(&root,gate).await;
+    let mutation=tokio::time::timeout(std::time::Duration::from_secs(10),async {
+        let (sources,candidate)=prepare(&p).await;install(&p,&sources,candidate).await;
+        p.write(write("e","e","alpha",ExpectedVersion::Absent)).await.unwrap();
+        freeze(&p).await;
+        let (sources,candidate)=prepare(&p).await;install(&p,&sources,candidate).await;
+        update_delete(&p).await;
+    }).await;
+    std::fs::remove_file(root.join(gate)).unwrap();
+    let found=held.await.unwrap();mutation.expect("Hybrid scoring must not block merge/consumer");
+    let found=found.unwrap();
+    assert_eq!(found.hits.iter().map(|hit|hit.record.record_id.as_str()).collect::<BTreeSet<_>>(),BTreeSet::from(["c","d"]));
+    assert!(found.hits.iter().all(|h|h.record.version==1 && h.channels.len()==2));
+    assert_eq!(p.get("a").await.unwrap().unwrap().version,2);
+    p.finish_service_shutdown().await.unwrap();
+}

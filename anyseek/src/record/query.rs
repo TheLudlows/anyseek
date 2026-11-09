@@ -10,9 +10,9 @@ pub(super) struct Handle {
     _scope: Option<crate::resources::Lease>,
 }
 pub(super) struct Candidate {
-    identity: lexical::Identity,
-    fingerprint: [u8; 32],
-    hit: crate::min_heap::Result,
+    pub(super) identity: lexical::Identity,
+    pub(super) fingerprint: [u8; 32],
+    pub(super) hit: crate::min_heap::Result,
 }
 impl Handle {
     pub async fn capture(index: &VectorIndexArc, length: usize) -> Result<Self, RecordError> {
@@ -47,6 +47,7 @@ impl Handle {
     async fn candidates(
         &self,
         hits: Vec<crate::min_heap::Result>,
+        captured: Option<Vec<Candidate>>,
     ) -> Result<Vec<Candidate>, RecordError> {
         let root = self.index.read().await;
         let shards =
@@ -54,6 +55,7 @@ impl Handle {
         if shards.iter().any(|shard| shard.failed) {
             return Err(RecordError::RecoveryRequired);
         }
+        if let Some(captured) = captured { return Ok(captured); }
         let n = shards.len();
         let mut candidates = Vec::with_capacity(hits.len());
         for hit in hits {
@@ -135,11 +137,12 @@ impl RecordPartition {
         let runtime = tokio::runtime::Handle::current();
         let owner = self.clone();
         #[cfg(test)] let scoring_root = root.clone();
-        let (handle, result) = crate::resources::spawn_blocking(move || {
+        let (handle, result, captured) = crate::resources::spawn_blocking(move || {
             let _owner = owner;
             #[cfg(test)]
             blocking_scoring_pause(&scoring_root);
             let work = async move {
+                let mut captured = None;
                 let result = lexical::runtime_query::search(
                     &handle.index,
                     query.text,
@@ -156,8 +159,9 @@ impl RecordPartition {
                         sequence: u64::MAX,
                         evaluation_time_ms: evaluation,
                     },
+                    &mut captured,
                 ).await;
-                (handle, result)
+                (handle, result, captured)
             };
             runtime.block_on(async move {
                 match context {
@@ -167,9 +171,7 @@ impl RecordPartition {
             })
         }).await.map_err(storage)?;
         let mut result = result?;
-        let candidates = handle
-            .candidates(std::mem::take(&mut result.results))
-            .await?;
+        let candidates = handle.candidates(std::mem::take(&mut result.results), captured).await?;
         #[cfg(test)]
         pause(&root, ".test-query-candidates-pause").await?;
         let mut inner = self.inner.lock().await;
@@ -340,13 +342,13 @@ mod tests {
         let identity = lexical::Identity { id: "a".into(), version: 1, revision: 1 };
         assert!(matches!(inner.index.matches_identity(0, &identity, [0; 32]).await,
             Err(RecordError::RecoveryRequired)));
-        assert!(matches!(handle.candidates(vec![]).await,
+        assert!(matches!(handle.candidates(vec![], None).await,
             Err(RecordError::RecoveryRequired)));
         let failed = lexical::runtime_query::search(&handle.index, String::new(),
             Some(Embedding::F32(vec![1.0, 0.0])), SearchMode::Vector {
                 similarity_threshold: None, ann_mode: crate::vector_similarity::AnnMode::All },
             QueryType::Union, 0, 10, ResultType::TopkCount, vec![], vec![], vec![],
-            lexical::Cut { sequence: u64::MAX, evaluation_time_ms: inner.evaluation_time_ms }).await;
+            lexical::Cut { sequence: u64::MAX, evaluation_time_ms: inner.evaluation_time_ms }, &mut None).await;
         assert!(matches!(failed, Err(RecordError::RecoveryRequired)));
         // Exhaust only the caller's byte allowance; the same captured index is healthy.
         components[0].write().await.failed = false;
@@ -398,9 +400,9 @@ mod tests {
             Some(Embedding::F32(vec![1.0, 0.0])), SearchMode::Hybrid {
                 similarity_threshold: None, ann_mode: crate::vector_similarity::AnnMode::All, rrf: Default::default() },
             QueryType::Intersection, 0, 10, ResultType::TopkCount, vec![], vec![], vec![],
-            lexical::Cut { sequence: u64::MAX, evaluation_time_ms: u64::MAX }).await.unwrap();
+            lexical::Cut { sequence: u64::MAX, evaluation_time_ms: u64::MAX }, &mut None).await.unwrap();
         assert_eq!(result.result_count_total, 2);
-        let identities = handle.candidates(result.results).await.unwrap().into_iter()
+        let identities = handle.candidates(result.results, None).await.unwrap().into_iter()
             .map(|candidate| candidate.identity.id).collect::<BTreeSet<_>>();
         assert_eq!(identities, BTreeSet::from(["a".into(), "b".into()]));
     }
@@ -432,7 +434,7 @@ mod tests {
             }
             let result = lexical::runtime_query::search(&handle.index, "alpha".into(), None,
                 SearchMode::Lexical, QueryType::Union, 0, 10, ResultType::Count,
-                vec![], vec![], vec![], lexical::Cut {sequence:u64::MAX, evaluation_time_ms:u64::MAX}).await;
+                vec![], vec![], vec![], lexical::Cut {sequence:u64::MAX, evaluation_time_ms:u64::MAX}, &mut None).await;
             if duplicate {
                 assert!(matches!(result, Err(RecordError::Storage(message))
                     if message == "duplicate live vector revision identity"));
@@ -707,3 +709,7 @@ async fn cancelled_scoring_retains_request_slot_until_worker_finishes() {
     }).await.unwrap();
     assert_eq!(p.search("alpha".into(), None, SearchMode::Lexical, vec![], 10).await.unwrap().hits.len(), 1);
 }
+
+#[cfg(test)]
+#[path = "query_hybrid_tests.rs"]
+mod hybrid_tests;
