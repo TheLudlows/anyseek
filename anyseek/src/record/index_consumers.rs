@@ -27,6 +27,8 @@ impl Cursors {
             .unwrap_or(Some("index consumer poisoned; reopen required".into()))
     }
     pub fn fail(&self, error: impl std::fmt::Display) {
+        #[cfg(test)]
+        eprintln!("MERGE_DIAGNOSTIC index fence: {error}");
         if let Ok(mut failed) = self.error.lock() {
             *failed = Some(error.to_string());
         }
