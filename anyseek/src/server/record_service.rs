@@ -2179,12 +2179,14 @@ mod tests {
         let partition=service.record("tenant","c").await.unwrap();
         #[cfg(feature="fault-injection")]
         let consumer_root=path.join(service.catalog.collection_entry("tenant","c").await.unwrap().directory());
-        #[cfg(feature="fault-injection")]
-        for lane in ["lexical","vector"] {
-            std::fs::write(consumer_root.join(format!(".test-{lane}-consumer-pause")),b"pause").unwrap();
-        }
         let mut replay_request:Option<RecordWrite>=None;
         for (route,array,id) in [("batch","writes","a"),("ingest","records","b")] {
+            #[cfg(feature="fault-injection")]
+            if route=="ingest" {
+                for lane in ["lexical","vector"] {
+                    std::fs::write(consumer_root.join(format!(".test-{lane}-consumer-pause")),b"pause").unwrap();
+                }
+            }
             let write=json!({"operation_id":OperationId::new(format!("plain-{id}")),"record_id":id,"expected":"Absent",
                 "document":{"body":"alpha","document_id":"upstream","chunk_index":3,"source_id":"s","source_version":7,"system":{"kind":"source"}}});
             if route=="ingest" {replay_request=Some(serde_json::from_value(write.clone()).unwrap());}
@@ -2217,8 +2219,8 @@ mod tests {
             }
         }).await.expect("both owned consumers entered the pause");
         // Ingest acknowledges durability, not consumer completion. Replay the
-        // identical request synchronously to join both workers before deleting
-        // their directory; no new operation or checkpoint is needed.
+        // identical request synchronously to join both publication consumers;
+        // no new operation or checkpoint is needed.
         let owner=partition.clone();let request=replay_request.unwrap();
         #[allow(unused_mut)]
         let mut replay=tokio::spawn(async move {owner.write(request).await});
@@ -2231,7 +2233,12 @@ mod tests {
         let receipt=tokio::time::timeout(std::time::Duration::from_secs(10),replay).await.unwrap().unwrap().unwrap();
         assert_eq!((receipt.seq,receipt.version),(2,1));
         assert_eq!(partition.committed_progress().await.committed_seq,Some(2));
-        drop(partition);drop(app);drop(service);std::fs::remove_dir_all(path).unwrap();
+        // Publication can precede private materialization and native writer exit.
+        // Drain all service owners before removing their directory.
+        drop(partition);drop(app);
+        let mut shutdown=service.shutdown();
+        tokio::time::timeout(std::time::Duration::from_secs(10),shutdown.wait()).await.unwrap().unwrap();
+        std::fs::remove_dir_all(path).unwrap();
     }
     #[tokio::test]
     async fn collection_create_schema_matches_http_profiles_and_optional_fields() {
