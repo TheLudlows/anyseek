@@ -136,6 +136,9 @@ static SCOPES: LazyLock<Mutex<BTreeMap<PathBuf, Weak<Disk>>>> =
 pub(crate) struct DiskScope {
     disk: Arc<Disk>,
 }
+// A thread-local retirement cut keeps filesystem race tests deterministic and isolated.
+#[cfg(test)]
+thread_local! { static SCAN_RETIRE: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) }; }
 impl DiskScope {
     pub(crate) fn begin(root: &Path, limit: u64) -> io::Result<Self> {
         Self::begin_mode(root,limit,false)
@@ -161,16 +164,33 @@ impl DiskScope {
                 if k.is_dir() {
                     scan(&e.path(), l, cap)?;
                 } else if k.is_file() {
+                    #[cfg(test)]
+                    SCAN_RETIRE.with(|slot| {
+                        if slot.borrow().as_ref() == Some(&e.path()) {
+                            let path = slot.borrow_mut().take().unwrap();
+                            fs::remove_file(path).unwrap();
+                        }
+                    });
                     #[cfg(not(windows))]
-                    let n = e.metadata()?.len();
+                    let length = e.metadata().map(|metadata| metadata.len());
                     #[cfg(windows)]
-                    let n = {
+                    let length = {
                         use std::os::windows::fs::OpenOptionsExt;
                         // NTFS directory enumeration can cache the size while a
                         // writer remains open. Query the actual handle instead.
                         // Metadata-only access also works for exclusively locked
                         // WAL data ranges and never changes the writer's cursor.
-                        fs::OpenOptions::new().access_mode(0).open(e.path())?.metadata()?.len()
+                        fs::OpenOptions::new().access_mode(0).open(e.path())
+                            .and_then(|file| file.metadata()).map(|metadata| metadata.len())
+                    };
+                    // Native atomic replacements/GC may retire an enumerated
+                    // file before this lookup. It is no longer in the scanned
+                    // namespace; concurrent rescans still merge its charged
+                    // high-water mark below. All other I/O errors remain fatal.
+                    let n = match length {
+                        Ok(bytes) => bytes,
+                        Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                        Err(error) => return Err(error),
                     };
                     l.used = l
                         .used
@@ -486,6 +506,53 @@ mod tests {
         fs::create_dir(&p).unwrap();
         p
     }
+    #[test]
+    fn disk_scan_accepts_retired_entry_without_weakening_capacity() {
+        let root = root();
+        fs::write(root.join("retained"), [1; 8]).unwrap();
+        // Native atomic writes and GC can retire an enumerated file before
+        // its metadata handle is opened. Other retained files still count.
+        let transient = root.join(".tmp-retired");
+        fs::write(&transient, [2; 3]).unwrap();
+        SCAN_RETIRE.with(|slot| *slot.borrow_mut() = Some(fs::canonicalize(transient).unwrap()));
+        let scope = DiskScope::begin(&root, 8).unwrap();
+        assert!(SCAN_RETIRE.with(|slot| slot.borrow().is_none()));
+        assert_eq!(scope.disk.ledger.lock().unwrap().used, 8);
+        let mut candidate = File::create(root.join("candidate")).unwrap();
+        assert!(candidate.write_all(&[3]).is_err());
+        drop(candidate);
+        drop(scope);
+        assert!(DiskScope::begin(&root, 7).is_err());
+        fs::remove_dir_all(&root).unwrap();
+        assert_eq!(DiskScope::begin(&root, 8).err().unwrap().kind(), io::ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn concurrent_disk_scan_keeps_charge_for_entry_retired_during_scan() {
+        let root = root();
+        let first = DiskScope::begin(&root, 11).unwrap();
+        let mut retained = File::create(root.join("retained")).unwrap();
+        retained.write_all(&[1; 8]).unwrap();
+        let transient = root.join(".tmp-retired");
+        let mut retired = File::create(&transient).unwrap();
+        retired.write_all(&[2; 3]).unwrap();
+        drop(retired);
+        drop(first);
+        SCAN_RETIRE.with(|slot| *slot.borrow_mut() = Some(fs::canonicalize(transient).unwrap()));
+        let concurrent = DiskScope::begin_concurrent(&root, 11).unwrap();
+        assert!(SCAN_RETIRE.with(|slot| slot.borrow().is_none()));
+        assert_eq!(concurrent.disk.ledger.lock().unwrap().used, 11);
+        assert!(retained.write_all(&[3]).is_err());
+        drop(concurrent);
+        let serial = DiskScope::begin(&root, 11).unwrap();
+        assert_eq!(serial.disk.ledger.lock().unwrap().used, 8);
+        retained.write_all(&[3; 3]).unwrap();
+        assert!(retained.write_all(&[4]).is_err());
+        drop(retained);
+        drop(serial);
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn disk_checks_before_growth_and_rescans_same_live_ledger() {
         let root = root();

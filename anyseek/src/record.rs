@@ -29,7 +29,7 @@ pub use output::DataOutputPermit;
 mod mutation;
 mod write;
 mod committed;
-pub use committed::{CommittedBatch, CommittedItem, CommittedProgress};
+pub use committed::{CommittedBatch, CommittedItem, CommittedProgress, IndependentItem};
 mod index_consumers;
 mod publication;
 mod query;

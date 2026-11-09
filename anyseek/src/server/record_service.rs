@@ -20,7 +20,7 @@ use anyseek::{
     index::Clustering,
     record::{
         OperationId, RecordConfig, RecordCursor, RecordError, RecordPartition, RecordQuery,
-        RecordWrite, DataOutputPermit, S3CompatibleRecordConfig, CommittedItem,
+        RecordWrite, DataOutputPermit, S3CompatibleRecordConfig, IndependentItem,
     },
     vector::Inference,
 };
@@ -1107,10 +1107,6 @@ async fn iterate(
 struct BatchRequest {
     writes: Vec<RecordWrite>,
 }
-fn stops_batch(error: &RecordError) -> bool {
-    matches!(error, RecordError::OutcomeUnknown(_) | RecordError::DurablePending(_)
-        | RecordError::RecoveryRequired | RecordError::Storage(_))
-}
 async fn batch(
     State(s): State<Arc<Service>>,
     headers: HeaderMap,
@@ -1140,72 +1136,20 @@ async fn batch(
     let result = s.catalog.authorized_generation(key, id, p.generation, move |_| async move {
         #[cfg(feature = "fault-injection")]
         pause_authorized_for_test(&pause_collection).await?;
-        let mut rows = Vec::new();
-        let mut stopped = false;
-        let mut writes = std::collections::VecDeque::from(request.writes);
-        loop {
-            // Keep the public 100-input limit and use the existing 64-input
-            // kernel bound. This is still independent, non-atomic execution.
-            let chunk: Vec<_> = writes.drain(..writes.len().min(64)).collect();
-            if chunk.is_empty() { break; }
-            if stopped {
-                for write in chunk { rows.push(json!({"operation_id":write.operation_id,"code":"not_attempted"})); }
-                continue;
+        let operations: Vec<_> = request.writes.iter().map(|write| write.operation_id.clone()).collect();
+        let items = match p.write_independent_batch(request.writes).await {
+            Ok(items) => items,
+            // No per-item scope is available for admission or owner failure.
+            Err(error) => operations.iter().map(|_| IndependentItem::Failed(error.clone())).collect(),
+        };
+        let rows: Vec<_> = operations.into_iter().zip(items).map(|(operation_id, item)| match item {
+            IndependentItem::Applied(receipt) => json!({"operation_id":operation_id,"receipt":receipt,"code":"applied","expires_at":operation_id.expires_at_unix_seconds()}),
+            IndependentItem::Failed(error) => {
+                let error = Error::from(error);
+                json!({"operation_id":operation_id,"code":error.1,"message":error.2,"status":error.0.as_u16()})
             }
-            let (items, stop) = match p.write_batch(&chunk).await {
-                Ok(batch) => (batch.results, batch.stop),
-                // Group admission/size rejection did not attempt publication.
-                // Fall back to independent writes, preserving their own limits.
-                Err(error @ (RecordError::Busy | RecordError::Rejected(_))) => (
-                    chunk.iter().map(|_| CommittedItem::NotAttempted).collect(), Some(error)),
-                Err(error) => (chunk.iter().map(|_| CommittedItem::OutcomeUnknown).collect(), Some(error)),
-            };
-            let interrupted = stop.as_ref().is_some_and(stops_batch);
-            let regroup = matches!(stop, Some(RecordError::Busy));
-            let mut stop_reported = false;
-            let mut remaining: std::collections::VecDeque<_> = chunk.into_iter().zip(items).collect();
-            while let Some((write, item)) = remaining.pop_front() {
-                let operation_id = write.operation_id.clone();
-                let fallback = matches!(item, CommittedItem::NotAttempted);
-                let result = match item {
-                    CommittedItem::Committed(receipt) => Some(Ok(receipt)),
-                    CommittedItem::Rejected(error) => Some(Err(error)),
-                    CommittedItem::OutcomeUnknown => {
-                        stop_reported = true;
-                        Some(Err(stop.clone().unwrap_or_else(|| RecordError::OutcomeUnknown("batch execution exited".into()))))
-                    }
-                    CommittedItem::NotAttempted if interrupted && !stop_reported => {
-                        stop_reported = true;
-                        Some(Err(stop.clone().unwrap()))
-                    }
-                    CommittedItem::NotAttempted if stopped || interrupted => None,
-                    // A bounded Busy prefix must not prevent later independent
-                    // writes (e.g. deletion) from receiving their own decisions.
-                    // Only inputs known not to have attempted publication retry.
-                    CommittedItem::NotAttempted => Some(p.write(write).await),
-                };
-                let progressed = result.as_ref().is_some_and(|result| result.is_ok());
-                match result {
-                    Some(Ok(receipt)) => rows.push(json!({"operation_id":operation_id,"receipt":receipt,"code":"applied","expires_at":operation_id.expires_at_unix_seconds()})),
-                    Some(Err(error)) => {
-                        stopped |= stops_batch(&error);
-                        let error = Error::from(error);
-                        rows.push(json!({"operation_id":operation_id,"code":error.1,"message":error.2,"status":error.0.as_u16()}));
-                    }
-                    None => rows.push(json!({"operation_id":operation_id,"code":"not_attempted"})),
-                }
-                // Crossing a native-tail boundary may admit only a prefix.
-                // One scalar decision guarantees forward progress; regroup only
-                // the explicitly unattempted suffix, preserving its order/IDs.
-                // Never resubmit unknown or already committed inputs.
-                if regroup && fallback && progressed && !stopped && !interrupted
-                    && remaining.iter().all(|(_, item)| matches!(item, CommittedItem::NotAttempted)) {
-                    for (write, _) in remaining.into_iter().rev() { writes.push_front(write); }
-                    break;
-                }
-            }
-            stopped |= interrupted;
-        }
+            IndependentItem::NotAttempted => json!({"operation_id":operation_id,"code":"not_attempted"}),
+        }).collect();
         Ok::<_, RecordError>(json!({"atomic":false,"results":rows}))
     }).await?;
     response(result.map_err(Error::from)?)
@@ -2235,12 +2179,14 @@ mod tests {
         let partition=service.record("tenant","c").await.unwrap();
         #[cfg(feature="fault-injection")]
         let consumer_root=path.join(service.catalog.collection_entry("tenant","c").await.unwrap().directory());
-        #[cfg(feature="fault-injection")]
-        for lane in ["lexical","vector"] {
-            std::fs::write(consumer_root.join(format!(".test-{lane}-consumer-pause")),b"pause").unwrap();
-        }
         let mut replay_request:Option<RecordWrite>=None;
         for (route,array,id) in [("batch","writes","a"),("ingest","records","b")] {
+            #[cfg(feature="fault-injection")]
+            if route=="ingest" {
+                for lane in ["lexical","vector"] {
+                    std::fs::write(consumer_root.join(format!(".test-{lane}-consumer-pause")),b"pause").unwrap();
+                }
+            }
             let write=json!({"operation_id":OperationId::new(format!("plain-{id}")),"record_id":id,"expected":"Absent",
                 "document":{"body":"alpha","document_id":"upstream","chunk_index":3,"source_id":"s","source_version":7,"system":{"kind":"source"}}});
             if route=="ingest" {replay_request=Some(serde_json::from_value(write.clone()).unwrap());}
@@ -2273,8 +2219,8 @@ mod tests {
             }
         }).await.expect("both owned consumers entered the pause");
         // Ingest acknowledges durability, not consumer completion. Replay the
-        // identical request synchronously to join both workers before deleting
-        // their directory; no new operation or checkpoint is needed.
+        // identical request synchronously to join both publication consumers;
+        // no new operation or checkpoint is needed.
         let owner=partition.clone();let request=replay_request.unwrap();
         #[allow(unused_mut)]
         let mut replay=tokio::spawn(async move {owner.write(request).await});
@@ -2287,7 +2233,12 @@ mod tests {
         let receipt=tokio::time::timeout(std::time::Duration::from_secs(10),replay).await.unwrap().unwrap().unwrap();
         assert_eq!((receipt.seq,receipt.version),(2,1));
         assert_eq!(partition.committed_progress().await.committed_seq,Some(2));
-        drop(partition);drop(app);drop(service);std::fs::remove_dir_all(path).unwrap();
+        // Publication can precede private materialization and native writer exit.
+        // Drain all service owners before removing their directory.
+        drop(partition);drop(app);
+        let mut shutdown=service.shutdown();
+        tokio::time::timeout(std::time::Duration::from_secs(10),shutdown.wait()).await.unwrap().unwrap();
+        std::fs::remove_dir_all(path).unwrap();
     }
     #[tokio::test]
     async fn collection_create_schema_matches_http_profiles_and_optional_fields() {
