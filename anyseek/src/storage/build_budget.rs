@@ -514,7 +514,7 @@ mod tests {
         // its metadata handle is opened. Other retained files still count.
         let transient = root.join(".tmp-retired");
         fs::write(&transient, [2; 3]).unwrap();
-        SCAN_RETIRE.with(|slot| *slot.borrow_mut() = Some(transient));
+        SCAN_RETIRE.with(|slot| *slot.borrow_mut() = Some(fs::canonicalize(transient).unwrap()));
         let scope = DiskScope::begin(&root, 8).unwrap();
         assert!(SCAN_RETIRE.with(|slot| slot.borrow().is_none()));
         assert_eq!(scope.disk.ledger.lock().unwrap().used, 8);
@@ -538,7 +538,7 @@ mod tests {
         retired.write_all(&[2; 3]).unwrap();
         drop(retired);
         drop(first);
-        SCAN_RETIRE.with(|slot| *slot.borrow_mut() = Some(transient));
+        SCAN_RETIRE.with(|slot| *slot.borrow_mut() = Some(fs::canonicalize(transient).unwrap()));
         let concurrent = DiskScope::begin_concurrent(&root, 11).unwrap();
         assert!(SCAN_RETIRE.with(|slot| slot.borrow().is_none()));
         assert_eq!(concurrent.disk.ledger.lock().unwrap().used, 11);
