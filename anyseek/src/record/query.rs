@@ -87,7 +87,7 @@ impl RecordPartition {
         mut query: RecordQuery,
         output_fields: Option<&[String]>,
     ) -> Result<RecordSearch, RecordError> {
-        let (handle, evaluation, has_ttl, barrier, root) = {
+        let (handle, evaluation, has_ttl, barrier, root, group_publication_revision) = {
             let mut inner = self.inner.lock().await;
             inner.observe_time()?;
             if !inner.healthy || self.indexes.error().is_some()
@@ -102,6 +102,7 @@ impl RecordPartition {
                 inner.state.records.live_ttl_count()>0,
                 self.output_permit()?,
                 inner.journal.root().to_owned(),
+                inner.state.group_publication_revision(),
             )
         };
         #[cfg(test)]
@@ -176,6 +177,14 @@ impl RecordPartition {
         inner.observe_time()?;
         if !inner.healthy || self.indexes.error().is_some() {
             return Err(RecordError::RecoveryRequired);
+        }
+        // The shallow scoring handle can overlap an entire group replacement.
+        // Revalidating its candidates against the new canonical rows would
+        // silently drop old members or mix generations. Refuse that observation
+        // before copying any result; ordinary independent writes do not advance
+        // this revision. Already materialized complete results stay deliverable.
+        if inner.state.group_publication_revision() != group_publication_revision {
+            return Err(RecordError::Busy);
         }
         let mut hits = Vec::with_capacity(candidates.len());
         for (rank, candidate) in candidates.into_iter().enumerate() {
@@ -279,6 +288,65 @@ mod tests {
         })
         .await
         .unwrap();
+    }
+    #[tokio::test]
+    async fn group_replacement_rejects_overlapping_queries_but_keeps_complete_results() {
+        fn replacement(nonce: &str, version: u64, ids: &[&str], body: &str) -> GroupReplace {
+            GroupReplace {
+                operation_id: OperationId::new(nonce.into()),
+                group_id: "group".into(),
+                expected_group_version: version,
+                records: ids.iter().map(|id| GroupRecord {
+                    record_id: (*id).into(),
+                    document: write("unused", id, body, ExpectedVersion::Any).document.unwrap(),
+                    temporal: None,
+                }).collect(),
+            }
+        }
+        fn ids(result: &RecordSearch) -> BTreeSet<String> {
+            result.hits.iter().map(|hit| hit.record.record_id.clone()).collect()
+        }
+        for gate in [".test-query-scoring-pause", ".test-query-candidates-pause"] {
+            for mode in [
+                SearchMode::Lexical,
+                SearchMode::Vector { similarity_threshold: None, ann_mode: crate::vector_similarity::AnnMode::All },
+                SearchMode::Hybrid { similarity_threshold: None, ann_mode: crate::vector_similarity::AnnMode::All, rrf: Default::default() },
+            ] {
+                let temporary = tempfile::tempdir().unwrap();
+                let root = temporary.path().join("records");
+                let p = RecordPartition::create(&root, config()).await.unwrap();
+                p.replace_group(replacement("old", 0, &["a", "b", "c"], "alpha old")).await.unwrap();
+                let query = || RecordQuery { temporal: None, text: "alpha".into(),
+                    vector: Some(Embedding::F32(vec![1.0, 0.0])), mode: mode.clone(),
+                    query_type: QueryType::Union, offset: 0, length: 10,
+                    result_type: ResultType::TopkCount, fields: vec![], filters: vec![], sort: vec![] };
+                let old_permit = p.output_permit_after_publication().await.unwrap();
+                let complete_old = p.query(query()).await.unwrap();
+                assert_eq!(ids(&complete_old), BTreeSet::from(["a".into(), "b".into(), "c".into()]));
+                std::fs::write(root.join(gate), b"pause").unwrap();
+                let pending = { let p = p.clone(); let query = query();
+                    tokio::spawn(async move { p.query(query).await }) };
+                entered(&root, gate).await;
+                tokio::time::timeout(std::time::Duration::from_secs(10),
+                    p.replace_group(replacement("new", 1, &["a", "d"], "alpha new")))
+                    .await.expect("replacement must finish while scoring is paused").unwrap();
+                std::fs::remove_file(root.join(gate)).unwrap();
+                let result = tokio::time::timeout(std::time::Duration::from_secs(5), pending)
+                    .await.expect("query must return a bounded retryable result").unwrap();
+                assert!(matches!(result, Err(RecordError::Busy)), "cross-generation query must not return partial success");
+                let fresh = p.query(query()).await.unwrap();
+                assert_eq!(ids(&fresh), BTreeSet::from(["a".into(), "d".into()]));
+                assert_eq!(fresh.count_total, 2);
+                assert!(fresh.hits.iter().all(|hit| hit.record.document.as_ref().unwrap()["body"] == "alpha new"));
+                // A completed response owns its immutable records. A healthy
+                // group switch must not invalidate this old complete view.
+                old_permit.deliver_after_publication(|| {
+                    assert_eq!(ids(&complete_old), BTreeSet::from(["a".into(), "b".into(), "c".into()]));
+                    assert!(complete_old.hits.iter().all(|hit| hit.record.document.as_ref().unwrap()["body"] == "alpha old"));
+                }).await.unwrap();
+                p.finish_service_shutdown().await.unwrap();
+            }
+        }
     }
     #[tokio::test]
     async fn euclidean_cached_rows_and_rebuild_inputs_require_safe_numbers() {

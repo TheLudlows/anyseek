@@ -180,6 +180,7 @@ impl RemotePersistence {
             state.admit_replay_frame(entry.payload.len())?;
             match serde_json::from_slice::<Entry>(&entry.payload).map_err(storage)? {
                 Entry::Applied(op)=>apply(&mut state,&op)?,
+                Entry::GroupApplied(d)=>group_plan::apply(&mut state,&d)?,
                 Entry::Expired(event)=>temporal::apply(&mut state,&event)?,
                 _=>return Err(storage("unexpected authority or same-sequence event in index suffix")),
             }

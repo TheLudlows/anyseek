@@ -60,7 +60,8 @@ pub(super) fn committed_floor(state:&State,at:u64,retention:u64)->Option<u64> {
     }
     // Each authoritative sequence is independently ordered by committed time.
     // Upper bounds include every equal-time commit without a full locked scan.
-    [last_before(state.operations.len(),|i|(state.operations[i].receipt.seq,state.operations[i].observed_time_ms),cutoff),
+    let group_floor=state.groups.as_ref().and_then(|g|last_before(g.receipts.len(),|i|(g.receipts[i].receipt.seq,g.receipts[i].observed_time_ms),cutoff));
+    [group_floor,last_before(state.operations.len(),|i|(state.operations[i].receipt.seq,state.operations[i].observed_time_ms),cutoff),
         last_before(state.expirations.len(),|i|(state.expirations[i].seq,state.expirations[i].evaluation_time_ms),cutoff),
         state.retired_operation_prefix.as_ref().filter(|prefix|prefix.time_ms<=cutoff).map(|prefix|prefix.seq)]
         .into_iter().flatten().filter(|seq|*seq>state.history.floor).max()

@@ -88,6 +88,7 @@ impl Context<'_> {
                 self.publish_prepared_with_native(&applied,bytes,Some(prepared),publish_native).await?;
                 return Ok(());
             },
+            Entry::GroupApplied(d)=>return self.replay_group(d,publish_native).await,
             Entry::Expired(event)=>{
                 let mut next=self.state.try_clone_with_growth(checkpoint_codec::json_length(&event)?)?;temporal::apply(&mut next,&event)?;
                 let visible=visibility::visible_records(&next.records)?;

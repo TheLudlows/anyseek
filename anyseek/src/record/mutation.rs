@@ -27,7 +27,9 @@ pub(super) struct Input<'a> {
     pub epoch_watermark: u64,
     pub time_watermark_ms: u64,
     pub record_count: usize,
+    /// Ordinary receipts only, also used for exact operations-array wire sizing.
     pub operation_count: usize,
+    pub group_operation_count: usize,
     pub ttl_count: usize,
 }
 impl<'a> Input<'a> {
@@ -37,6 +39,7 @@ impl<'a> Input<'a> {
             operation: state.operation_lookup.get(&request.operation_id).map(|&i| &state.operations[i]),
             seq: state.seq, epoch_watermark: state.epoch_watermark, time_watermark_ms: state.time_watermark_ms,
             record_count: state.records.len(), operation_count: state.operations.len(),
+            group_operation_count: state.groups.as_ref().map_or(0, |g| g.receipts.len()),
             ttl_count: state.records.live_ttl_count(),
         }
     }
@@ -72,8 +75,7 @@ pub(super) fn prepare_input(input: &Input<'_>, config:&RecordConfig, current_sna
     }
     // Own temporary planner copies before cloning request/prior document data.
     // The caller's incoming request and the retained old value are separate owners.
-    let request_bytes=checkpoint_codec::json_length(&request)? as u64;
-    let _request_plan=crate::storage::build_budget::reserve_memory(request_bytes.checked_mul(32).ok_or_else(||storage("planner request estimate overflow"))?).map_err(storage)?;
+    let _request_plan=reserve_request(&request)?;
     // serde_json::Value equality ignores object insertion order; the
     // whole semantic request is compared, not a collision-prone digest.
     if let Some(old) = input.operation
@@ -89,6 +91,42 @@ pub(super) fn prepare_input(input: &Input<'_>, config:&RecordConfig, current_sna
             ))
         };
     }
+    let PlannedRecord { applied, record: next_record, reserve_bytes, _planning: _prior_plan } =
+        prepare_record(input, config, request, epoch, evaluation_time_ms)?;
+    let snapshot_bytes = snapshot_after_input(input, current_snapshot_bytes, &applied, &next_record)?;
+    if checkpoint_codec::validate_size(snapshot_bytes, reserve_bytes, config.max_journal_bytes)
+        .is_err()
+    {
+        return Err(RecordError::Rejected(
+            "complete checkpoint budget exceeded".into(),
+        ));
+    }
+    let bytes = encode_entry(&Entry::Applied(applied.clone()))?;
+    Ok(PreparedWrite::Append {
+        applied,
+        bytes,
+        snapshot_bytes,
+        reserve_bytes,
+        _planning: vec![_request_plan,_prior_plan],
+    })
+}
+
+pub(super) fn reserve_request(request: &RecordWrite) -> Result<crate::storage::build_budget::MemoryLease, RecordError> {
+    let bytes = checkpoint_codec::json_length(request)? as u64;
+    crate::storage::build_budget::reserve_memory(bytes.checked_mul(32)
+        .ok_or_else(|| storage("planner request estimate overflow"))?).map_err(storage)
+}
+
+/// Validated record projection shared by ordinary and whole-group writes.
+/// Receipt persistence and checkpoint sizing belong to their respective callers.
+pub(super) struct PlannedRecord {
+    pub applied: Applied,
+    pub record: Record,
+    pub reserve_bytes: usize,
+    pub _planning: crate::storage::build_budget::MemoryLease,
+}
+pub(super) fn prepare_record(input: &Input<'_>, config: &RecordConfig, request: RecordWrite,
+    epoch: u64, evaluation_time_ms: u64) -> Result<PlannedRecord, RecordError> {
     // Replay compares the retained request; it must not reserve the current
     // record body, which may have grown since that operation was committed.
     let prior_bytes=input.previous.map(checkpoint_codec::json_length).transpose()?.unwrap_or(0) as u64;
@@ -110,6 +148,7 @@ pub(super) fn prepare_input(input: &Input<'_>, config:&RecordConfig, current_sna
     let reserve_bytes = input.ttl_count * 8192 + usize::from(next_ttl)*8192 - usize::from(previous_ttl)*8192;
     if serde_json::to_vec(&request).map_err(storage)?.len() > config.max_record_bytes
         || input.operation_count
+            .saturating_add(input.group_operation_count)
             .saturating_add(1)
             > config.max_operations
     {
@@ -148,27 +187,12 @@ pub(super) fn prepare_input(input: &Input<'_>, config:&RecordConfig, current_sna
     };
     if next_ttl && receipt.version == u64::MAX { return Err(RecordError::Rejected("TTL requires a reserved tombstone version".into())); }
     let applied = Applied { request,
-        receipt: receipt.clone(),
+        receipt,
         observed_epoch: epoch,
         observed_time_ms: evaluation_time_ms,
     };
     let next_record = projected_record(input.previous, &applied, next_document, temporal);
-    let snapshot_bytes = snapshot_after_input(input, current_snapshot_bytes, &applied, &next_record)?;
-    if checkpoint_codec::validate_size(snapshot_bytes, reserve_bytes, config.max_journal_bytes)
-        .is_err()
-    {
-        return Err(RecordError::Rejected(
-            "complete checkpoint budget exceeded".into(),
-        ));
-    }
-    let bytes = encode_entry(&Entry::Applied(applied.clone()))?;
-    Ok(PreparedWrite::Append {
-        applied,
-        bytes,
-        snapshot_bytes,
-        reserve_bytes,
-        _planning: vec![_request_plan,_prior_plan],
-    })
+    Ok(PlannedRecord { applied, record: next_record, reserve_bytes, _planning: _prior_plan })
 }
 
 // Shared arithmetic only: recovery never re-runs admission, wall-clock policy,

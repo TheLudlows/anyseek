@@ -63,6 +63,7 @@ impl Delta {
             metadata:descriptor_admission(config)?, };
         let mut digest = PieceDigest::new();
         let mut first = true;
+        let mut grouped = false;
         let mut failure = None;
         let visited = visit(&mut |bytes| {
             let result = (|| -> Result<(), RecordError> {
@@ -80,6 +81,12 @@ impl Delta {
                 match &entry {
                     Entry::Applied(applied) => {
                         let piece = BTreeMap::from([("operations", [applied])]);
+                        digest.push(&piece)?;
+                        writer.push(&piece)?;
+                    }
+                    Entry::GroupApplied(_) => {
+                        grouped = true;
+                        let piece = BTreeMap::from([("event", &entry)]);
                         digest.push(&piece)?;
                         writer.push(&piece)?;
                     }
@@ -109,7 +116,7 @@ impl Delta {
         let (hash, entries, expanded) = digest.finish();
         if entries != writer.entries || expanded != writer.expanded { return Err(invalid("delta preparation count mismatch")); }
         Ok(Some(Self { parent: identity, frames: Descriptor {
-            format: 7, config: config.clone(), chunks: writer.chunks,
+            format: if grouped {9} else {7}, config: config.clone(), chunks: writer.chunks,
             entries, expanded, digest: hash, _build_lease:Some(Arc::new(writer.metadata)),
         }}))
     }
@@ -120,7 +127,7 @@ impl Delta {
         &self, root: &Path, pool: &PoolReader, authority: u64,
         mut accept: impl FnMut(Entry) -> Result<(), RecordError>,
     ) -> Result<(), RecordError> {
-        if self.frames.format != 7 { return Err(invalid("unsupported delta format")); }
+        if !matches!(self.frames.format, 7 | 9) { return Err(invalid("unsupported delta format")); }
         let mut actual = PieceDigest::new();
         self.frames.visit_pieces(root, pool, authority, None, |wire, _, bytes| {
             actual.value(&wire, bytes)?;
@@ -133,7 +140,8 @@ impl Delta {
             } else {
                 let entry: Entry = serde_json::from_value(object.remove("event")
                     .ok_or_else(|| invalid("missing delta event"))?).map_err(storage)?;
-                if !matches!(entry, Entry::Expired(_) | Entry::HistoryTrim(_)) {
+                if !(matches!(entry, Entry::Expired(_) | Entry::HistoryTrim(_))
+                    || self.frames.format == 9 && matches!(entry, Entry::GroupApplied(_))) {
                     return Err(invalid("invalid delta maintenance entry"));
                 }
                 entry
@@ -265,9 +273,15 @@ fn visit_state(state: &State, sink: &mut impl Pieces) -> Result<(), RecordError>
             epoch_watermark: state.epoch_watermark,
             time_watermark_ms: state.time_watermark_ms,
             retired_operation_prefix: state.retired_operation_prefix.clone(),
+            groups: state.groups.as_ref().map(|groups|group_plan::Groups { publication_seq:groups.publication_seq, ..Default::default() }),
             ..State::default()
         };
         sink.push(&BTreeMap::from([("header", &header)]))?;
+        if let Some(groups)=&state.groups {
+            for (id,head) in &groups.heads { sink.push(&BTreeMap::from([("group_heads", BTreeMap::from([(id,head)]))]))?; }
+            for (id,owner) in &groups.owners { sink.push(&BTreeMap::from([("group_owners", BTreeMap::from([(id,owner)]))]))?; }
+            for receipt in &groups.receipts { sink.push(&BTreeMap::from([("group_receipts", [receipt])]))?; }
+        }
         for (id, record) in &state.records {
             sink.push(&BTreeMap::from([(
                 "records",
@@ -342,7 +356,7 @@ impl Descriptor {
             file.sync_all().map_err(storage)?;
         }
         Ok(Self {
-            format: 6,
+            format: if state.groups.is_some() {8} else {6},
             config: config.clone(),
             chunks: writer.chunks,
             entries: writer.entries,
@@ -356,7 +370,7 @@ impl Descriptor {
         mut accept:impl FnMut(Value,u64,u64)->Result<u64,RecordError>) -> Result<(),RecordError> {
         validate_config(&self.config)?;
         let limit = authority.min(self.config.max_journal_bytes);
-        if !matches!(self.format, 6 | 7)
+        if !matches!(self.format, 6 | 7 | 8 | 9)
             || self.chunks.is_empty()
             || self.chunks.len() > MAX_CHUNKS
             || self.expanded > expanded_limit(limit)?
@@ -463,14 +477,15 @@ impl Descriptor {
     // State, retaining only one decoded frame rather than a second full history.
     #[cfg(test)]
     pub(super) fn verify_expected(&self,root:&Path,pool:&PoolReader,authority:u64,state:&State)->Result<(),RecordError> {
-        if self.format != 6 { return Err(invalid("unsupported complete state format")); }
+        if !matches!(self.format, 6 | 8) { return Err(invalid("unsupported complete state format")); }
         self.verify_encoded(root, pool, authority, &checkpoint_codec::StateEncoding::new(state)?)
     }
     pub(super) fn verify_encoded(&self, root: &Path, pool: &PoolReader, authority: u64,
         encoded: &checkpoint_codec::StateEncoding<'_>,
     ) -> Result<(), RecordError> {
         let state = encoded.state();
-        if self.format != 6 { return Err(invalid("unsupported complete state format")); }
+        if (self.format == 8) != state.groups.is_some() { return Err(invalid("group state format mismatch")); }
+        if !matches!(self.format, 6 | 8) { return Err(invalid("unsupported complete state format")); }
         // Recoverability is checked per bounded frame/value, with the complete
         // residency charged to the shared pool by its actual owners.
         if encoded.digest() != self.digest || encoded.length() as u64 > authority.min(self.config.max_journal_bytes) {
@@ -492,7 +507,7 @@ impl Descriptor {
         pool: &PoolReader,
         authority: u64,
     ) -> Result<Decoded, RecordError> {
-        if self.format != 6 { return Err(invalid("unsupported complete state format")); }
+        if !matches!(self.format, 6 | 8) { return Err(invalid("unsupported complete state format")); }
         let mut state=None;
         let mut residency=reserve_memory(0).map_err(storage)?;
         self.visit_pieces(root,pool,authority,Some(&mut residency),|wire,ordinal,_| {
@@ -503,6 +518,7 @@ impl Descriptor {
         })?;
         let limit=authority.min(self.config.max_journal_bytes);
         let mut state = state.ok_or_else(|| invalid("missing state header"))?;
+        if (self.format == 8) != state.groups.is_some() { return Err(invalid("group state format mismatch")); }
         if checkpoint_codec::json_digest(&state)? != self.digest
         {
             return Err(invalid("state closure mismatch"));
@@ -539,6 +555,7 @@ fn apply_piece(
         if !header.records.is_empty()
             || !header.operations.is_empty()
             || !header.expirations.is_empty()
+            || header.groups.as_ref().is_some_and(|g|!g.heads.is_empty() || !g.owners.is_empty() || !g.receipts.is_empty())
         {
             return Err(invalid("nonempty state header collections"));
         }
@@ -557,6 +574,9 @@ fn apply_piece(
         "records" => state.records.len() >= config.max_records,
         "operations" => state.operations.len() >= config.max_operations,
         "expirations" => state.expirations.len() >= config.max_operations,
+        "group_heads" => state.groups.as_ref().is_none_or(|g|g.heads.len() >= config.max_records),
+        "group_owners" => state.groups.as_ref().is_none_or(|g|g.owners.len() >= config.max_records),
+        "group_receipts" => state.groups.as_ref().is_none_or(|g|g.receipts.len().saturating_add(state.operations.len()) >= config.max_operations),
         _ => false,
     };
     if exceeded {
@@ -584,7 +604,26 @@ fn apply_piece(
                 }
             }
         }
-        "operations" => state.operations.push(one!(Applied))?,
+        "operations" => {
+            if state.groups.as_ref().is_some_and(|g|g.receipts.len().saturating_add(state.operations.len()) >= config.max_operations) { return Err(invalid("combined operation budget exceeded")); }
+            state.operations.push(one!(Applied))?;
+        },
+        "group_heads" => {
+            let mut values:BTreeMap<String,group_plan::Head>=serde_json::from_value(value.take()).map_err(storage)?;
+            if values.len()!=1 { return Err(invalid("invalid group head cardinality")); }
+            let (id,head)=values.pop_first().unwrap();
+            if state.groups.as_mut().ok_or_else(||invalid("missing group header"))?.heads.insert(id,head).is_some() { return Err(invalid("duplicate group head")); }
+        },
+        "group_owners" => {
+            let mut values:BTreeMap<String,String>=serde_json::from_value(value.take()).map_err(storage)?;
+            if values.len()!=1 { return Err(invalid("invalid group owner cardinality")); }
+            let (id,owner)=values.pop_first().unwrap();
+            if state.groups.as_mut().ok_or_else(||invalid("missing group header"))?.owners.insert(id,owner).is_some() { return Err(invalid("duplicate group owner")); }
+        },
+        "group_receipts" => {
+            let receipt=one!(group_plan::StoredReceipt);
+            state.groups.as_mut().ok_or_else(||invalid("missing group header"))?.receipts.push(receipt);
+        },
 
         "expirations" => state.expirations.push(one!(temporal::Expiration)),
         _ => return Err(invalid("unknown state piece")),
@@ -595,6 +634,43 @@ fn apply_piece(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn group_pieces_preserve_metadata_without_large_header_and_reject_downgrade() {
+        struct Collected(Vec<Value>);
+        impl Pieces for Collected {
+            fn push(&mut self, raw:&impl Serialize)->Result<(),RecordError> {
+                self.0.push(serde_json::to_value(raw).map_err(storage)?);Ok(())
+            }
+        }
+        let config=super::super::tests::config();
+        let groups=group_plan::Groups {
+            heads:BTreeMap::from([("g".into(),group_plan::Head {version:2,members:std::collections::BTreeSet::from(["r".into()])})]),
+            owners:BTreeMap::from([("r".into(),"g".into())]),
+            receipts:vec![group_plan::StoredReceipt {
+                operation_id:OperationId{epoch:0,nonce:"replace".into()},request_digest:[3;32],
+                receipt:group_plan::GroupReceipt{seq:1,group_id:"g".into(),group_version:2,record_count:1},
+                observed_epoch:0,observed_time_ms:1,
+            }],publication_seq:1,
+        };
+        let state=State {groups:Some(groups),seq:1,time_watermark_ms:1,..State::default()};
+        let mut pieces=Collected(Vec::new());visit_state(&state,&mut pieces).unwrap();
+        assert!(pieces.0[0]["header"]["groups"]["heads"].as_object().unwrap().is_empty());
+        assert!(pieces.0[0]["header"]["groups"]["receipts"].as_array().unwrap().is_empty());
+        let mut recovered=None;
+        for (i,piece) in pieces.0.iter().cloned().enumerate() {apply_piece(&mut recovered,piece,i as u64,&config).unwrap();}
+        let recovered=recovered.unwrap();
+        assert_eq!(serde_json::to_value(&state).unwrap(),serde_json::to_value(&recovered).unwrap());
+        assert_eq!(state_proof::length(&state).unwrap(),checkpoint_codec::json_length(&state).unwrap());
+        let mut duplicate=Some(recovered);
+        assert!(apply_piece(&mut duplicate,pieces.0[1].clone(),5,&config).is_err());
+        let root=tempfile::tempdir().unwrap();
+        let chunks=root.path().join("chunks");
+        let (mut descriptor,pool)=prepare(&chunks,&config,&state);
+        assert_eq!(descriptor.format,8);
+        descriptor.format=6;
+        assert!(descriptor.read(&chunks,&pool,config.max_journal_bytes).err().unwrap().to_string().contains("group state format mismatch"));
+    }
+
     #[test]
     fn bounded_value_recovery_exceeds_single_total_and_late_failure_releases_all() {
         const FLAG:&str="ANYSEEK_BOUNDED_VALUE_RECOVERY_CHILD";

@@ -45,15 +45,15 @@ impl RecordPartition {
     }
 }
 
-struct RemoteUpload {
+pub(in crate::record) struct RemoteUpload {
     store: crate::storage::s3_compatible::S3CompatibleStore,
-    path: std::path::PathBuf,
+    pub(in crate::record) path: std::path::PathBuf,
     head: crate::storage::sqlite_authority::PartitionHead,
     max_bytes: usize,
     #[cfg(test)]
     root: std::path::PathBuf,
 }
-pub(super) struct UploadedBatch {
+pub(in crate::record) struct UploadedBatch {
     head: crate::storage::sqlite_authority::PartitionHead,
     block: crate::storage::object_log::ObjectLogBlock,
     reference: crate::storage::sqlite_authority::ObjectRef,
@@ -74,6 +74,9 @@ impl RemoteUpload {
             }
             _ => unreachable!(),
         }).collect();
+        self.upload_entries(entries).await
+    }
+    pub(in crate::record) async fn upload_entries(self, entries: Vec<crate::storage::object_log::ObjectLogEntry>) -> Result<UploadedBatch, RecordError> {
         let block = crate::storage::object_log::ObjectLogBlock {
             partition_id: self.head.partition_id.clone(),
             first_seq: entries.first().ok_or(RecordError::RecoveryRequired)?.seq,
@@ -138,6 +141,9 @@ impl RemoteUpload {
 }
 impl UploadedBatch {
     async fn publish(self, remote: &mut RemotePersistence) -> Result<(), RecordError> {
+        self.publish_checked(remote, || Ok(())).await
+    }
+    pub(in crate::record) async fn publish_checked(self, remote: &mut RemotePersistence, check: impl FnOnce() -> Result<(), RecordError>) -> Result<(), RecordError> {
         if remote.partition_id != self.head.partition_id
             || remote.owner_epoch != self.head.owner_epoch
         {
@@ -149,11 +155,10 @@ impl UploadedBatch {
             .iter()
             .map(|entry| (entry.operation_id.as_str(), entry.request_sha256, entry.seq))
             .collect();
-        let result = remote
-            .authority
-            .lock()
-            .await
-            .publish_batch(
+        let mut authority = remote.authority.lock().await;
+        // Evaluate time-sensitive admission after the last asynchronous lock wait.
+        check()?;
+        let result = authority.publish_batch(
                 &remote.partition_id,
                 self.head.head_version,
                 remote.owner_epoch,
@@ -186,22 +191,27 @@ impl Inner {
         if prepared.plans.is_empty() {
             return Ok(None);
         }
+        remote.prepare_upload(prepared.base_seq, self.journal.root()).await.map(Some)
+    }
+}
+impl RemotePersistence {
+    pub(in crate::record) async fn prepare_upload(&self, base_seq:u64, _root:&Path) -> Result<RemoteUpload,RecordError> {
         let (head,path) = {
-            let authority = remote.authority.lock().await;
-            let head = authority.read_head(&remote.partition_id)
+            let authority = self.authority.lock().await;
+            let head = authority.read_head(&self.partition_id)
                 .map_err(storage)?.ok_or(RecordError::RecoveryRequired)?;
             (head,authority.database_path().to_path_buf())
         };
-        if head.owner_epoch != remote.owner_epoch || head.committed_seq != prepared.base_seq {
+        if head.owner_epoch != self.owner_epoch || head.committed_seq != base_seq {
             return Err(RecordError::RecoveryRequired);
         }
-        Ok(Some(RemoteUpload {
-            store: remote.store.clone(),
+        Ok(RemoteUpload {
+            store: self.store.clone(),
             path,
             head,
-            max_bytes: remote.max_object_bytes,
+            max_bytes: self.max_object_bytes,
             #[cfg(test)]
-            root: self.journal.root().to_path_buf(),
-        }))
+            root: _root.to_path_buf(),
+        })
     }
 }
