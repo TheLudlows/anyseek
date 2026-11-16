@@ -112,19 +112,17 @@ pub(super) fn prepare(state:&State, groups:&Groups, config:&RecordConfig, reques
     let mut records=Vec::new();
     let mut count=state.records.len();
     let mut ttl=state.records.live_ttl_count();
-    let mut snapshot=checkpoint_codec::length(config,state)?;
     let writes=request.records.iter().map(|r|(r.record_id.clone(),Some(r.document.clone()),r.temporal.clone()))
         .chain(removed.into_iter().map(|id|(id,None,None)));
     for (id,document,temporal) in writes {
         let previous=state.records.get(&id);
         let write=RecordWrite{operation_id:request.operation_id.clone(),record_id:id,expected:ExpectedVersion::Any,document,vector_patch:None,temporal};
         let input=mutation::Input{previous,operation:None,seq:state.seq,epoch_watermark:epoch,time_watermark_ms:state.time_watermark_ms,
-            record_count:count,operation_count:state.operations.len()+groups.receipts.len(),ttl_count:ttl};
-        let mutation::PreparedWrite::Append{applied,snapshot_bytes,..}=mutation::prepare_input(&input,config,snapshot,write,epoch,now)? else {return Err(storage("unexpected member replay"));};
-        let time=temporal::retained(previous,&applied.request,now)?;
-        let record=mutation::projected_record(previous,&applied,applied.request.document.clone(),time);
+            record_count:count,operation_count:state.operations.len(),group_operation_count:groups.receipts.len(),ttl_count:ttl};
+        let _request_plan=mutation::reserve_request(&write)?;
+        let mutation::PlannedRecord { record, .. } = mutation::prepare_record(&input,config,write,epoch,now)?;
         ttl=ttl-usize::from(previous.is_some_and(temporal::live_ttl))+usize::from(temporal::live_ttl(&record));
-        count+=usize::from(previous.is_none());snapshot=snapshot_bytes;records.push(record);
+        count+=usize::from(previous.is_none());records.push(record);
     }
     Ok(Plan::Replace(Decision{request_digest:request_digest(&request)?,operation_id:request.operation_id,members,receipt,records,observed_epoch:epoch,observed_time_ms:now}))
 }
@@ -185,17 +183,17 @@ pub(super) fn validate(state:&State,config:&RecordConfig)->Result<(),RecordError
     let Some(g)=&state.groups else{return Ok(());};
     if g.publication_seq>state.seq || g.heads.len()>config.max_records || g.owners.len()>config.max_records
         || g.receipts.len().saturating_add(state.operations.len())>config.max_operations {return Err(storage("group metadata bounds exceeded"));}
-    let mut ids=BTreeSet::new();let mut seq=0;
+    let mut ids=BTreeSet::new();let mut seq=0;let mut latest=BTreeMap::new();
     for r in &g.receipts {
         if r.receipt.seq<=seq || r.receipt.seq>state.seq || r.observed_time_ms>state.time_watermark_ms
             || !ids.insert(&r.operation_id) || state.operation_lookup.contains_key(&r.operation_id)
             || g.heads.get(&r.receipt.group_id).is_none_or(|h|h.version<r.receipt.group_version) {return Err(storage("invalid group receipt history"));}
-        seq=r.receipt.seq;
+        seq=r.receipt.seq;latest.insert(&r.receipt.group_id,r);
     }
     if seq>g.publication_seq || (seq<g.publication_seq && state.retired_operation_prefix.as_ref().is_none_or(|p|p.seq<g.publication_seq)) {return Err(storage("group publication watermark mismatch"));}
     for (id,head) in &g.heads {
         if id.is_empty() || head.version==0 || head.members.len()>MAX_MEMBERS {return Err(storage("invalid group head"));}
-        if let Some(last)=g.receipts.iter().rev().find(|r|r.receipt.group_id==*id)
+        if let Some(last)=latest.get(id)
             .filter(|r|state.retired_operation_prefix.as_ref().is_none_or(|p|r.receipt.seq>p.seq)) {
             if last.receipt.group_version!=head.version || last.receipt.record_count!=head.members.len(){return Err(storage("group head differs from latest receipt"));}
         }
@@ -219,6 +217,31 @@ mod tests {
         for r in &d.records {state.records.insert(r.record_id.clone(),r.clone()).unwrap();groups.owners.insert(r.record_id.clone(),d.receipt.group_id.clone());}
         groups.heads.insert(d.receipt.group_id.clone(),Head{version:d.receipt.group_version,members:d.members.clone()});
         state.seq=d.receipt.seq;groups.publication_seq=state.seq;groups.receipts.push(d.stored());
+    }
+    #[tokio::test]
+    async fn group_budget_counts_one_receipt_and_preserves_ordinary_wire_size() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = super::super::tests::config();
+        // Sixteen 2 KB bodies fit once, but not twice, in this checkpoint.
+        config.max_journal_bytes = 50 * 1024;
+        config.max_operations = 2;
+        let p = RecordPartition::create(&temp.path().join("records"), config.clone()).await.unwrap();
+        let ids: Vec<_> = (0..16).map(|n| format!("member-{n}")).collect();
+        let mut replacement = request("group", 0, &ids.iter().map(String::as_str).collect::<Vec<_>>());
+        for member in &mut replacement.records {
+            member.document.insert("body".into(), serde_json::json!("x".repeat(2000)));
+        }
+        let receipt = p.replace_group(replacement.clone()).await.unwrap();
+        p.write(super::super::tests::write("ordinary", "independent", "beta", ExpectedVersion::Absent)).await.unwrap();
+        assert_eq!(p.replace_group(replacement).await.unwrap(), receipt);
+        assert!(matches!(p.write(super::super::tests::write("over-quota", "extra", "gamma", ExpectedVersion::Absent)).await, Err(RecordError::Rejected(_))));
+        let inner = p.inner.lock().await;
+        assert_eq!(inner.snapshot_bytes, checkpoint_codec::full_length(&config, &inner.state).unwrap());
+        assert_eq!(inner.state.operations.len(), 1);
+        assert_eq!(inner.state.groups.as_ref().unwrap().receipts.len(), 1);
+        drop(inner);
+        assert_eq!(p.statistics().await.unwrap().retained_operations, 2);
+        p.finish_service_shutdown().await.unwrap();
     }
     #[test]
     fn replace_clear_replay_and_membership_are_whole_decisions(){

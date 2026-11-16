@@ -174,16 +174,19 @@ pub(super) fn apply(state: &mut State, event: &Expiration) -> Result<(), RecordE
     state.expirations.push(event.clone());
     Ok(())
 }
+pub(super) fn checked_time(clock: &dyn Clock, floor: u64) -> Result<u64, RecordError> {
+    let now = clock.now_ms()?;
+    if now > MAX_TIME || now.saturating_add(CLOCK_TOLERANCE) < floor {
+        return Err(RecordError::ClockUncertain);
+    }
+    Ok(now.max(floor))
+}
 impl Inner {
     fn trusted_evaluation_time(&self) -> Result<u64, RecordError> {
         if !self.healthy {
             return Err(RecordError::RecoveryRequired);
         }
-        let now = self.clock.now_ms()?;
-        if now > MAX_TIME || now.saturating_add(CLOCK_TOLERANCE) < self.state.time_watermark_ms {
-            return Err(RecordError::ClockUncertain);
-        }
-        Ok(now.max(self.evaluation_time_ms).max(self.state.time_watermark_ms))
+        Ok(checked_time(self.clock.as_ref(), self.state.time_watermark_ms)?.max(self.evaluation_time_ms))
     }
 
     /// Observation is transient and never edits canonical State, WAL or indexes.

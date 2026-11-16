@@ -158,7 +158,7 @@ impl PlanningView {
     pub(super) fn input<'a>(&self, previous: Option<&'a Record>, operation: Option<&'a Applied>) -> mutation::Input<'a> {
         mutation::Input { previous, operation, seq: self.seq,
             epoch_watermark: self.epoch_watermark, time_watermark_ms: self.time_watermark_ms,
-            record_count: self.record_count, operation_count: self.operation_count, ttl_count: self.ttl_count }
+            record_count: self.record_count, operation_count: self.operation_count, group_operation_count: 0, ttl_count: self.ttl_count }
     }
 
     /// Complete every fallible check/reservation before installing this prefix.

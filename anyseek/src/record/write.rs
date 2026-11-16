@@ -4,6 +4,7 @@ use super::*;
 use futures::FutureExt;
 mod planning;
 mod persistence;
+pub(super) use persistence::{RemoteUpload, UploadedBatch};
 use planning::PlanningView;
 
 /// Only the completed prefix has definite outcomes. Busy and uncertain
@@ -360,7 +361,7 @@ impl RecordPartition {
                 let group_operations=inner.state.groups.as_ref().map_or(0,|g|g.receipts.len());
                 let (previous, operation) = candidate.read(&inner.state, &request);
                 let mut input = candidate.input(previous.as_deref(), operation.as_deref());
-                input.operation_count=input.operation_count.saturating_add(group_operations);
+                input.group_operation_count=group_operations;
                 if input.operation.is_none() {
                     if inner.maintenance_requested.is_some() {
                         return Err(RecordError::Busy);

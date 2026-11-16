@@ -29,16 +29,21 @@ impl RecordPartition {
         }).await.map_err(|e|RecordError::OutcomeUnknown(e.to_string()))?
     }
     async fn replace_group_owned(&self,request:GroupReplace)->Result<GroupReceipt,RecordError>{
-        let mut inner=self.inner.lock().await;
-        let result=std::panic::AssertUnwindSafe(self.replace_group_locked(&mut inner,request)).catch_unwind().await
+        // Keep the guard through error handling; only the unselected object upload
+        // releases it, while the owned task retains the writer and admission leases.
+        let mut guard=Some(self.inner.lock().await);
+        let result=std::panic::AssertUnwindSafe(self.replace_group_locked(&mut guard,request)).catch_unwind().await
             .unwrap_or_else(|_|Err(RecordError::OutcomeUnknown("group publication unwound".into())));
+        if guard.is_none() {guard=Some(self.inner.lock().await);}
+        let inner=guard.as_mut().unwrap();
         if matches!(&result,Err(RecordError::OutcomeUnknown(_)|RecordError::DurablePending(_)|RecordError::RecoveryRequired)) {
             inner.healthy=false;inner.index.abort_batch();
             if let Ok(mut output)=inner.output.write(){output.fenced=true;}
         }
         result
     }
-    async fn replace_group_locked(&self,inner:&mut Inner,request:GroupReplace)->Result<GroupReceipt,RecordError>{
+    async fn replace_group_locked<'a>(&'a self,guard:&mut Option<tokio::sync::MutexGuard<'a,Inner>>,request:GroupReplace)->Result<GroupReceipt,RecordError>{
+        let inner=guard.as_mut().unwrap();
         if !inner.healthy{return Err(RecordError::RecoveryRequired);}
         inner.observe_time()?;
         let replay=inner.state.groups.as_ref().is_some_and(|g|g.receipts.iter().any(|r|r.operation_id==request.operation_id));
@@ -74,12 +79,27 @@ impl RecordPartition {
             inner.state.records.get(&r.record_id).filter(|r|temporal::visible(r,decision.observed_time_ms)).and_then(|r|r.temporal.expire_at_ms)
         ]).flatten().min();
         if deadline.is_some_and(|t|t<=inner.evaluation_time_ms){return Err(RecordError::Busy);}
-        let clock=inner.clock.clone();let min_time_ms=inner.evaluation_time_ms.max(inner.state.time_watermark_ms);
-        if let Some(remote)=inner.remote.as_mut() {
+        if let Some(remote)=inner.remote.as_ref() {
             let id=format!("{}:{}",decision.operation_id.epoch,decision.operation_id.nonce);
             if remote.batch_tail_needs_checkpoint(&[(decision.receipt.seq,id.clone(),&payload)]).await? {return Err(inner.request_checkpoint("group_remote_tail_room"));}
-            remote.commit_group_entry(decision.receipt.seq,id,&payload,deadline,clock,min_time_ms).await?;
+            let upload=remote.prepare_upload(decision.receipt.seq-1,inner.journal.root()).await?;
+            drop(guard.take());
+            let uploaded=upload.upload_group(decision.receipt.seq,id,&payload).await;
+            *guard=Some(self.inner.lock().await);
+            let inner=guard.as_mut().unwrap();
+            let uploaded=uploaded?;
+            if !inner.healthy || inner.state.seq.checked_add(1)!=Some(decision.receipt.seq) {return Err(RecordError::RecoveryRequired);}
+            inner.observe_time()?;
+            if deadline.is_some_and(|t|t<=inner.evaluation_time_ms){return Err(RecordError::Busy);}
+            let clock=inner.clock.clone();
+            let min_time_ms=inner.evaluation_time_ms.max(inner.state.time_watermark_ms);
+            uploaded.publish_checked(inner.remote.as_mut().ok_or(RecordError::RecoveryRequired)?,move || {
+                let now=temporal::checked_time(clock.as_ref(),min_time_ms)?;
+                if deadline.is_some_and(|t|t<=now){return Err(RecordError::Busy);}
+                Ok(())
+            }).await?;
         }
+        let inner=guard.as_mut().unwrap();
         inner.append_operation(&payload,decision.receipt.seq).await?;
         #[cfg(test)] if std::env::var("ANYSEEK_GROUP_CRASH_ROOT").ok().as_deref()==inner.journal.root().to_str(){std::process::exit(72);}
         #[cfg(test)] if inner.fail_after_durable {return Err(RecordError::DurablePending(decision.receipt.seq));}

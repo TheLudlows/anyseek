@@ -3,29 +3,15 @@ use super::*;
 #[cfg(test)]
 use std::time::Duration;
 
-impl RemotePersistence {
-    pub(super) async fn commit_group_entry(&mut self,seq:u64,operation_id:String,payload:&[u8],
-        deadline:Option<u64>,clock:Arc<dyn temporal::Clock>,min_time_ms:u64)->Result<(),RecordError> {
+impl write::RemoteUpload {
+    pub(super) async fn upload_group(self, seq:u64, operation_id:String, payload:&[u8]) -> Result<write::UploadedBatch,RecordError> {
         use sha2::{Digest,Sha256};
-        let mut authority=self.authority.lock().await;
-        let head=authority.read_head(&self.partition_id).map_err(storage)?.ok_or(RecordError::RecoveryRequired)?;
-        if head.committed_seq.checked_add(1)!=Some(seq) || head.owner_epoch!=self.owner_epoch {
-            return Err(RecordError::RecoveryRequired);
-        }
-        let block=crate::storage::object_log::ObjectLogBlock {
-            partition_id:self.partition_id.clone(),first_seq:seq,last_seq:seq,previous:head.wal_tip.clone(),
-            entries:vec![crate::storage::object_log::ObjectLogEntry {
-                seq,operation_id,request_sha256:Sha256::digest(payload).into(),payload:payload.to_vec(),
-            }],
-        };
-        let digest=checkpoint_codec::json_digest(&block)?;
-        let key=crate::storage::object_keys::key(&self.partition_id,"wal",&format!("{seq:020}-{}",digest.iter().map(|b|format!("{b:02x}")).collect::<String>()));
-        let reference=crate::storage::object_log::upload_log_block(&self.store,&mut authority,&key,&block,
-            unix_time_ms_i64(),self.max_object_bytes).await.map_err(|e|match RemoteCommitError::from(e) {
-                RemoteCommitError::Busy=>RecordError::Busy,RemoteCommitError::Unknown(s)=>RecordError::OutcomeUnknown(s),
-            })?;
+        #[cfg(test)] let path=self.path.clone();
+        let uploaded=self.upload_entries(vec![crate::storage::object_log::ObjectLogEntry {
+            seq,operation_id,request_sha256:Sha256::digest(payload).into(),payload:payload.to_vec(),
+        }]).await?;
         #[cfg(test)] {
-            let gate=authority.database_path().with_extension("group-after-upload-pause");
+            let gate=path.with_extension("group-after-upload-pause");
             if gate.exists() {
                 std::fs::write(gate.with_extension("started"),b"uploaded, not selected").map_err(storage)?;
                 let until=Instant::now()+Duration::from_secs(20);
@@ -35,20 +21,7 @@ impl RemotePersistence {
                 }
             }
         }
-        // Same trusted time limits as temporal::Inner evaluation. The caller
-        // supplies its monotonic lower bound; wall-clock rollback cannot extend TTL.
-        let now=clock.now_ms()?;
-        if now>253_402_300_799_999 || now.saturating_add(300_000)<min_time_ms {
-            return Err(RecordError::ClockUncertain);
-        }
-        if deadline.is_some_and(|t|t<=now.max(min_time_ms)) {return Err(RecordError::Busy);}
-        let operations=block.entries.iter().map(|e|(e.operation_id.as_str(),e.request_sha256,e.seq)).collect::<Vec<_>>();
-        match authority.publish_batch(&self.partition_id,head.head_version,self.owner_epoch,&operations,reference,None)
-            .map_err(|e|RecordError::OutcomeUnknown(e.to_string()))? {
-            crate::storage::sqlite_authority::PublishOutcome::Published(h)
-            | crate::storage::sqlite_authority::PublishOutcome::AlreadyPublished(h) if h.committed_seq==seq=>Ok(()),
-            _=>Err(RecordError::RecoveryRequired),
-        }
+        Ok(uploaded)
     }
 }
 
@@ -106,15 +79,26 @@ mod tests {
         for rollback in [false,true] {
             let temp=tempfile::tempdir().unwrap();let root=temp.path().join("warm");let db=temp.path().join("authority.sqlite");
             let (p,_,clock)=source(&root,&db).await;let now=clock.0.load(Ordering::SeqCst);
-            let mut r=request("timed",0,&["a"]);r.records[0].temporal=Some(TemporalMetadata{expire_at_ms:Some(now+1000),..Default::default()});
+            p.replace_group(request("base",0,&["a"])).await.unwrap();
+            let mut r=request("timed",1,&["b"]);r.records[0].temporal=Some(TemporalMetadata{expire_at_ms:Some(now+1000),..Default::default()});
             let gate=db.with_extension("group-after-upload-pause");std::fs::write(&gate,b"pause").unwrap();
             let owner=p.clone();let task=tokio::spawn(async move{owner.replace_group(r).await});
             tokio::time::timeout(Duration::from_secs(10),async{while !gate.with_extension("started").exists(){tokio::task::yield_now().await;}}).await.unwrap();
+            tokio::time::timeout(Duration::from_secs(2),async {
+                assert!(p.get("a").await.unwrap().is_some());
+                assert!(p.get("b").await.unwrap().is_none());
+                assert_eq!(crate::record::tests::query(&p,SearchMode::Lexical).await.hits.len(),1);
+                let inner=p.inner.lock().await;
+                assert_eq!(inner.state.seq,1);
+                let remote=inner.remote.as_ref().unwrap();
+                assert_eq!(remote.authority.lock().await.read_head("groups").unwrap().unwrap().committed_seq,1);
+            }).await.expect("reads and shared authority must remain available during upload");
             clock.0.store(if rollback{now-300_001}else{now+1000},Ordering::SeqCst);std::fs::remove_file(gate).unwrap();
             let result=task.await.unwrap();if rollback{assert!(matches!(result,Err(RecordError::ClockUncertain)));}else{assert!(matches!(result,Err(RecordError::Busy)));}
-            {let inner=p.inner.lock().await;assert_eq!(inner.state.seq,0);let r=inner.remote.as_ref().unwrap();assert_eq!(r.authority.lock().await.read_head("groups").unwrap().unwrap().committed_seq,0);}
+            {let inner=p.inner.lock().await;assert_eq!(inner.state.seq,1);let r=inner.remote.as_ref().unwrap();assert_eq!(r.authority.lock().await.read_head("groups").unwrap().unwrap().committed_seq,1);}
             clock.0.store(now+1000,Ordering::SeqCst);let p=cold(p,&temp.path().join("cold"),clock).await;
-            assert_eq!(p.group_version("g").await.unwrap(),None);assert!(p.get("a").await.unwrap().is_none());p.finish_service_shutdown().await.unwrap();
+            assert_eq!(p.group_version("g").await.unwrap(),Some(1));assert!(p.get("a").await.unwrap().is_some());
+                assert!(p.get("b").await.unwrap().is_none());p.finish_service_shutdown().await.unwrap();
         }
     }
     #[tokio::test]

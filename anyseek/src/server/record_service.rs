@@ -2245,10 +2245,14 @@ mod tests {
         let (status,clear)=tenant_api(&app,"POST","/api/v1/index/c/group/replace",key,Some(request("group-clear",2,&[]))).await;
         assert_eq!(status,StatusCode::OK);assert_eq!(clear["receipt"]["record_count"],0);
         assert_eq!(tenant_api(&app,"GET",uri,key,None).await.1["group_version"],3);
+        assert_eq!(partition.statistics().await.unwrap().retained_operations,3);
         for (route,array) in [("batch","writes"),("ingest","records")] {
             let value=json!({array:[{"operation_id":OperationId::new(route.into()),"record_id":route,"expected":"Absent","document":{"body":"alpha"}}]});
             let (status,result)=tenant_api(&app,"POST",&format!("/api/v1/index/c/{route}"),key,Some(value)).await;
             assert_eq!(status,StatusCode::OK);assert_eq!(result["atomic"],false);
+            let item=&result["results"][0];
+            assert_eq!(item["code"],if route=="batch" {"applied"}else{"committed"},"{result}");
+            assert_eq!(item["receipt"]["record_id"],route);
         }
         drop(partition);drop(app);service.shutdown().wait().await.unwrap();std::fs::remove_dir_all(path).unwrap();
     }

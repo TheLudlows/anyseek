@@ -745,7 +745,7 @@ impl Inner {
                     .is_some_and(|r| temporal::visible(r, self.evaluation_time_ms))).count()
             },
             retained_identities: self.state.records.len(),
-            retained_operations: self.state.operations.len(),
+            retained_operations: self.state.operations.len().saturating_add(self.state.groups.as_ref().map_or(0, |g| g.receipts.len())),
             physical_versions: self.ordinals.iter().filter(|id|!id.is_empty()).count(),
             checkpoint_bytes: self.snapshot_bytes,
         }
