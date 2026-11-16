@@ -10,14 +10,15 @@ impl Serialize for Metadata<'_> {
         // Exhaustive destructuring makes adding any State field a compile-time
         // obligation here. Exactly the three serde-skipped fields are excluded.
         let State {residency:_,lineage,history,
-            independent_snapshot,seq,epoch_watermark,time_watermark_ms,retired_operation_prefix,expirations,
+            independent_snapshot,seq,epoch_watermark,time_watermark_ms,retired_operation_prefix,groups,expirations,
                         records:_,operations:_,
             operation_lookup:_,lookup_bytes:_}=self.0;
-        let mut s=serializer.serialize_struct("State",9+usize::from(retired_operation_prefix.is_some()))?;
+        let mut s=serializer.serialize_struct("State",9+usize::from(retired_operation_prefix.is_some())+usize::from(groups.is_some()))?;
         macro_rules! field {($name:ident)=>{s.serialize_field(stringify!($name),$name)?};}
         field!(lineage);s.serialize_field("history",history)?;
         field!(independent_snapshot);field!(seq);field!(epoch_watermark);field!(time_watermark_ms);
         if retired_operation_prefix.is_some() {field!(retired_operation_prefix);}
+        if groups.is_some() {field!(groups);}
         field!(expirations);
         s.serialize_field("records",&())?;
         s.serialize_field("operations",&())?;s.end()

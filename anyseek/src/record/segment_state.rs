@@ -18,6 +18,7 @@ pub(super) fn visit(state: &mut Value, mut body: impl FnMut(&mut Value)->Result<
         if let Some(patch)=request.get_mut("vector_patch"){if !patch.is_null(){body(patch)?;}}
     }}
 
+    if let Some(records)=state.get_mut("event").and_then(|v|v.get_mut("RecordGroupAppliedV1")).and_then(|v|v.get_mut("records")).and_then(Value::as_array_mut){for value in records{record(value,&mut body)?;}}
     Ok(())
 }
 // Count encoded metadata without allocating another full JSON buffer.

@@ -113,6 +113,28 @@ UI 在发送前将原请求和未确认状态保存到 sessionStorage；丢响�
 
 每批 1..100 项，按序独立执行，非事务；已成功项不会回滚。外层非 2xx 是请求级失败；HTTP 200 仍须逐项检查 `results`：只有 `code=applied` 且带 `receipt` 才确认持久且可见。`conflict`/`rejected` 后继续；`outcome_unknown`、`durable_pending`、恢复要求或存储故障停止后续，尾部返回 `not_attempted`。结果未知不等于失败，重试必须保留原 Operation ID 和完整 RecordWrite。浏览器已有待确认请求只添加 batch 外层，不改变原始数字或身份。
 
+## 整组原子替换
+
+`POST /api/v1/index/{id}/group/replace` 接收同一个 collection 内一组 Record 的完整新版：
+
+```json
+{
+  "operation_id": {"epoch": 123, "nonce": "replace-guide-v1"},
+  "group_id": "guide",
+  "expected_group_version": 0,
+  "records": [
+    {"record_id": "guide-1", "document": {"body": "第一段"}},
+    {"record_id": "guide-2", "document": {"body": "第二段"}}
+  ]
+}
+```
+
+`operation_id` 使用与普通 Record 写入相同的当前 epoch 生成规则；上面的 epoch 只是占位值。首次创建组使用 `expected_group_version: 0`；后续替换提交当前组版本。`records` 是完整成员列表，不是增量；空列表清空组但保留单调递增的组版本。每个成员必须带非 null 的 `document` 对象，不接受成员级 operation ID 或 vector patch；上层负责分块与向量化。
+
+成功返回 `atomic: true`、原 operation ID 和 `receipt`（`seq`、`group_id`、`group_version`、`record_count`）。超时或结果未知时，重用同一 operation ID 与完整原请求取得原回执，不能生成新 ID 猜测重试结果。`GET /api/v1/index/{id}/group?group_id=guide` 返回当前组版本；从未存在的组返回 404。group ID 是不透明业务值，请按 URL 查询参数编码。当前版本查询不是某次操作的结果查询。
+
+两个接口都使用 Tenant API Key，权限限制在该 Tenant 的当前 collection 代次。普通 `/batch` 与 `/ingest` 仍是独立 Record 写入，`atomic: false`，不能用它们绕过已有组成员的归属约束。
+
 ## 异步索引写入
 
 `POST /api/v1/index/{id}/ingest` 接收 `{"records":[RecordWrite,...]}`，每次 1..64 项；每项携带自己的稳定 Record ID、条件版本和 Operation ID。文档显式为对象或 null，也可提交 vector_patch。HTTP body 仍为 2 MiB；partition 队列按在途项目总数 64 和序列化请求总量 4 MiB 有界准入，超额拒绝。

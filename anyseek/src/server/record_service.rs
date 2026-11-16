@@ -20,7 +20,7 @@ use anyseek::{
     index::Clustering,
     record::{
         OperationId, RecordConfig, RecordCursor, RecordError, RecordPartition, RecordQuery,
-        RecordWrite, DataOutputPermit, S3CompatibleRecordConfig, IndependentItem,
+        RecordWrite, DataOutputPermit, S3CompatibleRecordConfig, IndependentItem, GroupReplace,
     },
     vector::Inference,
 };
@@ -1102,6 +1102,44 @@ async fn iterate(
         .await?;
     protected_data(result.map_err(Into::into), Some(data))
 }
+// A group is one durable operation, never a wrapper around independent batch writes.
+async fn replace_group(
+    State(s): State<Arc<Service>>, headers: HeaderMap, Path(id): Path<String>, bytes: Bytes,
+) -> Result<Response, Error> {
+    let request: GroupReplace = parse(&bytes)?;
+    let key = s.authenticate(&headers).await?;
+    owned(async move {
+        let gate = s.write_gate.clone().read_owned().await;
+        let partition = s.record(&key, &id).await?;
+        let operation_id = request.operation_id.clone();
+        #[cfg(feature = "fault-injection")]
+        let pause_collection = id.clone();
+        let result = s.catalog.authorized_generation(key, id, partition.generation, move |_| async move {
+            let _gate = gate;
+            #[cfg(feature = "fault-injection")]
+            pause_authorized_for_test(&pause_collection).await?;
+            partition.replace_group(request).await
+        }).await?;
+        response(json!({"atomic":true,"operation_id":operation_id,"receipt":result.map_err(Error::from)?,
+            "expires_at":operation_id.expires_at_unix_seconds()}))
+    }).await
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GroupVersionRequest { group_id: String }
+async fn group_version(
+    State(s): State<Arc<Service>>, headers: HeaderMap, Path(id): Path<String>,
+    Query(request): Query<GroupVersionRequest>,
+) -> Result<Response, Error> {
+    let key = s.authenticate(&headers).await?;
+    let partition = s.record(&key, &id).await?;
+    let data = partition.output_permit()?;
+    let result = s.catalog.authorized_generation(key, id, partition.generation, move |_| async move {
+        partition.group_version(&request.group_id).await.map(|version| version.map(|group_version|
+            json!({"group_id":request.group_id,"group_version":group_version})))
+    }).await?;
+    protected_data(result.map_err(Error::from).and_then(|value|value.ok_or_else(not_found)),Some(data))
+}
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct BatchRequest {
@@ -1886,6 +1924,8 @@ pub(crate) fn router(service: Arc<Service>) -> Router {
         .route("/api/v1/index/{id}/query", post(query))
         .route("/api/v1/index/{id}/iterator", post(iterate))
         .route("/api/v1/index/{id}/batch", post(batch))
+        .route("/api/v1/index/{id}/group/replace", post(replace_group))
+        .route("/api/v1/index/{id}/group", get(group_version))
         .route("/api/v1/index/{id}/delete-plan", post(deletion_plan))
         .route(
             "/api/v1/index/{id}/operation/{epoch}/{nonce}",
@@ -2171,6 +2211,112 @@ mod tests {
         let request=axum::http::Request::builder().method(method).uri(path).header("apikey",key).header("content-type","application/json").body(Body::from(body)).unwrap();
         let response=app.clone().oneshot(request).await.unwrap();let status=response.status();
         let value=serde_json::from_slice(&axum::body::to_bytes(response.into_body(),MAX_RESPONSE).await.unwrap()).unwrap();(status,value)
+    }
+    #[tokio::test]
+    async fn group_http_replaces_replays_clears_and_preserves_independent_routes() {
+        let (service,path,headers)=setup().await;
+        let app=router(service.clone());let key=headers["apikey"].to_str().unwrap();
+        let id="guide / 章节";
+        let uri="/api/v1/index/c/group?group_id=guide%20%2F%20%E7%AB%A0%E8%8A%82";
+        assert_eq!(tenant_api(&app,"GET",uri,key,None).await.0,StatusCode::NOT_FOUND);
+        let request=|nonce:&str,version:u64,ids:&[&str]|json!({"operation_id":OperationId::new(nonce.into()),
+            "group_id":id,"expected_group_version":version,"records":ids.iter().map(|id|
+                json!({"record_id":id,"document":{"body":"alpha"}})).collect::<Vec<_>>()});
+        let first=request("group-first",0,&["a","b","c"]);
+        let (status,receipt)=tenant_api(&app,"POST","/api/v1/index/c/group/replace",key,Some(first.clone())).await;
+        assert_eq!(status,StatusCode::OK);assert_eq!(receipt["atomic"],true);
+        assert_eq!(receipt["receipt"]["group_version"],1);assert_eq!(receipt["receipt"]["record_count"],3);
+        let (status,second)=tenant_api(&app,"POST","/api/v1/index/c/group/replace",key,Some(request("group-second",1,&["a","d"]))).await;
+        assert_eq!(status,StatusCode::OK);assert_eq!(second["receipt"]["group_version"],2);
+        let (status,replay)=tenant_api(&app,"POST","/api/v1/index/c/group/replace",key,Some(first)).await;
+        assert_eq!(status,StatusCode::OK);assert_eq!(replay,receipt);
+        let partition=service.record("tenant","c").await.unwrap();
+        assert!(partition.get("b").await.unwrap().is_none());assert!(partition.get("c").await.unwrap().is_none());
+        assert!(partition.get("a").await.unwrap().is_some());assert!(partition.get("d").await.unwrap().is_some());
+        let (status,current)=tenant_api(&app,"GET",uri,key,None).await;
+        assert_eq!(status,StatusCode::OK);assert_eq!(current,json!({"group_id":id,"group_version":2}));
+        for (route,array) in [("batch","writes"),("ingest","records")] {
+            let write=json!({"operation_id":OperationId::new(format!("owned-{route}")),"record_id":"a","expected":"Any","document":{"body":"must not replace member"}});
+            let (_,result)=tenant_api(&app,"POST",&format!("/api/v1/index/c/{route}"),key,Some(json!({array:[write]}))).await;
+            let item=&result["results"][0];
+            assert!(item.get("receipt").is_none());
+            assert_eq!(if route=="batch" {&item["code"]} else {&item["error"]["code"]},"conflict");
+        }
+        let (status,clear)=tenant_api(&app,"POST","/api/v1/index/c/group/replace",key,Some(request("group-clear",2,&[]))).await;
+        assert_eq!(status,StatusCode::OK);assert_eq!(clear["receipt"]["record_count"],0);
+        assert_eq!(tenant_api(&app,"GET",uri,key,None).await.1["group_version"],3);
+        for (route,array) in [("batch","writes"),("ingest","records")] {
+            let value=json!({array:[{"operation_id":OperationId::new(route.into()),"record_id":route,"expected":"Absent","document":{"body":"alpha"}}]});
+            let (status,result)=tenant_api(&app,"POST",&format!("/api/v1/index/c/{route}"),key,Some(value)).await;
+            assert_eq!(status,StatusCode::OK);assert_eq!(result["atomic"],false);
+        }
+        drop(partition);drop(app);service.shutdown().wait().await.unwrap();std::fs::remove_dir_all(path).unwrap();
+    }
+    #[tokio::test]
+    async fn group_http_rejects_invalid_requests_conflicts_and_other_credentials() {
+        let (service,path,headers)=setup().await;
+        let app=router(service.clone());let key=headers["apikey"].to_str().unwrap();
+        let request=json!({"operation_id":OperationId::new("group-invalid".into()),"group_id":"g","expected_group_version":0,
+            "records":[{"record_id":"a","document":{"body":"alpha"}}]});
+        let mut bad=request.clone();bad["records"][0].as_object_mut().unwrap().remove("document");
+        assert_eq!(tenant_api(&app,"POST","/api/v1/index/c/group/replace",key,Some(bad)).await.0,StatusCode::BAD_REQUEST);
+        let mut bad=request.clone();bad["records"][0]["document"]=Value::Null;
+        assert_eq!(tenant_api(&app,"POST","/api/v1/index/c/group/replace",key,Some(bad)).await.0,StatusCode::BAD_REQUEST);
+        let mut bad=request.clone();bad["records"][0]["operation_id"]=json!(OperationId::new("not-a-member-operation".into()));
+        assert_eq!(tenant_api(&app,"POST","/api/v1/index/c/group/replace",key,Some(bad)).await.0,StatusCode::BAD_REQUEST);
+        assert_eq!(tenant_api(&app,"POST","/api/v1/index/c/group/replace",key,Some(request.clone())).await.0,StatusCode::OK);
+        let mut stale=request.clone();stale["operation_id"]=json!(OperationId::new("stale".into()));stale["records"][0]["record_id"]=json!("new");
+        assert_eq!(tenant_api(&app,"POST","/api/v1/index/c/group/replace",key,Some(stale)).await.0,StatusCode::CONFLICT);
+        service.catalog.execute(CatalogRequest{operation_id:OperationId::new("other-tenant".into()),command:CatalogCommand::AddTenant{tenant_id:"other".into()}}).await.unwrap();
+        service.catalog.execute(CatalogRequest{operation_id:OperationId::new("other-key".into()),command:CatalogCommand::AddKey{key_id:"b".into(),tenant_id:"other".into(),verifier:verifier(&[8;32])}}).await.unwrap();
+        for key in [master_headers()["apikey"].to_str().unwrap().to_owned(),STANDARD.encode([8;32])] {
+            assert!(!tenant_api(&app,"POST","/api/v1/index/c/group/replace",&key,Some(request.clone())).await.0.is_success());
+            assert!(!tenant_api(&app,"GET","/api/v1/index/c/group?group_id=g",&key,None).await.0.is_success());
+        }
+        let partition=service.record("tenant","c").await.unwrap();assert!(partition.get("new").await.unwrap().is_none());
+        drop(partition);drop(app);service.shutdown().wait().await.unwrap();std::fs::remove_dir_all(path).unwrap();
+    }
+    #[cfg(feature = "fault-injection")]
+    #[tokio::test]
+    async fn cancelled_group_http_waiter_keeps_backup_and_generation_guards() {
+        use tower::ServiceExt;
+        use std::time::Duration;
+        // Isolate the existing explicit fault hook from other test processes.
+        if std::env::var_os("ANYSEEK_GROUP_HTTP_CANCEL_CHILD").is_none() {
+            let temporary=tempfile::tempdir().unwrap();let pause=temporary.path().join("accepted.pause");
+            std::fs::write(&pause,b"pause").unwrap();
+            let status=std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact","record_service::tests::cancelled_group_http_waiter_keeps_backup_and_generation_guards","--nocapture"])
+                .env("ANYSEEK_GROUP_HTTP_CANCEL_CHILD","1")
+                .env("ANYSEEK_AUTHORIZED_PAUSE_COLLECTION","c")
+                .env("ANYSEEK_AUTHORIZED_PAUSE_FILE",&pause).status().unwrap();
+            assert!(status.success());return;
+        }
+        let pause=PathBuf::from(std::env::var_os("ANYSEEK_AUTHORIZED_PAUSE_FILE").unwrap());
+        let (service,path,headers)=setup().await;let app=router(service.clone());
+        let partition=service.record("tenant","c").await.unwrap();
+        let request=json!({"operation_id":OperationId::new("cancel-group".into()),"group_id":"g","expected_group_version":0,
+            "records":[{"record_id":"a","document":{"body":"alpha"}}]});
+        let http=axum::http::Request::builder().method("POST").uri("/api/v1/index/c/group/replace")
+            .header("apikey",headers["apikey"].clone()).header("content-type","application/json")
+            .body(Body::from(serde_json::to_vec(&request).unwrap())).unwrap();
+        let caller=tokio::spawn(app.clone().oneshot(http));
+        tokio::time::timeout(Duration::from_secs(5),async {
+            while !pause.with_extension("started").exists(){tokio::task::yield_now().await;}
+        }).await.unwrap();
+        caller.abort();let _=caller.await;
+        assert!(tokio::time::timeout(Duration::from_millis(30),service.write_gate.write()).await.is_err());
+        let owner=service.clone();
+        let mut deletion=tokio::spawn(async move {owner.catalog.execute(CatalogRequest{
+            operation_id:OperationId::new("delete-after-group".into()),
+            command:CatalogCommand::DeleteCollection{tenant_id:"tenant".into(),collection_id:"c".into()}}).await});
+        assert!(tokio::time::timeout(Duration::from_millis(30),&mut deletion).await.is_err());
+        std::fs::remove_file(&pause).unwrap();
+        tokio::time::timeout(Duration::from_secs(10),deletion).await.unwrap().unwrap().unwrap();
+        assert_eq!(partition.group_version("g").await.unwrap(),Some(1));
+        assert!(partition.get("a").await.unwrap().is_some());
+        drop(tokio::time::timeout(Duration::from_secs(5),service.write_gate.write()).await.unwrap());
+        drop(partition);drop(app);service.shutdown().wait().await.unwrap();std::fs::remove_dir_all(path).unwrap();
     }
     #[tokio::test]
     async fn committed_ingest_engine_boundary_keeps_plain_metadata() {
@@ -2935,6 +3081,14 @@ fn openapi_document() -> Value {
     schemas.insert("TemporalFilter".into(),json!({"type":"object","additionalProperties":false,"properties":{"event":{"anyOf":[{"$ref":"#/components/schemas/TimeRange"},{"type":"null"}]},"ingested":{"anyOf":[{"$ref":"#/components/schemas/TimeRange"},{"type":"null"}]},"valid_at_ms":{"type":["integer","null"]}}}));
     schemas.get_mut("RecordWrite").unwrap()["properties"]["temporal"]=json!({"anyOf":[{"$ref":"#/components/schemas/TemporalMetadata"},{"type":"null"}]});
     schemas.get_mut("SearchRequestObject").unwrap()["properties"]["temporal"]=json!({"anyOf":[{"$ref":"#/components/schemas/TemporalFilter"},{"type":"null"}]});
+    schemas.insert("GroupRecord".into(),json!({"type":"object","additionalProperties":false,"required":["record_id","document"],"properties":{
+        "record_id":{"type":"string"},"document":{"type":"object"},"temporal":{"anyOf":[{"$ref":"#/components/schemas/TemporalMetadata"},{"type":"null"}]}}}));
+    schemas.insert("GroupReplace".into(),json!({"type":"object","additionalProperties":false,"required":["operation_id","group_id","expected_group_version","records"],"properties":{
+        "operation_id":{"$ref":"#/components/schemas/OperationId"},"group_id":{"type":"string","description":"Opaque business group ID within this collection."},
+        "expected_group_version":{"type":"integer","minimum":0,"description":"Use 0 only when the group has never existed. Empty groups keep their version."},
+        "records":{"type":"array","items":{"$ref":"#/components/schemas/GroupRecord"},"description":"Complete replacement membership; empty clears the group. Bounds apply to the expanded old plus new work."}}}));
+    schemas.insert("GroupReceipt".into(),json!({"type":"object","required":["seq","group_id","group_version","record_count"],"properties":{
+        "seq":{"type":"integer","minimum":0},"group_id":{"type":"string"},"group_version":{"type":"integer","minimum":1},"record_count":{"type":"integer","minimum":0}}}));
     let mut paths = serde_json::Map::new();
     for (path, method, summary, schema) in [
         ("/api/v1/live", "get", "Server version", None),
@@ -2988,6 +3142,8 @@ fn openapi_document() -> Value {
         ("/api/v1/index/{id}/ingest", "post", "Commit 1..64 independent commands; continue after business rejection; indexes asynchronous",
             Some(json!({"type":"object","additionalProperties":false,"required":["records"],"properties":{"records":{"type":"array","minItems":1,"maxItems":64,"items":{"$ref":"#/components/schemas/RecordWrite"}}}}))),
         ("/api/v1/index/{id}/ingest", "get", "Record committed_seq and asynchronous lexical_seq/vector_seq", None),
+        ("/api/v1/index/{id}/group/replace","post","Replace a complete Record group atomically; retry the same operation identity and payload",Some(json!({"$ref":"#/components/schemas/GroupReplace"}))),
+        ("/api/v1/index/{id}/group","get","Current group version, including an empty group's tombstone; not an operation outcome lookup",None),
         (
             "/api/v1/index/{id}/operation/{epoch}/{nonce}",
             "get",
@@ -3118,6 +3274,13 @@ fn openapi_document() -> Value {
                 params.push(json!({"name":name,"in":"path","required":true,"schema":{"type":if name=="epoch"{"integer"}else{"string"}}}));
             }
         }
+        if path == "/api/v1/index/{id}/group" {
+            params.push(json!({"name":"group_id","in":"query","required":true,"schema":{"type":"string"}}));
+            operation["responses"]["200"]=json!({"description":"Current group version","content":{"application/json":{"schema":{"type":"object","required":["group_id","group_version"],"properties":{"group_id":{"type":"string"},"group_version":{"type":"integer","minimum":1}}}}}});
+        }
+        if path.ends_with("/group/replace") {
+            operation["responses"]["200"]=json!({"description":"Durable and searchable atomic group receipt; replay returns the original receipt","content":{"application/json":{"schema":{"type":"object","required":["atomic","operation_id","receipt","expires_at"],"properties":{"atomic":{"const":true},"operation_id":{"$ref":"#/components/schemas/OperationId"},"receipt":{"$ref":"#/components/schemas/GroupReceipt"},"expires_at":{"type":"integer"}}}}}});
+        }
         operation["parameters"] = json!(params);
         if let Some(schema) = schema {
             operation["requestBody"] =
@@ -3160,13 +3323,17 @@ fn identity_schemas_and_external_sync_routes_are_strict() {
     let doc = openapi_document();
     assert!(doc["paths"].get("/api/v1/index/{id}/doc").is_none());
     assert!(doc["paths"].get("/api/v1/index/{id}/batch").is_some());
-    for name in ["RecordWrite"] {
+    for name in ["RecordWrite", "GroupRecord", "GroupReplace"] {
         let schema = &doc["components"]["schemas"][name];
         assert!(schema["properties"].get("routing_key").is_none());
         assert_eq!(schema["additionalProperties"], false);
     }
     let paths = doc["paths"].as_object().unwrap();
     assert!(paths.contains_key("/api/v1/index/{id}/operation/{epoch}/{nonce}"));
+    assert!(paths.contains_key("/api/v1/index/{id}/group/replace"));
+    assert!(paths.contains_key("/api/v1/index/{id}/group"));
+    assert_eq!(doc["components"]["schemas"]["GroupReplace"]["properties"]["expected_group_version"]["minimum"],0);
+    assert_eq!(doc["components"]["schemas"]["GroupRecord"]["required"],json!(["record_id","document"]));
     assert!(!paths.contains_key("/api/v1/index/{id}/ingest/operation/{epoch}/{nonce}"));
     assert!(paths.keys().all(|path| !path.contains("/bootstrap") && !path.ends_with("/changes")));
     for path in ["/api/v1/index/{id}/iterator", "/api/v1/index/{id}/doc/{record_id}"] {

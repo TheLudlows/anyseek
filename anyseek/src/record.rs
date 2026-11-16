@@ -26,6 +26,10 @@ pub use history::HistoryRetention;
 pub use temporal::{TemporalMetadata, TemporalFilter, TimeRange};
 mod output;
 pub use output::DataOutputPermit;
+mod group_plan;
+pub use group_plan::{GroupReplace,GroupRecord,GroupReceipt};
+mod group_write;
+mod group_remote;
 mod mutation;
 mod write;
 mod committed;
@@ -276,6 +280,8 @@ struct State {
     time_watermark_ms: u64,
     #[serde(default,skip_serializing_if="Option::is_none")]
     retired_operation_prefix: Option<temporal::RetiredPrefix>,
+    #[serde(default,skip_serializing_if="Option::is_none")]
+    groups: Option<group_plan::Groups>,
     expirations: Vec<temporal::Expiration>,
     records: state_values::Records,
     // Vec avoids JSON's restriction on structured map keys. Bounded by config.
@@ -294,6 +300,8 @@ enum Entry {
     Checkpoint { config: RecordConfig, state: State },
     #[serde(rename = "RecordAppliedV16")]
     Applied(Applied),
+    #[serde(rename = "RecordGroupAppliedV1")]
+    GroupApplied(group_plan::Decision),
     #[serde(rename = "RecordExpiredV13")]
     Expired(temporal::Expiration),
     #[serde(rename = "RecordHistoryTrimV14")]
@@ -530,6 +538,7 @@ impl RemotePersistence {
                     applied.receipt.seq,
                     format!("{}:{}", applied.request.operation_id.epoch, applied.request.operation_id.nonce),
                 ),
+                Entry::GroupApplied(d) => (d.receipt.seq,format!("{}:{}",d.operation_id.epoch,d.operation_id.nonce)),
                 Entry::Expired(event) => (event.seq, format!("system:expired:{}", event.seq)),
                 Entry::Checkpoint { .. } | Entry::Anchor(_) | Entry::HistoryTrim(_) =>
                     return Err(RecordError::RecoveryRequired),
@@ -924,6 +933,7 @@ fn validate_restored_state(config:&RecordConfig,state:&State)->Result<(),RecordE
         }
     }
         temporal::validate_state(&state)?;
+        group_plan::validate(state,config)?;
         if state.records.len() > config.max_records
             || state.operations.len() > config.max_operations
         {
@@ -1379,6 +1389,7 @@ impl RecordPartition {
             if selected.is_some(){pending_decode.push(_entry_decode);pending.push(entry);continue;}
             match entry {
                 Entry::Applied(applied) => apply(&mut state, &applied)?,
+                Entry::GroupApplied(d) => group_plan::apply(&mut state,&d)?,
                 Entry::Expired(event) => temporal::apply(&mut state, &event)?,
                 Entry::HistoryTrim(trim) => history::apply_trim(&mut state,&config.history,&trim)?,
                 Entry::Checkpoint { .. } | Entry::Anchor(_) => {

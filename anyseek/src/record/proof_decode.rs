@@ -14,6 +14,8 @@ struct WireState {
     time_watermark_ms:u64,
     #[serde(default)]
     retired_operation_prefix:Option<temporal::RetiredPrefix>,
+    #[serde(default)]
+    groups:Option<group_plan::Groups>,
     expirations:Vec<temporal::Expiration>,
     records:BTreeMap<String,Record>,
     operations:Vec<Applied>,
@@ -21,14 +23,14 @@ struct WireState {
 impl WireState {
     fn admit(self)->Result<State,RecordError>{
         let Self{lineage,history,independent_snapshot,seq,epoch_watermark,time_watermark_ms,
-            retired_operation_prefix,expirations,records,operations}=self;
+            retired_operation_prefix,groups,expirations,records,operations}=self;
         let mut admitted_records=state_values::Records::default();
         for (id,record) in records {admitted_records.insert(id,record)?;}
         let mut admitted_operations=state_values::Values::default();
         for operation in operations {admitted_operations.push(operation)?;}
         // Exhaustive initializer: a new State field must be considered here.
         Ok(State{residency:None,lineage,history,independent_snapshot,seq,
-            epoch_watermark,time_watermark_ms,retired_operation_prefix,expirations,
+            epoch_watermark,time_watermark_ms,retired_operation_prefix,groups,expirations,
             records:admitted_records,operations:admitted_operations,
             operation_lookup:BTreeMap::new(),lookup_bytes:0})
     }
@@ -44,6 +46,8 @@ pub(super) fn bootstrap(bytes:&[u8])->Result<(RecordConfig,State),RecordError>{
 }
 #[derive(Deserialize)]
 enum Mutation {
+    #[serde(rename="RecordGroupAppliedV1")]
+    GroupApplied(group_plan::Decision),
     #[serde(rename="RecordAppliedV16")]
     Applied(Applied),
     #[serde(rename="RecordExpiredV13")]
@@ -54,6 +58,7 @@ enum Mutation {
 pub(super) fn mutation(bytes:&[u8])->Result<Entry,RecordError>{
     Ok(match serde_json::from_slice(bytes).map_err(storage)? {
         Mutation::Applied(op)=>Entry::Applied(op),
+        Mutation::GroupApplied(op)=>Entry::GroupApplied(op),
         Mutation::Expired(event)=>Entry::Expired(event),
         Mutation::HistoryTrim(event)=>Entry::HistoryTrim(event),
     })

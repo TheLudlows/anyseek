@@ -423,6 +423,7 @@ pub(super) fn validate_state(state: &State) -> Result<(), RecordError> {
                 .iter()
                 .map(|event| (event.seq, event.evaluation_time_ms)),
         )
+        .chain(state.groups.iter().flat_map(|g|g.receipts.iter()).map(|r|(r.receipt.seq,r.observed_time_ms)))
     {
         if seq == 0 || commits.insert(seq, time).is_some() {
             return Err(storage("duplicate committed time sequence"));
