@@ -11,8 +11,9 @@ AnySeek 是通过 HTTP API 和独立 Web 控制台使用的 Rust 存储与检索
 | 层 | 代码 | 职责 |
 | --- | --- | --- |
 | HTTP 服务 | `server/record_service.rs`、`server/server.rs`、`server/main.rs` | 认证、准入、请求与响应、启动恢复和关闭 |
-| 控制权威 | `catalog.rs`、`catalog/sqlite.rs`、`catalog/service_snapshot.rs` | Tenant、Key verifier、集合代次、管理回执和服务快照 |
+| 控制权威 | `catalog.rs`、`catalog/sqlite.rs`、`catalog/service_snapshot.rs` | 租户命名空间下的集合代次、备份归属、管理回执和服务快照 |
 | 数据权威 | `record.rs`、`record/committed.rs`、`record/write.rs` | 原文/原始向量、稳定身份、版本、墓碑、幂等和持久批提交 |
+| 协调元数据契约 | `storage/authority.rs` | 共享对象身份、分区水位、构建令牌及发布结果；不含 SQL 或数据库连接 |
 | 持久化 | `storage/journal.rs`、`storage/partition.rs`、`storage/sqlite_authority.rs`、`storage/s3_compatible.rs` | 本地 WAL，或 SQLite 协调权威与不可变对象；owner lock 与恢复 |
 | 认证布局 | `record/anchor.rs`、`record/segment.rs`、`record/remote_checkpoint.rs` | payload、冻结 Segment、manifest、checkpoint 与 GC |
 | 全文派生 | `record/lexical/runtime.rs`、`runtime/live.rs`、`memory.rs` | Tantivy 固定 Searcher、可查尾段、内存预留与后台物化 |
@@ -21,6 +22,13 @@ AnySeek 是通过 HTTP API 和独立 Web 控制台使用的 Rust 存储与检索
 | 过滤与分析 | `active.rs`、`metadata_filter.rs`、`tokenizer.rs` | 活动身份、共享元数据谓词、分词与归一化 |
 
 `server/api_types.rs` 与 `server/api_schema.rs` 定义 HTTP DTO 和 OpenAPI。Rust 服务不嵌入前端资源；默认构建包含 HTTP 与本地/S3 存储。
+
+Catalog 的集合、备份归属及管理回执使用 `metadata.sqlite` 中的四张目录表；本地和
+S3 模式都保留这些元数据。S3 另用同库保存 Record 提交与回收协调状态。本地 Record
+由原生 WAL/证书恢复，全文与向量查询在 Record/派生索引上执行。共享协调类型由存储契约持有，Record、对象日志、
+对象存储与校验缓存按契约引用这些值，SQL 连接与事务由 SQLite 适配器管理。
+上传和后台构建打开已有元数据库时只校验既有格式和表结构；初始化仅发生在首次建立协调库时。
+上传预留同时返回已确认的对象状态，备份预留与 pin 同事务完成；对象 IO 后仍重新核验退休状态。
 
 ## 写入与查询
 
@@ -81,7 +89,7 @@ S3 权威备份在单写者保护下先等待已接受的索引 I/O 结束，再
 
 ## 认证与生命周期
 
-普通 API Key 认证得到 Tenant，同租户有效 Key 的集合访问范围一致；master 管理 Tenant、凭据和服务备份恢复。撤销只拒绝后续认证，已认证工作及准备好的响应可完成。DataOutputPermit 在响应和 body frame 交付时检查数据失败 fence。
+用户认证与权限由 Origence／网关承担；AnySeek 校验进程配置派生的服务凭据，并使用可信 `X-AnySeek-Tenant` 作为命名空间。不保存租户身份注册或 Key 验证材料。已接管工作与响应保留原命名空间；DataOutputPermit 在响应和 body frame 交付时检查数据失败 fence。
 
 锁顺序为全局快照屏障 → 集合生命周期屏障 → 短持 Catalog 元数据锁，Record future 在元数据锁外执行。创建、激活、删除使用集合独占屏障，完整服务快照使用全局独占屏障。已接收的 owned task、输出缓冲与子任务持有额度至实际结束，取消调用者不会提前释放所有权。
 

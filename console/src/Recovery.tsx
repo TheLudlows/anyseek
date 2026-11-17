@@ -4,9 +4,8 @@ import { api, message, newOperationId, ownerFor, storage } from "./api.ts";
 import { Busy, JsonView, Notice } from "./components.tsx";
 import type { Json } from "./types.ts";
 
-export function Recovery() {
-  const [master, setMaster] = useState(""),
-    [backup, setBackup] = useState("");
+export function Recovery({tenant}: {tenant: string}) {
+  const [backup, setBackup] = useState("");
   const [busy, setBusy] = useState(false),
     [result, setResult] = useState<Json>(null),
     [error, setError] = useState("");
@@ -16,14 +15,13 @@ export function Recovery() {
     setError("");
     setResult(null);
     try {
-      if (!master.trim()) throw new Error(t("请输入 Master API Key。"));
-      const owner = await ownerFor(master.trim());
+      const owner = await ownerFor(tenant);
       let pending = storage.get<{ owner: string; body: string }>(
         "service." + action,
       );
       if (pending && pending.owner !== owner)
         throw new Error(
-          t("已有另一管理连接的待确认操作，请用原 Master Key 重试。"),
+          t("已有另一租户连接的待确认操作，请切回原租户重试。"),
         );
       if (!pending) {
         if (action === "restore" && !/^[0-9a-f]{64}$/.test(backup))
@@ -38,7 +36,7 @@ export function Recovery() {
         storage.set("service." + action, pending);
       }
       const value = await api(
-        master.trim(),
+        tenant,
         action === "backup" ? "service-backups" : "service-restores",
         pending.body,
       );
@@ -57,23 +55,13 @@ export function Recovery() {
       <div className="panel-toolbar">
         <div>
           <h2>{t("服务备份与恢复")}</h2>
-          <p>{t("管理员操作，需要单独提供 Master API Key。")}</p>
+          <p>{t("管理员操作，权限由上游网关校验。")}</p>
         </div>
         <span className="tag">{t("管理员")}</span>
       </div>
       <div className="tool-body">
         <Notice kind="info">
-          {t("恢复会创建新的停止状态数据根目录，不替换运行中的服务。目标服务需重新签发 Tenant Key。")}</Notice>
-        <label>
-          Master API Key
-          <input
-            type="password"
-            autoComplete="off"
-            value={master}
-            onChange={(e) => setMaster(e.target.value)}
-            placeholder={t("仅用于本页操作，不保存此密钥")}
-          />
-        </label>
+          {t("恢复会创建新的停止状态数据根目录，不替换运行中的服务；服务凭据由目标进程配置提供。")}</Notice>
         <label>
           {t("服务备份 ID")}<input
             className="mono"
@@ -118,7 +106,7 @@ export function Recovery() {
         <Notice>{error}</Notice>
         {result && <JsonView value={result} label={t("服务响应")} />}
         <p className="field-help">
-          {t("网络中断时保留原始请求；使用相同密钥重试，避免重复操作。")}</p>
+          {t("网络中断时保留原始请求；使用相同租户连接重试，避免重复操作。")}</p>
       </div>
     </section>
   );

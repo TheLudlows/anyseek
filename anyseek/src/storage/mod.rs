@@ -2,6 +2,7 @@
 //! select committed bytes; mmap indexes never act as independent commit witnesses.
 
 pub(crate) mod journal;
+pub(crate) mod authority;
 pub(crate) mod sqlite_authority;
 pub(crate) mod s3_compatible;
 pub(crate) mod verified_cache;

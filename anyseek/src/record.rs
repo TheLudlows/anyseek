@@ -464,10 +464,10 @@ impl RemotePersistence {
         match authority.publish_batch(
             &self.partition_id, head.head_version, self.owner_epoch, &operations, reference, None,
         ).map_err(|error| error.to_string())? {
-            crate::storage::sqlite_authority::PublishOutcome::Published(published)
-            | crate::storage::sqlite_authority::PublishOutcome::AlreadyPublished(published)
+            crate::storage::authority::PublishOutcome::Published(published)
+            | crate::storage::authority::PublishOutcome::AlreadyPublished(published)
                 if published.committed_seq == last => Ok(()),
-            crate::storage::sqlite_authority::PublishOutcome::Conflict =>
+            crate::storage::authority::PublishOutcome::Conflict =>
                 Err("remote SQLite commit conflicted; partition requires recovery".into()),
             _ => Err("remote operation receipt does not match committed sequence".into()),
         }

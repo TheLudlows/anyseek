@@ -1,5 +1,5 @@
 //! Complete local service snapshots. Caller owns source control/root and target
-//! root locks. No live file copying, in-place recovery, or historical-key revival.
+//! root locks. No live database copying or in-place recovery. Credentials are never archived.
 use super::*;
 use crate::record::RecordPartition;
 use sha2::{Digest, Sha256};
@@ -69,7 +69,7 @@ fn object_hash(root: &Path) -> Result<String, CatalogError> {
 fn safe_directory(name: &str) -> bool {
     let parts = name.split('/').collect::<Vec<_>>();
     parts.len() == 4 && parts[0] == "collections"
-        && super::validate_name(parts[1]).is_ok() && super::validate_name(parts[2]).is_ok()
+        && super::validate_tenant(parts[1]).is_ok() && super::validate_name(parts[2]).is_ok()
         && parts[3].len() == 16 && parts[3].bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 fn safe_backup(name: &str) -> bool {
@@ -471,14 +471,14 @@ impl Catalog {
             .await
             .map_err(|e| CatalogError::OutcomeUnknown(e.to_string()))?
     }
-    /// Restore a complete archive into a new, non-serving root. All historical
-    /// ordinary keys remain disabled; the target master issues fresh tenant keys. Original authority is retained separately for audit, never loaded
-    /// by normal Service::open. Caller owns target's external service-root lock.
+    /// Restore a complete archive into a new, non-serving root. Tenant scopes
+    /// and backup ownership survive; historical management operations remain
+    /// fenced. Credentials are process configuration, never archive contents.
+    /// Caller owns the target's external service-root lock.
     pub async fn restore_service(
         archive: PathBuf,
         target: PathBuf,
         identity: String,
-        current_master: String,
     ) -> Result<ServiceSnapshot, CatalogError> {
         crate::resources::spawn(async move {
                 #[cfg(feature = "fault-injection")]
@@ -504,15 +504,6 @@ impl Catalog {
                 let original = Catalog::open(&archive).await?;
                 let mut state = original.inner.lock().await.state.clone();
                 state.service_snapshot = Some((identity.clone(), true));
-                if state
-                    .keys
-                    .iter()
-                    .any(|(id, key)| id != "master" && key.verifier == current_master)
-                {
-                    return Err(CatalogError::Rejected(
-                        "current master collides with historical non-master identity".into(),
-                    ));
-                }
                 state
                     .historical_operations
                     .retain(|(_,id)| id.epoch.saturating_add(1) >= epoch());
@@ -523,22 +514,11 @@ impl Catalog {
                         .map(|e| (e.request.command.tenant().to_owned(),e.request.operation_id.clone())),
                 );
                 state.operations.clear();
-                for key in state.keys.values_mut() {
-                    key.active = false;
-                }
                 state.seq = state
                     .seq
                     .checked_add(1)
                     .ok_or_else(|| storage("catalog sequence exhausted"))?;
                 state.epoch_watermark = state.epoch_watermark.max(epoch());
-                state.keys.insert(
-                    "master".into(),
-                    Key {
-                        verifier: current_master,
-                        active: true,
-                        tenant_id: None,
-                    },
-                );
                 let stage = staging(&target)?;
                 drop(Catalog::create_state(&stage, state.clone()).await?);
                 for entry in state.collections.values() {

@@ -4,8 +4,8 @@ import { message, storage } from "./api.ts";
 import { Busy, Modal, Notice } from "./components.tsx";
 import { deleteCollection, type PendingDelete } from "./collection-delete.ts";
 
-export function DeleteCollection({ owner, apiKey, collection, close, deleted }: {
-  owner: string; apiKey: string; collection: string; close: () => void; deleted: () => Promise<void>;
+export function DeleteCollection({ owner, tenant, collection, close, deleted }: {
+  owner: string; tenant: string; collection: string; close: () => void; deleted: () => Promise<void>;
 }) {
   const [confirmation, setConfirmation] = useState("");
   const [busy, setBusy] = useState(false);
@@ -23,7 +23,7 @@ export function DeleteCollection({ owner, apiKey, collection, close, deleted }: 
       <button type="button" className="secondary" disabled={busy} onClick={close}>{t("关闭")}</button>
       <button type="button" className="primary danger" disabled={busy || (!retry && confirmation !== collection)} onClick={async () => {
         setBusy(true); setError("");
-        try { await deleteCollection(owner, apiKey, collection); await deleted(); close(); }
+        try { await deleteCollection(owner, tenant, collection); await deleted(); close(); }
         catch (e) { setPending(storage.get<PendingDelete>("pendingDelete")); setError(message(e)); }
         finally { setBusy(false); }
       }}>{busy ? <Busy label={t("正在删除")} /> : retry ? t("重试原始删除") : t("确认删除集合")}</button>

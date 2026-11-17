@@ -55,9 +55,18 @@ impl Store {
         connection
             .busy_timeout(Duration::from_secs(5))
             .map_err(storage)?;
-        connection
-            .pragma_update(None, "journal_mode", "WAL")
-            .map_err(storage)?;
+        if create {
+            connection
+                .pragma_update(None, "journal_mode", "WAL")
+                .map_err(storage)?;
+        } else {
+            let mode: String = connection
+                .pragma_query_value(None, "journal_mode", |row| row.get(0))
+                .map_err(storage)?;
+            if !mode.eq_ignore_ascii_case("wal") {
+                return Err(storage("catalog requires existing WAL mode"));
+            }
+        }
         connection
             .pragma_update(None, "synchronous", "FULL")
             .map_err(storage)?;
@@ -75,9 +84,7 @@ impl Store {
         store.connection.execute_batch(
             "BEGIN IMMEDIATE;
              CREATE TABLE catalog_meta (singleton INTEGER PRIMARY KEY CHECK(singleton=1), format INTEGER NOT NULL, metadata TEXT NOT NULL);
-             CREATE TABLE catalog_tenants (tenant_id TEXT PRIMARY KEY);
-             CREATE TABLE catalog_keys (key_id TEXT PRIMARY KEY, tenant_id TEXT REFERENCES catalog_tenants(tenant_id), metadata TEXT NOT NULL);
-             CREATE TABLE catalog_collections (tenant_id TEXT NOT NULL REFERENCES catalog_tenants(tenant_id), collection_id TEXT NOT NULL, generation INTEGER NOT NULL, metadata TEXT NOT NULL, PRIMARY KEY(tenant_id,collection_id,generation));
+             CREATE TABLE catalog_collections (tenant_id TEXT NOT NULL, collection_id TEXT NOT NULL, generation INTEGER NOT NULL, metadata TEXT NOT NULL, PRIMARY KEY(tenant_id,collection_id,generation));
              CREATE UNIQUE INDEX catalog_current_collection ON catalog_collections(tenant_id,collection_id) WHERE json_extract(metadata,'$.deleted')=0;
              CREATE TABLE catalog_backups (backup_id TEXT PRIMARY KEY, metadata TEXT NOT NULL);
              CREATE TABLE catalog_operations (scope TEXT NOT NULL, epoch INTEGER NOT NULL, nonce TEXT NOT NULL, metadata TEXT NOT NULL, PRIMARY KEY(scope,epoch,nonce));
@@ -96,7 +103,7 @@ impl Store {
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .map_err(storage)?;
-        if format != 5 {
+        if format != 7 {
             return Err(storage("unsupported catalog SQLite format"));
         }
         let metadata: Metadata = serde_json::from_str(&metadata).map_err(storage)?;
@@ -108,17 +115,6 @@ impl Store {
             service_snapshot: metadata.service_snapshot,
             ..State::default()
         };
-        for (id, _) in
-            store.rows("SELECT tenant_id,tenant_id FROM catalog_tenants ORDER BY tenant_id")?
-        {
-            validate_name(&id)?;
-            state.tenants.insert(id);
-        }
-        for (id, value) in store.rows("SELECT key_id,metadata FROM catalog_keys ORDER BY key_id")? {
-            state
-                .keys
-                .insert(id, serde_json::from_str(&value).map_err(storage)?);
-        }
         for (id, value) in store
             .rows("SELECT tenant_id || '/' || collection_id || '/' || printf('%016x',generation),metadata FROM catalog_collections ORDER BY tenant_id,collection_id,generation")?
         {
@@ -180,25 +176,6 @@ impl Store {
         }
         // Only changed catalog rows are written. Record authority connections
         // share this database but their tables are never replaced or cleared.
-        for tenant in next.tenants.difference(&old.tenants) {
-            transaction
-                .execute("INSERT INTO catalog_tenants VALUES(?1)", [tenant])
-                .map_err(storage)?;
-        }
-        for (id, key) in &next.keys {
-            let json = serde_json::to_string(key).map_err(storage)?;
-            if old
-                .keys
-                .get(id)
-                .map(serde_json::to_string)
-                .transpose()
-                .map_err(storage)?
-                .as_ref()
-                != Some(&json)
-            {
-                transaction.execute("INSERT INTO catalog_keys VALUES(?1,?2,?3) ON CONFLICT(key_id) DO UPDATE SET metadata=excluded.metadata", params![id,key.tenant_id,json]).map_err(storage)?;
-            }
-        }
         for (id, collection) in &old.collections {
             if !next.collections.contains_key(id) {
                 transaction.execute("DELETE FROM catalog_collections WHERE tenant_id=?1 AND collection_id=?2 AND generation=?3",
@@ -251,7 +228,7 @@ impl Store {
                     .map_err(storage)?;
             }
         }
-        transaction.execute("INSERT INTO catalog_meta VALUES(1,5,?1) ON CONFLICT(singleton) DO UPDATE SET metadata=excluded.metadata", [serde_json::to_string(&Metadata::from_state(next)).map_err(storage)?]).map_err(storage)?;
+        transaction.execute("INSERT INTO catalog_meta VALUES(1,7,?1) ON CONFLICT(singleton) DO UPDATE SET metadata=excluded.metadata", [serde_json::to_string(&Metadata::from_state(next)).map_err(storage)?]).map_err(storage)?;
         #[cfg(test)]
         crash("before_commit");
         transaction
@@ -325,165 +302,4 @@ fn crash(stage: &str) {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::catalog::tests::{config, request};
-
-    #[tokio::test]
-    async fn sqlite_catalog_reopens_without_a_catalog_journal_and_excludes_second_owner() {
-        let parent = tempfile::tempdir().unwrap();
-        let root = parent.path().join("service");
-        let catalog = Catalog::create_with_key(&root, "master".into(), "a".repeat(64))
-            .await
-            .unwrap();
-        catalog
-            .execute(request(
-                "tenant",
-                CatalogCommand::AddTenant {
-                    tenant_id: "tenant".into(),
-                },
-            ))
-            .await
-            .unwrap();
-        catalog
-            .execute(request(
-                "prepare",
-                CatalogCommand::PrepareCollection {
-                    collection_id: "documents".into(),
-                    tenant_id: "tenant".into(),
-                    config: config(),
-                },
-            ))
-            .await
-            .unwrap();
-        assert!(root.join(DATABASE).exists());
-        assert!(!root.join("generation-0000000000000000").exists());
-        assert!(Catalog::open(&root).await.is_err());
-        drop(catalog);
-        let catalog = Catalog::open(&root).await.unwrap();
-        assert_eq!(catalog.authenticate(&"a".repeat(64)).await.unwrap(), MASTER);
-        assert_eq!(
-            catalog.collections().await.unwrap()[0].collection_id,
-            "documents"
-        );
-    }
-
-    #[tokio::test]
-    async fn sqlite_catalog_rolls_back_rows_and_receipt_together_on_statement_failure() {
-        let parent = tempfile::tempdir().unwrap();
-        let root = parent.path().join("service");
-        let catalog = Catalog::create_with_key(&root, "master".into(), "a".repeat(64))
-            .await
-            .unwrap();
-        catalog
-            .execute(request(
-                "tenant",
-                CatalogCommand::AddTenant {
-                    tenant_id: "tenant".into(),
-                },
-            ))
-            .await
-            .unwrap();
-        let db = Connection::open(root.join(DATABASE)).unwrap();
-        db.execute_batch("CREATE TRIGGER refuse_meta BEFORE UPDATE ON catalog_meta BEGIN SELECT RAISE(ABORT,'injected'); END;").unwrap();
-        assert!(catalog.compact().await.is_err());
-        assert_eq!(catalog.authenticate(&"a".repeat(64)).await.unwrap(), MASTER);
-        let change = request(
-            "new-key",
-            CatalogCommand::AddKey {
-                key_id: "new".into(),
-                tenant_id: "tenant".into(),
-                verifier: "b".repeat(64),
-            },
-        );
-        assert!(catalog.execute(change.clone()).await.is_err());
-        drop(catalog);
-        db.execute_batch("DROP TRIGGER refuse_meta").unwrap();
-        let catalog = Catalog::open(&root).await.unwrap();
-        assert!(catalog.authenticate(&"b".repeat(64)).await.is_err());
-        assert_eq!(catalog.operation(&change.operation_id).await.unwrap(), None);
-        catalog.execute(change).await.unwrap();
-        assert_eq!(
-            catalog.authenticate(&"b".repeat(64)).await.unwrap(),
-            "tenant"
-        );
-    }
-
-    #[tokio::test]
-    async fn sqlite_catalog_resumes_committed_private_initialization() {
-        let parent = tempfile::tempdir().unwrap();
-        let root = parent.path().join("service");
-        let stage = pending(&root).unwrap();
-        std::fs::create_dir(&stage).unwrap();
-        drop(Store::create(&stage, &State::default()).unwrap());
-        Catalog::resume_initialization(&root).await.unwrap();
-        assert!(!stage.exists());
-        assert!(root.join(DATABASE).exists());
-        assert!(Catalog::open(&root).await.is_ok());
-    }
-
-    #[tokio::test]
-    async fn sqlite_catalog_missing_or_corrupt_database_never_becomes_empty_catalog() {
-        let parent = tempfile::tempdir().unwrap();
-        let root = parent.path().join("service");
-        drop(
-            Catalog::create_with_key(&root, "master".into(), "a".repeat(64))
-                .await
-                .unwrap(),
-        );
-        std::fs::remove_file(root.join(DATABASE)).unwrap();
-        assert!(Catalog::open(&root).await.is_err());
-        assert!(!root.join(DATABASE).exists());
-        std::fs::write(root.join(DATABASE), b"invalid SQLite").unwrap();
-        assert!(Catalog::open(&root).await.is_err());
-        assert_eq!(
-            std::fs::read(root.join(DATABASE)).unwrap(),
-            b"invalid SQLite"
-        );
-    }
-
-    #[tokio::test]
-    async fn sqlite_catalog_transactions_leave_shared_record_authority_tables_intact() {
-        use crate::storage::sqlite_authority::SqliteAuthority;
-        let parent = tempfile::tempdir().unwrap();
-        let root = parent.path().join("service");
-        let catalog = Catalog::create_with_key(&root, "master".into(), "a".repeat(64))
-            .await
-            .unwrap();
-        catalog
-            .execute(request(
-                "tenant",
-                CatalogCommand::AddTenant {
-                    tenant_id: "tenant".into(),
-                },
-            ))
-            .await
-            .unwrap();
-        let mut authority =
-            SqliteAuthority::open(&root.join(DATABASE), Duration::from_secs(5)).unwrap();
-        let original = authority.create_partition("p0", 7).unwrap();
-        catalog
-            .execute(request(
-                "new-key",
-                CatalogCommand::AddKey {
-                    key_id: "new".into(),
-                    tenant_id: "tenant".into(),
-                    verifier: "b".repeat(64),
-                },
-            ))
-            .await
-            .unwrap();
-        catalog.compact().await.unwrap();
-        assert_eq!(authority.read_head("p0").unwrap(), Some(original.clone()));
-        drop(authority);
-        drop(catalog);
-        let catalog = Catalog::open(&root).await.unwrap();
-        let authority =
-            SqliteAuthority::open(&root.join(DATABASE), Duration::from_secs(5)).unwrap();
-        assert_eq!(authority.read_head("p0").unwrap(), Some(original));
-        assert_eq!(
-            catalog.authenticate(&"b".repeat(64)).await.unwrap(),
-            "tenant"
-        );
-    }
-}
+mod tests;

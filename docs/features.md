@@ -15,7 +15,7 @@ HTTP/Web UI 数据请求统一由服务内部的 Record/catalog 处理；旧低�
 | 原始数据 | 权威状态保留完整 Document 和原始向量；schema.store 控制查询投影，不控制原始数据持久保存 |
 | 浏览 | 空查询浏览活动记录，包括纯向量 collection；iterator 按稳定 ID 分页，visible_seq 改变或跨越视图最早 TTL 使 cursor 失效 |
 | 持久化 | 本地 Segment + tail，或 SQLite/S3 对象提交、远端 checkpoint 与 GC；同步写入 durable + visible；异步索引入口返回持久业务结果；真实 S3/系统断电尚待验收 |
-| Tenant 认证 | 普通 Key 绑定 Tenant，同租户 Key 访问范围一致；撤销只影响后续认证，数据生命周期独立 |
+| 服务认证与租户命名空间 | 用户权限由上游网关处理；AnySeek 校验服务凭据，按可信租户头隔离集合、备份及回执，不注册或签发租户 Key |
 | 备份 | collection 独立快照、备份退役、完整 service/catalog 备份、新未启动根恢复 |
 
 全文派生索引使用 Tantivy 与 WAL 支撑的可查增量，后台物化不建立第二个提交权威；向量/元数据使用独立组件。规范原文与原始向量由 Payload 保存。可查尾段、额度预留与文件所有权见[架构](architecture.md)。仅支持新库，不提供旧格式升级或迁移。
@@ -23,7 +23,7 @@ HTTP/Web UI 数据请求统一由服务内部的 Record/catalog 处理；旧低�
 ## 接入与限制
 
 - [服务指南](../anyseek/src/server/README.md)：启动、认证、HTTP 示例、查询、备份与恢复。
-- [控制台指南](../console/README.md)：初始化、导入、嵌入服务、检索与部署。
+- [控制台指南](../console/README.md)：租户连接、导入、嵌入服务、检索与部署。
 - [资源和验收边界](../anyseek/src/server/README.md#当前资源和验收边界)：容量档、请求/响应、并发、字节与 I/O 预算。
 - [后续路线与验收证据](roadmap.md)：剩余工作、测量范围及未验证环境。
 

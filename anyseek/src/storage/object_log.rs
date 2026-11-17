@@ -6,10 +6,10 @@
 //! as its selected manifest before serving search results.
 use super::{
     s3_compatible::{S3CompatibleStore, UploadRegisterError},
-    sqlite_authority::{ObjectRef, PartitionHead, SqliteAuthority},
+    authority::{ObjectRef, PartitionHead}, sqlite_authority::SqliteAuthority,
 };
 #[cfg(test)]
-use super::sqlite_authority::PublishOutcome;
+use super::authority::PublishOutcome;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -400,11 +400,11 @@ mod tests {
         let b1=ObjectLogBlock{partition_id:"p0".into(),first_seq:1,last_seq:1,previous:None,entries:vec![entry(1)]};
         let r1=upload_log_block(&store,&mut authority,"p0/log/1",&b1,1,2048).await.unwrap();
         let out=authority.publish_commit("p0",head.head_version,4,"op-1",[1;32],1,r1.clone(),None).unwrap();
-        head=match out {super::super::sqlite_authority::PublishOutcome::Published(h)=>h,other=>panic!("{other:?}")};
+        head=match out {super::super::authority::PublishOutcome::Published(h)=>h,other=>panic!("{other:?}")};
         let b2=ObjectLogBlock{partition_id:"p0".into(),first_seq:2,last_seq:2,previous:Some(r1),entries:vec![entry(2)]};
         let r2=upload_log_block(&store,&mut authority,"p0/log/2",&b2,2,2048).await.unwrap();
         let out=authority.publish_commit("p0",head.head_version,4,"op-2",[2;32],2,r2,None).unwrap();
-        head=match out {super::super::sqlite_authority::PublishOutcome::Published(h)=>h,other=>panic!("{other:?}")};
+        head=match out {super::super::authority::PublishOutcome::Published(h)=>h,other=>panic!("{other:?}")};
         assert_eq!(load_committed_tail(&store,&head,4,4096).await.unwrap(),vec![entry(1),entry(2)]);
         assert_eq!(load_committed_entries_after(&store,&head,1,4,4096).await.unwrap(),vec![entry(2)]);
         assert_eq!(load_committed_entries_after(&store,&head,2,4,4096).await.unwrap(),Vec::<ObjectLogEntry>::new());
@@ -439,7 +439,7 @@ mod tests {
         let bad=ObjectLogBlock{partition_id:"other".into(),first_seq:1,last_seq:1,previous:None,entries:vec![entry(1)]};
         let reference=upload_log_block(&store,&mut authority,"p0/log/bad",&bad,1,2048).await.unwrap();
         let published=authority.publish_commit("p0",head.head_version,1,"op-1",[1;32],1,reference,None).unwrap();
-        let head=match published {super::super::sqlite_authority::PublishOutcome::Published(h)=>h,other=>panic!("{other:?}")};
+        let head=match published {super::super::authority::PublishOutcome::Published(h)=>h,other=>panic!("{other:?}")};
         // A nonempty unindexed range whose object claims another partition is never returned.
         assert!(load_committed_tail(&store,&head,4,4096).await.is_err());
         drop(authority);

@@ -1,4 +1,4 @@
-"""Paused background build: real HTTP writes, deletion, revocation and restart."""
+"""Paused background build: real HTTP writes, deletion and namespace isolation after restart."""
 import base64
 import concurrent.futures
 import os
@@ -14,8 +14,6 @@ def exercise(call, restart_with, work, faults):
     pause.write_text('pause until concurrent operations finish')
     try:
         restart_with({'ANYSEEK_INDEXER_PAUSE_FILE': str(pause)})
-        key = base64.b64encode(os.urandom(32)).decode()
-        call('POST', '/api/v1/apikey', {'operation_id': operation(), 'key_id': 'indexer-key', 'apikey_base64': key})
         collection = 'background'
         prefix = f'/api/v1/index/{collection}'
         call('POST', '/api/v1/index', {'operation_id': operation(), 'collection_id': collection,
@@ -24,8 +22,8 @@ def exercise(call, restart_with, work, faults):
             write_one(call, prefix, {'operation_id': operation(), 'record_id': identity,
                   'expected': 'Absent', 'document': {'body': 'alpha original'}})
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
-            # The accepted job may complete after revocation; its result remains deliverable.
-            job = pool.submit(call, 'PATCH', prefix, key=key)
+            # The accepted job retains its namespace while independent writes continue.
+            job = pool.submit(call, 'PATCH', prefix)
             try:
                 deadline = time.monotonic() + 10
                 while not started.exists():
@@ -40,9 +38,7 @@ def exercise(call, restart_with, work, faults):
                 pool.submit(write_one, call, prefix, deletion).result(timeout=5)
                 page = pool.submit(call, 'POST', prefix + '/query', {'query': 'alpha'}).result(timeout=5)
                 assert {hit['record']['record_id'] for hit in page['hits']} == {'peer', 'concurrent'}, page
-                pool.submit(call, 'DELETE', '/api/v1/apikey', {'operation_id': operation(),
-                            'key_id': 'indexer-key'}).result(timeout=5)
-                call('POST', prefix + '/query', {'query': 'alpha'}, key=key, status=403)
+                call('POST', prefix + '/query', {'query': 'alpha'}, tenant='other', status=403)
             finally:
                 pause.unlink(missing_ok=True)
             job.result(timeout=30)
@@ -50,10 +46,10 @@ def exercise(call, restart_with, work, faults):
         assert write_one(call, prefix, request)['receipt'] == receipt
         page = call('POST', prefix + '/query', {'query': 'alpha'})
         assert {hit['record']['record_id'] for hit in page['hits']} == {'peer', 'concurrent'}, page
-        call('POST', prefix + '/query', {'query': 'alpha'}, key=key, status=403)
+        call('POST', prefix + '/query', {'query': 'alpha'}, tenant='other', status=403)
         indexed = call('PATCH', prefix)
         assert indexed['indexed_seq'] == indexed['visible_seq'] == 4, indexed
-        print('PASS Indexer HTTP: concurrent acknowledged write, record deletion, credential revoke without cancellation, complete restart tail', flush=True)
+        print('PASS Indexer HTTP: concurrent acknowledged write, record deletion, namespace isolation without cancellation, complete restart tail', flush=True)
     finally:
         pause.unlink(missing_ok=True)
         started.unlink(missing_ok=True)

@@ -1,6 +1,6 @@
 # anyseek Record HTTP 服务
 
-通过 HTTP API 管理 Tenant、集合和记录，提供全文、向量与混合检索。同步 `/batch` 成功项持久且可见；`/ingest` 返回持久业务回执，索引异步推进，详见[写入与重试](#稳定身份写入和重试)。Web 控制台为独立进程。
+通过 HTTP API 按租户命名空间管理集合和记录，提供全文、向量与混合检索。同步 `/batch` 成功项持久且可见；`/ingest` 返回持久业务回执，索引异步推进，详见[写入与重试](#稳定身份写入和重试)。Web 控制台为独立进程。
 
 [Record 契约](../../../docs/record-model.md)说明职责与一致性边界；[路线与验收证据](../../../docs/roadmap.md)记录剩余工作与验证范围。
 
@@ -30,7 +30,7 @@ target/debug/anyseek_server print_master_key=true
 
 Windows PowerShell 使用 `.\target\debug\anyseek_server.exe print_master_key=true`。此命令只向标准输出打印 `Base64(SHA-256(secret 的 UTF-8 字节))` 并退出，不打开数据目录、不启动服务；输出本身就是管理凭据，不要记录到共享日志。它不生成或轮换密钥。
 
-Master Key 只用于管理 Tenant 和普通 API Key，以及现有服务备份管理；不能用于集合数据接口。先 POST `/api/v1/tenants` 提交 `{operation_id,tenant_id}`，再由 master POST `/api/v1/apikey` 提交 `{operation_id,tenant_id,key_id,apikey_base64}`，签发普通 Key。按[控制台指南](../../../console/README.md)启动独立前端后使用该 Tenant Key 连接。API 默认端口为 8080，根路径不提供页面。Tenant ID 与 Collection ID 均须匹配 `^[a-z][a-z0-9_-]{0,62}$`，不转换大小写，Tenant 不支持改名或删除。默认数据目录位于可执行文件旁的 `anyseek_index`。首次 `index_path` 必须不存在且父目录存在；重启必须指向可恢复的 catalog 根，并保持 `MASTER_KEY_SECRET` 一致。旧按 key 组织的目录、已有空目录和不完整权威状态不会被当成空数据库导入。没有旧格式升级或迁移接口。
+服务凭据通过 `apikey` 请求头用于 Origence／网关到 AnySeek 的全部受保护接口；数据接口另需 `X-AnySeek-Tenant`。`/api/v1/live` 保持公开；如果请求携带 `apikey`，则严格验证该服务凭据，支持宿主在无租户/集合时检查连接。用户认证与权限由上游完成，网关须校验用户对所选租户及服务管理操作的权限。AnySeek 不注册租户，不签发、保存或撤销租户 Key。集合列表为 GET `/api/v1/index`；`/api/v1/tenants` 和 `/api/v1/apikey` 已移除。租户命名空间须匹配 `^[a-z0-9][a-z0-9_-]{0,62}$`（支持数字开头的 UUID），集合名须匹配 `^[a-z][a-z0-9_-]{0,62}$`，不转换大小写。Origence 直接传业务 tenant UUID，并以 `ws_<workspace UUID 无连字符>` 作为集合名。默认数据目录位于可执行文件旁的 `anyseek_index`。首次 `index_path` 必须不存在且父目录存在；重启须指向可恢复的 Catalog 根。Catalog 7 仅支持新库，不迁移或覆盖旧格式。
 
 | 参数 | 默认值与约束 |
 | --- | --- |
@@ -41,11 +41,11 @@ Master Key 只用于管理 Tenant 和普通 API Key，以及现有服务备份�
 | `print_master_key` | `false`；`true` 显式输出 Master Key 后退出，需要 secret；不能与 `generate_openapi=true` 同时使用 |
 | `generate_openapi` | `false`；`true` 输出实际路由的 JSON/YAML 后退出 |
 
-只接受 `name=value`；未知、重复、非法参数返回非零状态。服务使用 `log`，通过 `RUST_LOG` 配置日志。Ctrl-C/SIGINT/SIGTERM 停止接收请求并等待连接结束；成功写入已持久，不依靠退出时提交派生索引才成立。不再提供默认 secret。已有部署必须继续显式配置原值，不能为消除报错而重新生成；若此前省略配置使用了历史默认值 `1234`，需暂时显式设置该原值以恢复兼容，密钥迁移另行安排。secret 不裁剪空白，派生算法和普通 Tenant Key 认证未变。
+只接受 `name=value`；未知、重复、非法参数返回非零状态。服务使用 `log`，通过 `RUST_LOG` 配置日志。Ctrl-C/SIGINT/SIGTERM 停止接收请求并等待连接结束；成功写入已持久，不依靠退出时提交派生索引才成立。服务凭据只从进程配置读取，不写入 Catalog；轮换配置时须同步更新网关的服务间凭据。secret 不裁剪空白，派生算法不变。
 
 ## 启动 Web UI
 
-API 与 UI 分别启动。控制台的安装、首次初始化与 Tenant Key 连接统一见[控制台指南](../../../console/README.md#本地启动-ui)；API 根路径 `/` 不提供页面。
+API 与 UI 分别启动。控制台通过已认证网关选择租户命名空间，配置见[控制台指南](../../../console/README.md#本地启动-ui)；浏览器不保存或提交 master key。API 根路径 `/` 不提供页面。
 
 ## S3 后端（显式启用）
 
@@ -62,7 +62,7 @@ export ANYSEEK_S3_SECRET_ACCESS_KEY='your-secret-key'
 
 只有明确配置的开发 HTTP endpoint 才设置 `ANYSEEK_S3_ALLOW_HTTP=1`。可选 `ANYSEEK_S3_MAX_OBJECT_BYTES` 默认 64 MiB，`ANYSEEK_S3_MAX_TAIL_BLOCKS` 默认 1,000,000；单次 tail 字节预算同时受 collection 日志预算和 1 GiB 上限约束。凭证只在运行时使用。
 
-Catalog 与 S3 协调元数据共用服务根目录下的 `metadata.sqlite`；保留该数据库、SQLite WAL、owner 锁文件。不同独立服务必须使用不同 bucket；完整服务恢复启动前应配置目标服务的独立 bucket。对象位于 `anyseek/{tenant_id}/{collection_id}/`，不创建自动 namespace 或 Bucket 归属标记。这些是持久协调状态，不能作为缓存删除或在运行中复制 SQLite 文件作备份。collection 内的本地日志/payload/索引可从权威检查点及 tail 重建。C2 另在每个权威库旁的 `*.object-cache` 保存校验对象块（256 MiB / 4096 块，损坏或丢失回源）；旁边的 `*.object-cache.lock` 仅用于本机缓存操作协调，运行中清空缓存目录时保留该锁文件。缓存不包含凭据，也不决定当前 head 或权限；备份应使用服务 API，以同时固定元数据和对象闭包。
+Catalog 使用根目录下的 `metadata.sqlite` 保存集合、备份归属和管理回执；本地和 S3 模式都保留该库及 SQLite WAL、owner 锁。Catalog 7 不包含租户注册和 Key 表，也不保存服务凭据。S3 模式另在同库保存 Record 协调状态；不同独立服务使用不同 bucket，完整服务恢复启动前须配置目标独立 bucket。对象位于 `anyseek/{tenant_id}/{collection_id}/`，不创建自动 namespace 或 Bucket 归属标记。SQLite 元数据不是可删除缓存，备份使用服务 API，不在运行中复制数据库文件。collection 内的本地 S3 缓存可从权威检查点及 tail 重建；对象缓存及锁的保护规则见[存储设计](../../../docs/storage.md)。
 
 PATCH collection 发布完整远端 checkpoint 后再回收已覆盖且无 pin 的对象。collection backup 的相同请求在中断后继续原 cut；恢复到新 collection，复制到目标集合新代次，不包含服务凭据。完整服务备份沿用本地独立归档格式，包含 catalog 和完整数据；在 S3 模式恢复启动时会发布到目标独立 bucket。
 
@@ -160,8 +160,8 @@ write = json.loads(Path('requests/write.json').read_text())
 with Path('requests/ingest.json').open('x') as output:
     json.dump({'records': [write]}, output)
 PYCODE
-curl -X POST "$BASE/api/v1/index/demo/ingest" -H "apikey: $API_KEY" -H 'Content-Type: application/json' --data-binary @requests/ingest.json
-curl "$BASE/api/v1/index/demo/ingest" -H "apikey: $API_KEY"
+curl -X POST "$BASE/api/v1/index/demo/ingest" -H "apikey: $API_KEY" -H "X-AnySeek-Tenant: $TENANT" -H 'Content-Type: application/json' --data-binary @requests/ingest.json
+curl "$BASE/api/v1/index/demo/ingest" -H "apikey: $API_KEY" -H "X-AnySeek-Tenant: $TENANT"
 ```
 
 示例复用同一原始操作，已通过同步接口写入过的请求返回原回执，不创建第二条记录；未知结果直接重发保存的文件。
@@ -172,11 +172,12 @@ curl "$BASE/api/v1/index/demo/ingest" -H "apikey: $API_KEY"
 
 ## 可直接执行的 HTTP 示例
 
-将管理员签发的 Tenant Key 填入 `API_KEY`。在新目录准备请求文件一次；超时后重发文件，不要重新运行身份生成步骤。
+由受信任的服务调用方提供 `API_KEY` 服务凭据，并设置 `TENANT` 命名空间；浏览器经网关调用时不持有服务凭据。在新目录准备请求文件一次；超时后重发文件，不要重新运行身份生成步骤。
 
 ```sh
 BASE='http://127.0.0.1:8080'
-API_KEY='paste-tenant-key'
+TENANT='my_workspace'
+API_KEY='paste-service-key'
 mkdir requests
 python3 - <<'PY'
 import json, time, uuid
@@ -192,10 +193,10 @@ for name, request in requests.items():
     with (Path('requests')/(name+'.json')).open('x') as output:
         json.dump(request, output)
 PY
-curl -X POST "$BASE/api/v1/index" -H "apikey: $API_KEY" -H 'Content-Type: application/json' --data-binary @requests/create.json
-curl -X POST "$BASE/api/v1/index/demo/batch" -H "apikey: $API_KEY" -H 'Content-Type: application/json' --data-binary @requests/write.json
-curl -X POST "$BASE/api/v1/index/demo/query" -H "apikey: $API_KEY" -H 'Content-Type: application/json' -d '{"query":"hello"}'
-curl "$BASE/api/v1/index/demo/doc/welcome" -H "apikey: $API_KEY"
+curl -X POST "$BASE/api/v1/index" -H "apikey: $API_KEY" -H "X-AnySeek-Tenant: $TENANT" -H 'Content-Type: application/json' --data-binary @requests/create.json
+curl -X POST "$BASE/api/v1/index/demo/batch" -H "apikey: $API_KEY" -H "X-AnySeek-Tenant: $TENANT" -H 'Content-Type: application/json' --data-binary @requests/write.json
+curl -X POST "$BASE/api/v1/index/demo/query" -H "apikey: $API_KEY" -H "X-AnySeek-Tenant: $TENANT" -H 'Content-Type: application/json' -d '{"query":"hello"}'
+curl "$BASE/api/v1/index/demo/doc/welcome" -H "apikey: $API_KEY" -H "X-AnySeek-Tenant: $TENANT"
 ```
 
 写入返回 `receipt`、`operation_id`、`expires_at`。查询返回 `hits[].record`（包含 record_id、version、document）、score、visible_seq、statistics 和 count_total；按 ID 读取返回 Record envelope。更多条件更新、删除、授权、向量、备份示例见 [test_api.rest](test_api.rest)。
@@ -230,24 +231,24 @@ Vector/Hybrid 默认每 level 探测最多 `default_nprobe` 个簇，`nprobe` �
 
 POST `iterator` 接收 `{cursor?,length?,fields?}`，按稳定 ID 正向分页；写入改变 visible_seq 后继续旧 cursor 返回 409。旧 skip/take 双向 HTTP 协议不再支持，低层 Rust iterator 另有自己的 API。
 
-## Tenant 认证、删除与批量
+## 租户命名空间、删除与批量
 
-Tenant 由 master 创建和查询（POST/GET `/api/v1/tenants`），普通 Key 只能由 master 签发或撤销。普通 Key 认证成功后由服务端确定 Tenant，不接受客户端声明的 Tenant 作为数据访问身份。同 Tenant 的有效 Key 对其所有集合拥有相同访问范围，不提供 User、Project、Collection Grant、角色或共享授权。
+租户仅作为命名空间，由可信上游通过 `X-AnySeek-Tenant` 传入；不需要预注册。所有非公开接口均校验同一服务凭据，数据请求还检查租户头存在、格式有效且不重复。同一命名空间的集合访问范围由上游权限策略决定；AnySeek 不提供 User、Project、Collection Grant、角色或共享授权。
 
-DELETE `/api/v1/apikey` 使用 `{operation_id,key_id}` 撤销凭据；不会删除 Tenant 或集合，也不影响本租户其他有效 Key。撤销后新请求认证失败，已经通过认证开始执行的操作和响应允许完成；不再进行凭据撤销的 body frame 复核。数据失败 fence 仍在响应及 body frame 交付时检查。
+已接收工作保留准入时的租户上下文和资源所有权，不重新检查上游用户权限；数据失败 fence 仍在响应和 body frame 交付时检查。
 
-普通 Tenant Key 可 DELETE `/api/v1/index/{id}`（`{operation_id}`）删除自己的集合。删除后可同名重建；新集合获得内部新代次，客户端不用传代次。旧后台工作、回执、备份身份和 GC 不会作用于新代次。删除和重建前，客户端须停止旧请求及其重试；仅携带名称的旧请求无法与新集合请求区分。物理回收仍延后执行。
+可信服务调用方在指定租户头后可 DELETE `/api/v1/index/{id}`（`{operation_id}`）删除该命名空间的集合。删除后可同名重建；新集合获得内部新代次，客户端不用传代次。旧后台工作、回执、备份身份和 GC 不会作用于新代次。删除和重建前，客户端须停止旧请求及其重试；仅携带名称的旧请求无法与新集合请求区分。物理回收仍延后执行。
 
 `delete-plan` 接收 `{select:"all"}`、`{select:"ids",record_ids:[...]}` 或 `{select:"query",query:{query:"text"}}`。保存返回的 targets，为每项分配并保存 operation_id，再用 `/batch` 的 `{writes:[...]}` 提交。每批 1..100 个独立操作，返回逐项结果，**不是原子事务**。未知/待恢复错误停止未尝试尾部；重试不能重新生成删除选择条件。
 
 ## 备份与恢复
 
 
-Collection backup 使用 POST `/api/v1/index/{id}/backup` 和 `{operation_id}`；原 ID 重试保留同一快照。本 Tenant 的普通 Key POST `/api/v1/restore`，body 为 `{operation_id,collection_id,backup_id}`，恢复到新身份，归属于当前认证 Tenant；其他 Tenant 的备份 ID 不可访问。master 可 GET `/api/v1/backups`，或 DELETE `/api/v1/backups/{id}`（`{operation_id}`）持久退役备份；未完成 restore 会 pin 来源。`cleanup_pending:true` 表示逻辑退役已完成，物理清理还需重试。
+Collection backup 使用 POST `/api/v1/index/{id}/backup` 和 `{operation_id}`；原 ID 重试保留同一快照。携带相同租户头 POST `/api/v1/restore`，body 为 `{operation_id,collection_id,backup_id}`，恢复到新身份，归属于该租户命名空间；其他 Tenant 的备份 ID 不可访问。可信服务可 GET `/api/v1/backups`，或 DELETE `/api/v1/backups/{id}`（`{operation_id}`）持久退役备份；未完成 restore 会 pin 来源。`cleanup_pending:true` 表示逻辑退役已完成，物理清理还需重试。
 
 master POST `/api/v1/service-backups`（`{operation_id}`）冻结 catalog、所有保留 collection 数据和未退役 collection backups。manifest 校验权威对象内容，外层发布有完成见证，不递归包含旧 service archives。
 
-master POST `/api/v1/service-restores`（`{operation_id,backup_id}`）返回**新的、未启动的 target_root**，不覆盖运行根。用当前 MASTER_KEY_SECRET 单独启动新根；历史普通 Key 全部禁用；使用目标 master 为已有 Tenant 重新签发 Key 后才能访问数据。历史控制请求显式冲突；Record 数据版本和回执保留。不需要重建 Collection 授权关系。来源备份及恢复 ID 必须使用返回的小写 hex。
+可信服务 POST `/api/v1/service-restores`（`{operation_id,backup_id}`）返回**新的、未启动的 target_root**，不覆盖运行根。使用目标进程配置的 `MASTER_KEY_SECRET` 单独启动；凭据不存入归档，也不需要重签租户 Key。命名空间和备份归属保留，历史管理请求显式冲突；Record 数据版本和回执保留。来源备份及恢复 ID 必须使用返回的小写 hex。
 
 ## 当前资源和验收边界
 
@@ -258,11 +259,11 @@ master POST `/api/v1/service-restores`（`{operation_id,backup_id}`）返回**�
 | Record WAL / 完整 checkpoint | 256 MiB 代预算，完整 checkpoint 另受 16 MiB 单帧限制 |
 | Catalog | 16 MiB 元数据、10,000 操作，仅安全回收过期控制回执 |
 | admission | 普通 32/每集合 16、恢复 2/1、后台 2/1、可信控制 8/2、公共/存活 8/8；partition 内部 16；30 秒请求期限 |
-| 调度 | 不同 collection 可并行；共同快照保留全局屏障，Key 撤销不排空数据工作，资源不足立即 Busy |
+| 调度 | 不同 collection 可并行；共同快照保留全局屏障，已接管工作保留命名空间，资源不足立即 Busy |
 | collection backups | 32 个，可持久退役 |
 | service archives / 新恢复根 | 每源根最多 4 个 archive/准备项，托管父目录最多 4 个生成根，备份权威 payload 预检 1 GiB |
 
-资源通道在读取大 body 前按路由和解码后的已登记 collection 身份选择；未知身份共享服务额度。平台管理通道只在 master 认证后开放，不被数据工作借用；Key 管理不等待备份/恢复工作流锁，仍参与共同快照排序，但不排空已认证数据工作；删除保留与多阶段恢复工作流的原有顺序。恢复/创建、PATCH checkpoint/collection backup/service backup 分别归恢复和后台通道。
+资源通道在读取大 body 前按路由和解码后的已登记 collection 身份选择；未知身份共享服务额度。所有通道先校验服务凭据，数据路由另检查租户头；通道分类不代替上游权限。管理回执查询有独立控制通道，不等待长备份/恢复工作流锁；删除保留生命周期与恢复工作流的原有顺序。恢复/创建、PATCH checkpoint/collection backup/service backup 分别归恢复和后台通道。
 
 | 类别 | 全服务 / 每集合预留字节 | 全服务 / 每集合 I/O 并发 |
 | --- | --- | --- |
@@ -274,7 +275,7 @@ master POST `/api/v1/service-restores`（`{operation_id,backup_id}`）返回**�
 
 部署可设置 `ANYSEEK_{类别}_SLOTS`、`_PER_COLLECTION`、`_BYTES`、`_PER_COLLECTION_BYTES`、`_IO`、`_PER_COLLECTION_IO`，类别取上表大写名称，字节值为十进制字节数。例如 `ANYSEEK_FOREGROUND_PER_COLLECTION=2`。配置必须为正整数、局部不大于全局、每集合字节至少 18 MiB；单类 slots/I/O 不超过 64，前三类 slots 总和不超过 48、CONTROL slots 不超过 8，以保留 catalog 控制余量。非法配置阻止启动。
 
-30 秒截止时间覆盖认证/身份查找及 handler；准入超时且未启动 handler 时返回 Busy，已接管工作超时仍 outcome_unknown。每个 HTTP 请求保守预留 18 MiB body/输出工作区；构建快照/tail、对象下载和 PUT 副本另计。S3 缓冲及累积解码 tail 额度跟随实际所有者（包括迭代器和已取出的条目），owned task 和已交付传输帧保留原请求准入，取消等待不提前退款。JSON 在增长前检查响应上限；I/O 无额外等待队列。已知未发布的资源拒绝可返回 busy，发布结果未知时继续 outcome_unknown/恢复协议，重试原操作身份。此账目不覆盖所有运行态对象、分配器、mmap/OS 缓存或 SDK 内存，不承诺全进程 RSS、系统 I/O 带宽或完整磁盘硬上限。每 authority 对象缓存为 256 MiB / 4096 块；默认服务各 collection 共用 `metadata.sqlite` 及其旁的对象缓存。物化索引、备份及多 authority 库场景的总占用仍需整体评估。
+30 秒截止时间覆盖认证/身份查找及 handler；准入超时且未启动 handler 时返回 Busy，已接管工作超时仍 outcome_unknown。每个 HTTP 请求保守预留 18 MiB body/输出工作区；构建快照/tail、对象下载和 PUT 副本另计。S3 缓冲及累积解码 tail 额度跟随实际所有者（包括迭代器和已取出的条目），owned task 和已交付传输帧保留原请求准入，取消等待不提前退款。JSON 在增长前检查响应上限；I/O 无额外等待队列。已知未发布的资源拒绝可返回 busy，发布结果未知时继续 outcome_unknown/恢复协议，重试原操作身份。此账目不覆盖所有运行态对象、分配器、mmap/OS 缓存或 SDK 内存，不承诺全进程 RSS、系统 I/O 带宽或完整磁盘硬上限。每 authority 对象缓存为 256 MiB / 4096 块；Catalog 始终使用 `metadata.sqlite`；S3 各 collection 共用同库的协调表及其旁的对象缓存。物化索引、备份及多 authority 库场景的总占用仍需整体评估。
 
 Service archive/root 清理是明确的离线操作，不提供删除运行根的接口。系统崩溃、文件系统崩溃、断电矩阵尚未验收；原生进程 kill/exit、故障注入与 fsync 调用不能代替。历史回执安全 GC 和已删除集合代次后台回收已有实现；持续运行容量与组合隔离验收、跨主机协调和分布式仍留在后续阶段；可选向量已实现。
 

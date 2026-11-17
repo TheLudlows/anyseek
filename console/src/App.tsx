@@ -20,7 +20,6 @@ import { Busy, Empty, Modal, Notice } from "./components.tsx";
 import { Collections } from "./Collections.tsx";
 import { Data } from "./Data.tsx";
 import { Search } from "./Search.tsx";
-import { Initialize } from "./Initialize.tsx";
 import { EmbeddingSettings } from "./EmbeddingSettings.tsx";
 import { clearEmbeddingKeys } from "./embeddings.ts";
 import { Recovery } from "./Recovery.tsx";
@@ -41,7 +40,7 @@ function saved<T>(key: string, fallback: T): T {
 }
 export default function App() {
   useSyncExternalStore(subscribeLanguage, getLanguage, () => "zh");
-  const [apiKey, setApiKey] = useState(""),
+  const [tenant, setTenant] = useState(""),
     [owner, setOwner] = useState("");
   const [collections, setCollections] = useState<Collection[]>([]),
     [current, setCurrent] = useState(() => saved("collection", ""));
@@ -55,7 +54,7 @@ export default function App() {
     [connectOpen, setConnectOpen] = useState(false),
     [mobileOpen, setMobileOpen] = useState(false);
   const sequence = useRef(0),
-    currentKey = useRef(""),
+    currentTenant = useRef(""),
     booted = useRef(false);
   const selected = collections.find((c) => c.id === current);
   useEffect(() => {
@@ -70,7 +69,9 @@ export default function App() {
   useEffect(() => {
     if (booted.current) return;
     booted.current = true;
-    const key = saved("apiKey", "");
+    storage.remove("apiKey");
+    storage.remove("bootstrap");
+    const key = saved("tenant", "");
     if (key) void connect(key).catch(() => {});
   }, []);
   function navigate(page: Section) {
@@ -83,16 +84,16 @@ export default function App() {
     setBusy(true);
     setError("");
     try {
-      if (!key.trim())
-        throw new Error(t("请输入服务管理员签发的 Tenant API Key。"));
+      if (!/^[a-z0-9][a-z0-9_-]{0,62}$/.test(key.trim()))
+        throw new Error(t("请输入有效的租户命名空间。"));
       const fingerprint = await ownerFor(key.trim());
-      const list = await api<Collection[]>(key.trim(), "apikey");
+      const list = await api<Collection[]>(key.trim(), "index");
       if (attempt !== sequence.current) return;
-      storage.set("apiKey", key.trim());
-      const changed = currentKey.current && currentKey.current !== key.trim();
+      storage.set("tenant", key.trim());
+      const changed = currentTenant.current && currentTenant.current !== key.trim();
       if (changed) clearEmbeddingKeys(owner);
-      currentKey.current = key.trim();
-      setApiKey(key.trim());
+      currentTenant.current = key.trim();
+      setTenant(key.trim());
       setOwner(fingerprint);
       setCollections(list);
       setConnectOpen(false);
@@ -113,13 +114,13 @@ export default function App() {
     }
   }
   async function refresh() {
-    const key = currentKey.current,
+    const key = currentTenant.current,
       attempt = ++sequence.current;
     setBusy(true);
     setError("");
     try {
-      const list = await api<Collection[]>(key, "apikey");
-      if (currentKey.current !== key || attempt !== sequence.current) return;
+      const list = await api<Collection[]>(key, "index");
+      if (currentTenant.current !== key || attempt !== sequence.current) return;
       setCollections(list);
       setCurrent((id) =>
         list.some((c) => c.id === id) ? id : list[0]?.id || "",
@@ -138,15 +139,15 @@ export default function App() {
   function disconnect() {
     clearEmbeddingKeys(owner);
     ++sequence.current;
-    currentKey.current = "";
-    setApiKey("");
+    currentTenant.current = "";
+    setTenant("");
     setOwner("");
     setCollections([]);
     setCurrent("");
     setError("");
     setBusy(false);
     setConnectOpen(false);
-    storage.remove("apiKey");
+    storage.remove("tenant");
     storage.remove("collection");
     navigate("collections");
   }
@@ -182,7 +183,7 @@ export default function App() {
             >
               <s.icon size={18} />
               <span>{s.name}</span>
-              {s.id === "collections" && apiKey && (
+              {s.id === "collections" && tenant && (
                 <span className="nav-count">{collections.length}</span>
               )}
             </button>
@@ -202,12 +203,12 @@ export default function App() {
             className="connection-card"
             onClick={() => setConnectOpen(true)}
           >
-            <span className={"connection-orb " + (apiKey ? "connected" : "")}>
+            <span className={"connection-orb " + (tenant ? "connected" : "")}>
               <ShieldCheck size={17} />
             </span>
             <span>
-              <strong>{apiKey ? t("服务已连接") : t("连接 AnySeek 服务")}</strong>
-              <small>{apiKey ? "Tenant API" : t("使用 Tenant API Key")}</small>
+              <strong>{tenant ? t("服务已连接") : t("连接 AnySeek 服务")}</strong>
+              <small>{tenant ? t("租户命名空间") : t("选择租户命名空间")}</small>
             </span>
             <ChevronRight size={14} />
           </button>
@@ -232,7 +233,7 @@ export default function App() {
             </strong>
           </div>
           <div className="topbar-actions">
-            {apiKey && (
+            {tenant && (
               <>
                 <label className="collection-select">
                   <Layers3 size={14} />
@@ -295,9 +296,9 @@ export default function App() {
               <section className="panel connection-panel">
                 <div>
 
-                  <h2>{apiKey ? t("服务已连接") : t("尚未连接")}</h2>
+                  <h2>{tenant ? t("服务已连接") : t("尚未连接")}</h2>
                   <p>
-                    {t("API Key 仅保存在当前标签页的会话中；写入重试记录单独保留。")}</p>
+                    {t("租户命名空间保存在当前标签页会话中；用户认证由上游网关负责。")}</p>
                 </div>
                 <div className="inline-actions">
                   <button
@@ -305,23 +306,23 @@ export default function App() {
                     onClick={() => setConnectOpen(true)}
                   >
                     {t("切换连接")}</button>
-                  {apiKey && (
+                  {tenant && (
                     <button className="text-button" onClick={disconnect}>
                       <LogOut size={14} />
                       {t("断开连接")}</button>
                   )}
                 </div>
               </section>
-              {apiKey && <EmbeddingSettings key={owner + (selected?.id || "")} owner={owner}
+              {tenant && <EmbeddingSettings key={owner + (selected?.id || "")} owner={owner}
                 collection={selected?.schema.some((f) => f.index_vector) ? selected : undefined} />}
-              <Recovery />
+              <Recovery tenant={tenant} />
             </>
-          ) : !apiKey ? (
+          ) : !tenant ? (
             <Welcome busy={busy} connect={connect} />
           ) : section === "collections" ? (
             <Collections
               collections={collections}
-              apiKey={apiKey}
+              tenant={tenant}
               owner={owner}
               select={select}
               refresh={refresh}
@@ -345,7 +346,7 @@ export default function App() {
             <Data
               key={owner + selected.id}
               collection={selected}
-              apiKey={apiKey}
+              tenant={tenant}
               owner={owner}
               onWritten={refresh}
             />
@@ -353,7 +354,7 @@ export default function App() {
             <Search
               key={owner + selected.id}
               collection={selected}
-              apiKey={apiKey}
+              tenant={tenant}
               owner={owner}
             />
           )}
@@ -374,7 +375,7 @@ export default function App() {
           busy={busy}
         >
           <p className="modal-intro">
-            {t("使用管理员签发的 Tenant API Key 访问集合。")}</p>
+            {t("通过已认证的网关访问所选租户命名空间。")}</p>
           <ConnectForm busy={busy} connect={connect} />
           <Notice>{error}</Notice>
         </Modal>
@@ -389,11 +390,8 @@ function ConnectForm({
   connect: (key: string) => Promise<void>;
   busy: boolean;
 }) {
-  const [initialize, setInitialize] = useState(false);
   const [key, setKey] = useState(""),
     [error, setError] = useState("");
-  if (initialize)
-    return <Initialize connect={connect} back={() => setInitialize(false)} />;
   return (
     <form
       className="connect-form"
@@ -408,13 +406,14 @@ function ConnectForm({
       }}
     >
       <label>
-        Tenant API Key
+        {t("租户命名空间")}
         <input
-          type="password"
+          pattern="[a-z0-9][a-z0-9_\-]{0,62}"
+          maxLength={63}
           autoComplete="off"
           value={key}
           onChange={(e) => setKey(e.target.value)}
-          placeholder={t("粘贴你的 Tenant API Key")}
+          placeholder={t("例如 my_workspace")}
           required
           disabled={busy}
         />
@@ -429,13 +428,7 @@ function ConnectForm({
           </>
         )}
       </button>
-      <button
-        type="button"
-        className="text-button"
-        disabled={busy}
-        onClick={() => setInitialize(true)}
-      >
-        {t("首次使用？使用 Master Key 初始化")}</button>
+
     </form>
   );
 }
@@ -484,7 +477,7 @@ function Welcome(props: {
         <ConnectForm {...props} />
         <div className="welcome-secure">
           <ShieldCheck size={13} />
-          {t("密钥仅用于当前会话")}</div>
+          {t("通过已认证网关连接")}</div>
       </section>
     </div>
   );

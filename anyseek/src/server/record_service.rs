@@ -1,4 +1,5 @@
-//! Tenant-scoped Record service with durable catalog and collection lifecycle ordering.
+//! Tenant-scoped storage service. Upstream authenticates users; one configured
+//! service credential protects requests and the gateway supplies the namespace.
 mod admission;
 mod shutdown;
 mod diagnostics;
@@ -44,6 +45,8 @@ tokio::task_local! { static AUTHENTICATED: String; }
 tokio::task_local! { static REQUEST_DEADLINE: tokio::time::Instant; }
 #[derive(Clone)]
 struct Principal(String);
+
+const TENANT_HEADER: &str = "x-anyseek-tenant";
 
 const MAX_BODY: usize = 2 * 1024 * 1024;
 const MAX_RESPONSE: usize = 16 * 1024 * 1024;
@@ -424,22 +427,13 @@ impl Service {
         let catalog = if existed {
             Catalog::open(root).await
         } else {
-            Catalog::create_with_key(root, "master".into(), master_verifier()).await
+            Catalog::create(root).await
         }
         .map_err(|e| e.to_string())?;
         catalog
             .require_service_completion(root)
             .await
             .map_err(|e| e.to_string())?;
-        // Never silently reset a missing/mismatched master or legacy directory.
-        if catalog
-            .authenticate(&master_verifier())
-            .await
-            .map_err(|e| e.to_string())?
-            != MASTER
-        {
-            return Err("master identity mismatch".into());
-        }
         let service = Arc::new(Self {
             root: root.into(),
             catalog,
@@ -642,38 +636,33 @@ impl Service {
         Ok(())
     }
     async fn authenticate(&self, headers: &HeaderMap) -> Result<String, Error> {
-        match AUTHENTICATED.try_with(Clone::clone) {
-            Ok(principal) => Ok(principal),
-            // Direct module/handler tests do not enter the HTTP middleware.
-            Err(_) => self.authenticate_credentials(headers).await,
+        let principal = match AUTHENTICATED.try_with(Clone::clone) {
+            Ok(principal) => principal,
+            Err(_) => self.authenticate_credentials(headers).await?,
+        };
+        if principal == MASTER {
+            return Err(bad("X-AnySeek-Tenant is required for tenant data requests"));
         }
+        Ok(principal)
     }
     async fn authenticate_credentials(&self, headers: &HeaderMap) -> Result<String, Error> {
-        let value = headers
-            .get("apikey")
-            .and_then(|v| v.to_str().ok())
-            .ok_or_else(|| {
-                Error(
-                    StatusCode::UNAUTHORIZED,
-                    "unauthorized",
-                    "API key required".into(),
-                )
-            })?;
-        self.catalog
-            .authenticate(&verifier(&key_bytes(value)?))
-            .await
-            .map_err(Into::into)
+        let value = headers.get("apikey").and_then(|v| v.to_str().ok())
+            .ok_or_else(|| Error(StatusCode::UNAUTHORIZED, "unauthorized", "service API key required".into()))?;
+        if verifier(&key_bytes(value)?) != master_verifier() {
+            return Err(Error(StatusCode::UNAUTHORIZED, "unauthorized", "invalid service API key".into()));
+        }
+        let mut tenants = headers.get_all(TENANT_HEADER).iter();
+        let Some(tenant) = tenants.next() else { return Ok(MASTER.into()); };
+        if tenants.next().is_some() { return Err(bad("one X-AnySeek-Tenant header is required")); }
+        let tenant = tenant.to_str().map_err(bad)?;
+        anyseek::catalog::validate_tenant(tenant)?;
+        Ok(tenant.to_owned())
     }
     async fn admin(&self, headers: &HeaderMap) -> Result<String, Error> {
-        let key = self.authenticate(headers).await?;
-        if key != MASTER {
-            return Err(Error(
-                StatusCode::FORBIDDEN,
-                "unauthorized",
-                "master key required".into(),
-            ));
+        if AUTHENTICATED.try_with(Clone::clone).is_err() {
+            self.authenticate_credentials(headers).await?;
         }
-        Ok(key)
+        Ok(MASTER.into())
     }
     async fn admit_control(
         &self,
@@ -715,20 +704,6 @@ impl std::ops::Deref for CollectionRecord {
     fn deref(&self) -> &RecordPartition { &self.partition }
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct KeyCreate {
-    tenant_id: String,
-    operation_id: OperationId,
-    key_id: String,
-    apikey_base64: String,
-}
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct KeyRevoke {
-    operation_id: OperationId,
-    key_id: String,
-}
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all="snake_case")]
 enum CapacityProfile {
@@ -799,76 +774,6 @@ fn index_info(entry: &CollectionEntry, stats: anyseek::record::RecordStatistics)
         "vector_dimensions":match &entry.config.index.inference { Inference::External {dimensions,..} => Some(*dimensions), _ => None },
         "embedding_space_id":entry.config.embedding_space_id,"analysis":entry.config.analysis_contract()?}))
 }
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct TenantCreate { operation_id:OperationId, tenant_id:String }
-async fn tenants(State(s):State<Arc<Service>>,headers:HeaderMap)->Result<Response,Error>{
-    s.admin(&headers).await?;response(s.catalog.tenants().await?)
-}
-async fn create_tenant(State(s):State<Arc<Service>>,headers:HeaderMap,bytes:Bytes)->Result<Response,Error>{
-    let request:TenantCreate=parse(&bytes)?;control_id(&request.operation_id)?;
-    let admission=s.admit_control(&headers,true).await?;
-    owned(async move{let _admission=admission;s.admin(&headers).await?;
-        response(s.catalog.execute(CatalogRequest{operation_id:request.operation_id,command:CatalogCommand::AddTenant{tenant_id:request.tenant_id}}).await?)
-    }).await
-}
-async fn create_key(
-    State(s): State<Arc<Service>>,
-    headers: HeaderMap,
-    bytes: Bytes,
-) -> Result<Response, Error> {
-    let request: KeyCreate = parse(&bytes)?;
-    control_id(&request.operation_id)?;
-    let admission = s.admit_control(&headers, true).await?;
-    owned(async move {
-        let _admission = admission;
-        s.admin(&headers).await?;
-        if request.key_id == "master" {
-            return Err(bad("master identity is reserved"));
-        }
-        let receipt = s
-            .catalog
-            .execute(CatalogRequest {
-                operation_id: request.operation_id,
-                command: CatalogCommand::AddKey {
-                    tenant_id: request.tenant_id,
-                    key_id: request.key_id,
-                    verifier: verifier(&key_bytes(&request.apikey_base64)?),
-                },
-            })
-            .await?;
-        response(receipt)
-    })
-    .await
-}
-async fn revoke_key(
-    State(s): State<Arc<Service>>,
-    headers: HeaderMap,
-    bytes: Bytes,
-) -> Result<Response, Error> {
-    let request: KeyRevoke = parse(&bytes)?;
-    control_id(&request.operation_id)?;
-    let admission = s.admit_control(&headers, true).await?;
-    owned(async move {
-        let _admission = admission;
-        s.admin(&headers).await?;
-        if request.key_id == "master" {
-            return Err(bad("master key cannot revoke itself"));
-        }
-        let receipt = s
-            .catalog
-            .execute(CatalogRequest {
-                operation_id: request.operation_id,
-                command: CatalogCommand::RevokeKey {
-                    key_id: request.key_id,
-                },
-            })
-            .await?;
-        response(receipt)
-    })
-    .await
-}
-
 async fn create_collection(
     State(s): State<Arc<Service>>,
     headers: HeaderMap,
@@ -1268,7 +1173,11 @@ async fn catalog_operation(
 ) -> Result<Response, Error> {
     s.admin(&headers).await?;
     let id = OperationId { epoch, nonce };
-    let result = s.catalog.operation(&id).await?;
+    let namespace = match AUTHENTICATED.try_with(Clone::clone) {
+        Ok(namespace) => namespace,
+        Err(_) => s.authenticate_credentials(&headers).await?,
+    };
+    let result = s.catalog.operation_for(&namespace, &id).await?;
     response(
         json!({"receipt":result,"absence_proves_failure":false}),
     )
@@ -1428,13 +1337,13 @@ async fn service_restore(
         service_budget(parent,"restored-service-",&target)?;
         if let Some(receipt)=Catalog::completed_service_restore(&target)? {
             if receipt.identity!=id || receipt.restored_from.as_ref()!=Some(&request.backup_id){return Err(bad("restore request identity reused"));}
-            return response(json!({"snapshot":receipt,"target_root":target,"authorization":"current master only; historical keys disabled; historical control operations rejected","started":false}));
+            return response(json!({"snapshot":receipt,"target_root":target,"authorization":"service credential from target configuration; historical control operations rejected","started":false}));
         }
 
         let guard=std::fs::OpenOptions::new().create(true).truncate(false).read(true).write(true).open(parent.join(format!(".seekpower-service-{name}.lock"))).map_err(storage)?;
         guard.try_lock().map_err(storage)?;
-        let receipt=Catalog::restore_service(s.root.join(format!("service-backup-{}",request.backup_id)),target.clone(),id,master_verifier()).await?;
-        response(json!({"snapshot":receipt,"target_root":target,"authorization":"current master only; historical keys disabled; historical control operations rejected","started":false}))
+        let receipt=Catalog::restore_service(s.root.join(format!("service-backup-{}",request.backup_id)),target.clone(),id).await?;
+        response(json!({"snapshot":receipt,"target_root":target,"authorization":"service credential from target configuration; historical control operations rejected","started":false}))
     }).await
 }
 async fn create_s3_backup_pointer(
@@ -1695,7 +1604,7 @@ async fn delete_collection(
     owned(async move {
         let _admission = admission;
         // Keep deletion ordered with multi-phase restore workflows.
-        // Credential revocation does not wait for this lifecycle workflow.
+        // Receipt lookups retain an independent control lane.
         let _control = s.control.lock().await;
         let _writes = s.write_gate.write().await;
         let key = s.authenticate(&headers).await?;
@@ -1920,12 +1829,7 @@ pub(crate) fn router(service: Arc<Service>) -> Router {
     Service::start_reclamation(&service);
     let app = Router::new()
         .route("/api/v1/live", get(|| async { Json(crate::VERSION) }))
-        .route(
-            "/api/v1/apikey",
-            get(list_collections).post(create_key).delete(revoke_key),
-        )
-        .route("/api/v1/tenants",get(tenants).post(create_tenant))
-        .route("/api/v1/index", post(create_collection))
+        .route("/api/v1/index", get(list_collections).post(create_collection))
         .route("/api/v1/restore", post(restore))
         .route("/api/v1/index/{id}/doc/{record_id}/status", get(record_status))
         .route("/api/v1/backups", get(list_backups))
@@ -2053,9 +1957,7 @@ mod tests {
     }
     pub(super) async fn setup() -> (Arc<Service>,PathBuf,HeaderMap) {
         let path=path();let service=Service::open(&path,std::num::NonZeroUsize::new(200).unwrap()).await.unwrap();
-        service.catalog.execute(CatalogRequest{operation_id:OperationId::new("tenant".into()),command:CatalogCommand::AddTenant{tenant_id:"tenant".into()}}).await.unwrap();
-        service.catalog.execute(CatalogRequest{operation_id:OperationId::new("key".into()),command:CatalogCommand::AddKey{key_id:"a".into(),tenant_id:"tenant".into(),verifier:verifier(&[7;32])}}).await.unwrap();
-        let mut headers=HeaderMap::new();headers.insert("apikey",STANDARD.encode([7;32]).parse().unwrap());
+        let mut headers=master_headers();headers.insert(TENANT_HEADER,"tenant".parse().unwrap());
         let create=json!({"operation_id":OperationId::new("create".into()),"collection_id":"c","config":{"index_name":"test","schema":[{"field":"body","field_type":"Text"}]}});
         create_collection(State(service.clone()),headers.clone(),serde_json::to_vec(&create).unwrap().into()).await.unwrap();
         (service,path,headers)
@@ -2081,14 +1983,14 @@ mod tests {
             Ok::<_,std::io::Error>(Bytes::from(serde_json::to_vec(&write).unwrap()))
         }));
         let request = axum::http::Request::builder().method("POST").uri("/api/v1/index/c/ingest")
-            .header("apikey",headers["apikey"].clone()).body(body).unwrap();
+            .header("apikey",headers["apikey"].clone()).header(TENANT_HEADER,"tenant").body(body).unwrap();
         let caller = tokio::spawn(app.clone().oneshot(request));
         admitted.await.unwrap(); // Authenticated root accepted, no command enqueued yet.
         service.stop_accepting();
         let read = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let observed = read.clone();
         let denied = axum::http::Request::builder().method("POST").uri("/api/v1/index/c/ingest")
-            .header("apikey",headers["apikey"].clone())
+            .header("apikey",headers["apikey"].clone()).header(TENANT_HEADER,"tenant")
             .body(Body::from_stream(futures::stream::once(async move {
                 observed.store(true,std::sync::atomic::Ordering::Release);
                 Ok::<_,std::io::Error>(Bytes::from_static(b"{}"))
@@ -2227,9 +2129,20 @@ mod tests {
     async fn tenant_api(app:&Router,method:&str,path:&str,key:&str,value:Option<Value>)->(StatusCode,Value){
         use tower::ServiceExt;
         let body=value.map(|v|serde_json::to_vec(&v).unwrap()).unwrap_or_default();
-        let request=axum::http::Request::builder().method(method).uri(path).header("apikey",key).header("content-type","application/json").body(Body::from(body)).unwrap();
+        let request=axum::http::Request::builder().method(method).uri(path).header("apikey",key).header(TENANT_HEADER,"tenant").header("content-type","application/json").body(Body::from(body)).unwrap();
         let response=app.clone().oneshot(request).await.unwrap();let status=response.status();
         let value=serde_json::from_slice(&axum::body::to_bytes(response.into_body(),MAX_RESPONSE).await.unwrap()).unwrap();(status,value)
+    }
+    async fn namespace_api(app:&Router, method:&str, path:&str, tenant:&str, value:Option<Value>) -> (StatusCode, Value) {
+        use tower::ServiceExt;
+        let master=master_headers();
+        let body=value.map(|v|serde_json::to_vec(&v).unwrap()).unwrap_or_default();
+        let request=axum::http::Request::builder().method(method).uri(path)
+            .header("apikey",master["apikey"].clone()).header(TENANT_HEADER,tenant)
+            .header("content-type","application/json").body(Body::from(body)).unwrap();
+        let response=app.clone().oneshot(request).await.unwrap();let code=response.status();
+        let raw=axum::body::to_bytes(response.into_body(),MAX_RESPONSE).await.unwrap();
+        (code,serde_json::from_slice(&raw).unwrap())
     }
     #[tokio::test]
     async fn group_http_replaces_replays_clears_and_preserves_independent_routes() {
@@ -2290,11 +2203,12 @@ mod tests {
         assert_eq!(tenant_api(&app,"POST","/api/v1/index/c/group/replace",key,Some(request.clone())).await.0,StatusCode::OK);
         let mut stale=request.clone();stale["operation_id"]=json!(OperationId::new("stale".into()));stale["records"][0]["record_id"]=json!("new");
         assert_eq!(tenant_api(&app,"POST","/api/v1/index/c/group/replace",key,Some(stale)).await.0,StatusCode::CONFLICT);
-        service.catalog.execute(CatalogRequest{operation_id:OperationId::new("other-tenant".into()),command:CatalogCommand::AddTenant{tenant_id:"other".into()}}).await.unwrap();
-        service.catalog.execute(CatalogRequest{operation_id:OperationId::new("other-key".into()),command:CatalogCommand::AddKey{key_id:"b".into(),tenant_id:"other".into(),verifier:verifier(&[8;32])}}).await.unwrap();
-        for key in [master_headers()["apikey"].to_str().unwrap().to_owned(),STANDARD.encode([8;32])] {
-            assert!(!tenant_api(&app,"POST","/api/v1/index/c/group/replace",&key,Some(request.clone())).await.0.is_success());
-            assert!(!tenant_api(&app,"GET","/api/v1/index/c/group?group_id=g",&key,None).await.0.is_success());
+        for (method,path,value) in [
+            ("POST", "/api/v1/index/c/group/replace", Some(request.clone())),
+            ("GET", "/api/v1/index/c/group?group_id=g", None),
+        ] {
+            assert_eq!(namespace_api(&app,method,path,"other",value.clone()).await.0, StatusCode::FORBIDDEN);
+            assert_eq!(tenant_api(&app,method,path,&STANDARD.encode([8;32]),value).await.0, StatusCode::UNAUTHORIZED);
         }
         let partition=service.record("tenant","c").await.unwrap();assert!(partition.get("new").await.unwrap().is_none());
         drop(partition);drop(app);service.shutdown().wait().await.unwrap();std::fs::remove_dir_all(path).unwrap();
@@ -2321,7 +2235,7 @@ mod tests {
         let request=json!({"operation_id":OperationId::new("cancel-group".into()),"group_id":"g","expected_group_version":0,
             "records":[{"record_id":"a","document":{"body":"alpha"}}]});
         let http=axum::http::Request::builder().method("POST").uri("/api/v1/index/c/group/replace")
-            .header("apikey",headers["apikey"].clone()).header("content-type","application/json")
+            .header("apikey",headers["apikey"].clone()).header(TENANT_HEADER,"tenant").header("content-type","application/json")
             .body(Body::from(serde_json::to_vec(&request).unwrap())).unwrap();
         let caller=tokio::spawn(app.clone().oneshot(http));
         tokio::time::timeout(Duration::from_secs(5),async {
@@ -2504,38 +2418,33 @@ mod tests {
         drop(p); drop(app); drop(service); std::fs::remove_dir_all(path).unwrap();
     }
     #[tokio::test]
-    async fn tenant_http_boundaries_same_names_backup_ownership_and_master_management_only(){
+    async fn gateway_namespaces_isolate_same_names_and_backup_ownership_without_registration() {
         let(service,path,headers)=setup().await;let app=router(service.clone());
-        let tenant=headers["apikey"].to_str().unwrap();let master=master_headers();let master=master["apikey"].to_str().unwrap();
-        let op=|n:&str|OperationId::new(n.into());
-        assert_eq!(tenant_api(&app,"POST","/api/v1/tenants",master,Some(json!({"tenant_id":"other","operation_id":op("other")}))).await.0,StatusCode::OK);
-        let other=STANDARD.encode([8;32]);
-        let key=json!({"tenant_id":"other","key_id":"other","apikey_base64":other,"operation_id":op("other-key")});
-        assert_eq!(tenant_api(&app,"POST","/api/v1/apikey",master,Some(key.clone())).await.0,StatusCode::OK);
-        assert_eq!(tenant_api(&app,"POST","/api/v1/apikey",tenant,Some(key)).await.0,StatusCode::FORBIDDEN);
-        assert_eq!(tenant_api(&app,"GET","/api/v1/tenants",tenant,None).await.0,StatusCode::FORBIDDEN);
-        for endpoint in ["/api/v1/apikey","/api/v1/index/c","/api/v1/index/c/doc/r"]{
-            assert_eq!(tenant_api(&app,"GET",endpoint,master,None).await.0,StatusCode::FORBIDDEN);
+        let key=headers["apikey"].to_str().unwrap();
+        for endpoint in ["/api/v1/tenants","/api/v1/apikey"] {
+            for method in ["GET","POST","DELETE"] {
+                let result=tenant_api(&app,method,endpoint,key,Some(json!({}))).await;
+                assert_eq!(result.0,StatusCode::NOT_FOUND);
+            }
         }
-        assert_eq!(tenant_api(&app,"GET","/api/v1/index/c",&other,None).await.0,StatusCode::FORBIDDEN);
-        let create=json!({"collection_id":"c","config":{"index_name":"other","schema":[{"field":"body","field_type":"Text"}]},"operation_id":op("create")});
-        assert_eq!(tenant_api(&app,"POST","/api/v1/index",&other,Some(create)).await.0,StatusCode::OK);
-        let write=json!({"operation_id":op("write"),"record_id":"r","expected":"Absent","document":{"body":"tenant private"}});
-        assert_eq!(tenant_api(&app,"POST","/api/v1/index/c/batch",tenant,Some(json!({"writes":[write.clone()]}))).await.0,StatusCode::OK);
-        assert_eq!(tenant_api(&app,"GET","/api/v1/index/c/doc/r",&other,None).await.0,StatusCode::NOT_FOUND);
-        assert_eq!(tenant_api(&app,"POST","/api/v1/index/c/batch",&other,Some(json!({"writes":[write]}))).await.0,StatusCode::OK);
-        let (status,backup)=tenant_api(&app,"POST","/api/v1/index/c/backup",tenant,Some(json!({"operation_id":op("backup")}))).await;
+        assert_eq!(namespace_api(&app,"GET","/api/v1/index/c","other",None).await.0,StatusCode::FORBIDDEN);
+        let create=json!({"collection_id":"c","config":{"index_name":"other","schema":[{"field":"body","field_type":"Text"}]},"operation_id":OperationId::new("create".into())});
+        assert_eq!(namespace_api(&app,"POST","/api/v1/index","other",Some(create)).await.0,StatusCode::OK);
+        let write=json!({"operation_id":OperationId::new("write".into()),"record_id":"r","expected":"Absent","document":{"body":"private"}});
+        assert_eq!(tenant_api(&app,"POST","/api/v1/index/c/batch",key,Some(json!({"writes":[write.clone()]}))).await.0,StatusCode::OK);
+        assert_eq!(namespace_api(&app,"GET","/api/v1/index/c/doc/r","other",None).await.0,StatusCode::NOT_FOUND);
+        assert_eq!(namespace_api(&app,"POST","/api/v1/index/c/batch","other",Some(json!({"writes":[write]}))).await.0,StatusCode::OK);
+        let (status,backup)=tenant_api(&app,"POST","/api/v1/index/c/backup",key,Some(json!({"operation_id":OperationId::new("backup".into())}))).await;
         assert_eq!(status,StatusCode::OK);
-        let restore=json!({"collection_id":"copy","backup_id":backup["backup_id"],"operation_id":op("restore")});
-        assert_eq!(tenant_api(&app,"POST","/api/v1/restore",&other,Some(restore.clone())).await.0,StatusCode::FORBIDDEN);
-        assert_eq!(tenant_api(&app,"POST","/api/v1/restore",tenant,Some(restore)).await.0,StatusCode::OK);
-        assert_eq!(tenant_api(&app,"GET","/api/v1/index/copy/doc/r",tenant,None).await.0,StatusCode::OK);
-        assert_eq!(tenant_api(&app,"GET","/api/v1/index/copy/doc/r",&other,None).await.0,StatusCode::FORBIDDEN);
-        let unknown=json!({"tenant_id":"absent","key_id":"invalid","apikey_base64":STANDARD.encode([9;32]),"operation_id":op("invalid-key")});
-        assert_eq!(tenant_api(&app,"POST","/api/v1/apikey",master,Some(unknown)).await.0,StatusCode::BAD_REQUEST);
-        assert_eq!(tenant_api(&app,"POST","/api/v1/index/c/grants",master,Some(json!({}))).await.0,StatusCode::NOT_FOUND);
+        let restore=json!({"collection_id":"copy","backup_id":backup["backup_id"],"operation_id":OperationId::new("restore".into())});
+        assert_eq!(namespace_api(&app,"POST","/api/v1/restore","other",Some(restore.clone())).await.0,StatusCode::FORBIDDEN);
+        assert_eq!(tenant_api(&app,"POST","/api/v1/restore",key,Some(restore)).await.0,StatusCode::OK);
+        assert_eq!(tenant_api(&app,"GET","/api/v1/index/copy/doc/r",key,None).await.0,StatusCode::OK);
+        assert_eq!(namespace_api(&app,"GET","/api/v1/index/copy/doc/r","other",None).await.0,StatusCode::FORBIDDEN);
+        assert_eq!(namespace_api(&app,"GET","/api/v1/index","other",None).await.1.as_array().unwrap().len(),1);
         drop(app);drop(service);std::fs::remove_dir_all(path).unwrap();
     }
+
     #[tokio::test]
     async fn removed_document_upload_http_rejects_without_mutating_records() {
         use tower::ServiceExt;
@@ -2547,7 +2456,7 @@ mod tests {
         for (endpoint,body) in [("batch",json!({"writes":[removed.clone()]})),("ingest",json!({"records":[removed]}))] {
             assert_eq!(tenant_api(&app,"POST",&format!("/api/v1/index/c/{endpoint}"),key,Some(body)).await.0,StatusCode::BAD_REQUEST);
         }
-        let response=app.clone().oneshot(axum::http::Request::builder().uri("/api/v1/index/c/doc/r/generation").header("apikey",key).body(Body::empty()).unwrap()).await.unwrap();
+        let response=app.clone().oneshot(axum::http::Request::builder().uri("/api/v1/index/c/doc/r/generation").header("apikey",key).header(TENANT_HEADER,"tenant").body(Body::empty()).unwrap()).await.unwrap();
         assert_eq!(response.status(),StatusCode::NOT_FOUND);drop(response);
         let partition=service.record("tenant","c").await.unwrap();
         assert_eq!(partition.get("r").await.unwrap().unwrap().version,1);
@@ -2617,7 +2526,7 @@ mod tests {
         let operation=OperationId::new("committed-http".into());
         let body=json!({"records":[{"operation_id":operation,"record_id":"r","expected":"Absent","document":{"body":"alpha async"}}]});
         let make=|value:&Value| axum::http::Request::builder().method("POST").uri("/api/v1/index/c/ingest")
-            .header("apikey",headers["apikey"].clone()).header("content-type","application/json").body(Body::from(serde_json::to_vec(value).unwrap())).unwrap();
+            .header("apikey",headers["apikey"].clone()).header(TENANT_HEADER,"tenant").header("content-type","application/json").body(Body::from(serde_json::to_vec(value).unwrap())).unwrap();
         let response=app.clone().oneshot(make(&body)).await.unwrap(); assert_eq!(response.status(),StatusCode::OK);
         let value:Value=serde_json::from_slice(&axum::body::to_bytes(response.into_body(),MAX_RESPONSE).await.unwrap()).unwrap();
         assert_eq!(value["results"][0]["code"],"committed"); assert_eq!(value["results"][0]["receipt"]["seq"],1);
@@ -2636,51 +2545,69 @@ mod tests {
         assert_eq!(info["statistics"]["active_records"],1);
         assert!(info.get("indexed_doc_count").is_none() && info.get("committed_doc_count").is_none());
         let old_uri=format!("/api/v1/index/c/ingest/operation/{}/{}",operation.epoch,operation.nonce);
-        let response=app.clone().oneshot(axum::http::Request::builder().uri(old_uri).header("apikey",headers["apikey"].clone()).body(Body::empty()).unwrap()).await.unwrap();
+        let response=app.clone().oneshot(axum::http::Request::builder().uri(old_uri).header("apikey",headers["apikey"].clone()).header(TENANT_HEADER,"tenant").body(Body::empty()).unwrap()).await.unwrap();
         assert_eq!(response.status(),StatusCode::NOT_FOUND);drop(response);
         let uri=format!("/api/v1/index/c/operation/{}/{}",operation.epoch,operation.nonce);
-        let response=app.oneshot(axum::http::Request::builder().uri(uri).header("apikey",headers["apikey"].clone()).body(Body::empty()).unwrap()).await.unwrap(); assert_eq!(response.status(),StatusCode::OK);
+        let response=app.oneshot(axum::http::Request::builder().uri(uri).header("apikey",headers["apikey"].clone()).header(TENANT_HEADER,"tenant").body(Body::empty()).unwrap()).await.unwrap(); assert_eq!(response.status(),StatusCode::OK);
         let status:Value=serde_json::from_slice(&axum::body::to_bytes(response.into_body(),MAX_RESPONSE).await.unwrap()).unwrap(); assert_eq!(status["receipt"]["record_id"],"r");
         drop(service); std::fs::remove_dir_all(path).unwrap();
     }
     #[tokio::test]
-    async fn authenticated_request_can_finish_when_key_is_revoked_while_reading_body() {
+    async fn service_credentials_and_namespace_are_checked_before_request_body() {
         use tower::ServiceExt;
-        let (service,path,headers)=setup().await;
-        let app=router(service.clone());
-        let revoke=service.clone();
-        let body=Body::from_stream(futures::stream::once(async move {
-            revoke.catalog.execute(CatalogRequest {
-                operation_id:OperationId::new("revoke-before-handler".into()),
-                command:CatalogCommand::RevokeKey{key_id:"a".into()},
-            }).await.unwrap();
-            Ok::<_,std::io::Error>(Bytes::from(serde_json::to_vec(&json!({"writes":[{
-                "operation_id":OperationId::new("accepted-body".into()),"record_id":"r",
-                "expected":"Absent","document":{"body":"alpha"}
-            }]})).unwrap()))
-        }));
-        let request=axum::http::Request::builder().method("POST").uri("/api/v1/index/c/batch")
-            .header("apikey",headers["apikey"].clone()).body(body).unwrap();
-        let response=app.clone().oneshot(request).await.unwrap();
-        assert_eq!(response.status(),StatusCode::OK);
-        axum::body::to_bytes(response.into_body(),MAX_RESPONSE).await.unwrap();
-        let denied=axum::http::Request::builder().uri("/api/v1/index/c")
-            .header("apikey",headers["apikey"].clone()).body(Body::empty()).unwrap();
-        assert_eq!(app.clone().oneshot(denied).await.unwrap().status(),StatusCode::FORBIDDEN);
-        assert!(service.record("tenant","c").await.unwrap().get("r").await.unwrap().is_some());
+        struct NeverRead;
+        impl http_body::Body for NeverRead {
+            type Data=Bytes;type Error=std::io::Error;
+            fn poll_frame(self:Pin<&mut Self>,_:&mut Context<'_>)->Poll<Option<Result<http_body::Frame<Bytes>,Self::Error>>> {
+                panic!("invalid credentials or namespace must reject before body polling")
+            }
+        }
+        let(service,path,headers)=setup().await;let app=router(service.clone());
+        let valid=headers["apikey"].to_str().unwrap();let invalid=STANDARD.encode([8;32]);
+        for (key,tenant,duplicate,expected) in [
+            (valid,None,false,StatusCode::BAD_REQUEST),
+            (invalid.as_str(),Some("tenant"),false,StatusCode::UNAUTHORIZED),
+            (valid,Some("../tenant"),false,StatusCode::BAD_REQUEST),
+            (valid,Some("tenant"),true,StatusCode::BAD_REQUEST),
+        ] {
+            let mut request=axum::http::Request::builder().method("POST").uri("/api/v1/index/c/batch").header("apikey",key);
+            if let Some(tenant)=tenant {request=request.header(TENANT_HEADER,tenant);}
+            if duplicate {request=request.header(TENANT_HEADER,"other");}
+            let response=app.clone().oneshot(request.body(Body::new(NeverRead)).unwrap()).await.unwrap();
+            assert_eq!(response.status(),expected);
+        }
+        let response=app.clone().oneshot(axum::http::Request::builder().uri("/api/v1/index/c")
+            .header(TENANT_HEADER,"tenant").body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(response.status(),StatusCode::UNAUTHORIZED);
         drop(app);drop(service);std::fs::remove_dir_all(path).unwrap();
     }
+
     #[tokio::test]
-    async fn committed_response_survives_revoke_but_new_requests_fail() {
-        let (service,path,_)=setup().await; let mut headers=HeaderMap::new(); headers.insert("apikey",STANDARD.encode([7;32]).parse().unwrap());
-        let body=json!({"records":[{"operation_id":OperationId::new("committed-revoke".into()),"record_id":"r","expected":"Absent","document":{"body":"alpha"}}]});
-        let response=ingest(State(service.clone()),headers.clone(),Path("c".into()),serde_json::to_vec(&body).unwrap().into()).await.unwrap(); assert_eq!(response.status(),StatusCode::OK);
-        service.catalog.execute(CatalogRequest{operation_id:OperationId::new("revoke-committed".into()),command:CatalogCommand::RevokeKey{key_id:"a".into()}}).await.unwrap();
-        assert!(axum::body::to_bytes(response.into_body(),MAX_RESPONSE).await.is_ok()); assert!(ingest_progress(State(service.clone()),headers,Path("c".into())).await.is_err());
-        let partition=service.record("tenant","c").await.unwrap();
-        partition.write(serde_json::from_value(body["records"][0].clone()).unwrap()).await.unwrap();
-        drop(partition); drop(service); std::fs::remove_dir_all(path).unwrap();
+    async fn live_validates_supplied_service_credentials_and_accepts_uuid_namespaces() {
+        use tower::ServiceExt;
+        let(service,path,headers)=setup().await; let app=router(service.clone());
+        let invalid=STANDARD.encode([8;32]);
+        for (key, expected) in [(None,StatusCode::OK),(Some(headers["apikey"].to_str().unwrap()),StatusCode::OK),(Some(invalid.as_str()),StatusCode::UNAUTHORIZED)] {
+            let mut req=axum::http::Request::builder().uri("/api/v1/live");
+            if let Some(key)=key {req=req.header("apikey",key);}
+            assert_eq!(app.clone().oneshot(req.body(Body::empty()).unwrap()).await.unwrap().status(),expected);
+        }
+        let mut scoped=headers.clone(); scoped.insert(TENANT_HEADER,"12345678-1234-4234-8234-123456789012".parse().unwrap());
+        let create=json!({"operation_id":OperationId::new("uuid-create".into()),"collection_id":"ws_12345678123442348234123456789012","config":{"index_name":"test","schema":[{"field":"body","field_type":"Text"}]}});
+        create_collection(State(service.clone()),scoped.clone(),serde_json::to_vec(&create).unwrap().into()).await.unwrap();
+        let list=list_collections(State(service.clone()),scoped).await.unwrap();
+        assert_eq!(list.status(),StatusCode::OK);
+        drop(list);drop(app);drop(service);std::fs::remove_dir_all(path).unwrap();
     }
+
+    #[tokio::test]
+    async fn admitted_namespace_is_not_rebound_by_handler_headers() {
+        let(service,path,headers)=setup().await;
+        let error=AUTHENTICATED.scope("other".into(), info(State(service.clone()),headers,Path("c".into()))).await.unwrap_err();
+        assert_eq!(error.0,StatusCode::FORBIDDEN);
+        drop(service);std::fs::remove_dir_all(path).unwrap();
+    }
+
     #[cfg(feature = "fault-injection")]
     #[tokio::test]
     async fn service_data_fence_preserves_persistence_errors() {
@@ -2748,7 +2675,7 @@ mod tests {
         let record = service.record("tenant", "c").await.unwrap();
         let app = router(service.clone());
         let make_query = || axum::http::Request::builder().method("POST").uri("/api/v1/index/c/query")
-            .header("apikey", headers["apikey"].clone()).header("content-type", "application/json")
+            .header("apikey", headers["apikey"].clone()).header(TENANT_HEADER,"tenant").header("content-type", "application/json")
             .body(Body::from(r#"{"query":"alpha"}"#)).unwrap();
         let prepared = app.clone().oneshot(make_query()).await.unwrap();
         let mut body = prepared.into_body();
@@ -2818,7 +2745,7 @@ mod tests {
                 })), service.clone())
             } else { router(service.clone()) };
             let make_query = || axum::http::Request::builder().method("POST").uri("/api/v1/index/c/query")
-                .header("apikey", headers["apikey"].clone()).header("content-type", "application/json")
+                .header("apikey", headers["apikey"].clone()).header(TENANT_HEADER,"tenant").header("content-type", "application/json")
                 .body(Body::from(r#"{"query":"alpha"}"#)).unwrap();
             let mut body = if stage != "header" {
                 Some(app.clone().oneshot(make_query()).await.unwrap().into_body())
@@ -2933,11 +2860,11 @@ mod tests {
         let create = json!({"operation_id":OperationId::new("create-d".into()),"collection_id":"d","config":{"index_name":"other","schema":[{"field":"body","field_type":"Text"}]}});
         drop(create_collection(State(service.clone()), tenant.clone(), serde_json::to_vec(&create).unwrap().into()).await.unwrap());
         let app = router(service.clone());
-        let key = STANDARD.encode([7;32]);
+        let key = master_headers()["apikey"].to_str().unwrap().to_owned();
         let mut slow = Vec::new();
         for id in ["c", "%63"].into_iter().cycle().take(16) {
             let response = app.clone().oneshot(axum::http::Request::builder()
-                .uri(format!("/api/v1/index/{id}")).header("apikey", &key).body(Body::empty()).unwrap()).await.unwrap();
+                .uri(format!("/api/v1/index/{id}")).header("apikey", &key).header(TENANT_HEADER,"tenant").body(Body::empty()).unwrap()).await.unwrap();
             assert_eq!(response.status(), StatusCode::OK); slow.push(response);
         }
         struct NeverRead;
@@ -2948,18 +2875,19 @@ mod tests {
             }
         }
         let refused = app.clone().oneshot(axum::http::Request::builder().method("POST")
-            .uri("/api/v1/index/%63/batch").header("apikey", &key).body(Body::new(NeverRead)).unwrap()).await.unwrap();
+            .uri("/api/v1/index/%63/batch").header("apikey", &key).header(TENANT_HEADER,"tenant").body(Body::new(NeverRead)).unwrap()).await.unwrap();
         assert_eq!(refused.status(), StatusCode::TOO_MANY_REQUESTS);
         let other = app.clone().oneshot(axum::http::Request::builder().uri("/api/v1/index/d")
-            .header("apikey", tenant["apikey"].clone()).body(Body::empty()).unwrap()).await.unwrap();
+            .header("apikey", tenant["apikey"].clone()).header(TENANT_HEADER,"tenant").body(Body::empty()).unwrap()).await.unwrap();
         assert_eq!(other.status(), StatusCode::OK); drop(other);
-        // A long restore/backup workflow must not occupy the revoke workflow lock.
+        // Receipt lookup keeps an independent control lane while data output and
+        // the long-running service workflow retain their own resources.
         let workflow = service.control.lock().await;
-        let body = json!({"operation_id":OperationId::new("reserved-revoke".into()),"key_id":"a"});
-        let revoked = tokio::time::timeout(std::time::Duration::from_secs(2), app.clone().oneshot(axum::http::Request::builder()
-            .method("DELETE").uri("/api/v1/apikey").header("apikey",master["apikey"].clone())
-            .body(Body::from(serde_json::to_vec(&body).unwrap())).unwrap())).await.unwrap().unwrap();
-        assert_eq!(revoked.status(), StatusCode::OK); drop(revoked); drop(workflow);
+        let operation=OperationId::new("lookup".into());
+        let lookup=tokio::time::timeout(std::time::Duration::from_secs(2),app.clone().oneshot(axum::http::Request::builder()
+            .uri(format!("/api/v1/catalog/operation/{}/{}",operation.epoch,operation.nonce))
+            .header("apikey",master["apikey"].clone()).body(Body::empty()).unwrap())).await.unwrap().unwrap();
+        assert_eq!(lookup.status(),StatusCode::OK);drop(lookup);drop(workflow);
         for response in slow {
             let mut body = response.into_body();
             assert!(std::future::poll_fn(|cx|Pin::new(&mut body).poll_frame(cx)).await.unwrap().is_ok());
@@ -3035,12 +2963,12 @@ mod tests {
             }
         }
         let request = axum::http::Request::builder().method("POST").uri("/api/v1/index/c/batch")
-            .header("apikey",headers["apikey"].clone()).body(Body::new(NeverRead)).unwrap();
+            .header("apikey",headers["apikey"].clone()).header(TENANT_HEADER,"tenant").body(Body::new(NeverRead)).unwrap();
         let response = tokio::time::timeout(std::time::Duration::from_secs(2), app.clone().oneshot(request)).await.unwrap().unwrap();
         assert_eq!(response.status(),StatusCode::TOO_MANY_REQUESTS);
         drop(response);drop(gate);
         let request = axum::http::Request::builder().uri("/api/v1/index/c")
-            .header("apikey",headers["apikey"].clone()).body(Body::empty()).unwrap();
+            .header("apikey",headers["apikey"].clone()).header(TENANT_HEADER,"tenant").body(Body::empty()).unwrap();
         let response = app.clone().oneshot(request).await.unwrap();
         assert_eq!(response.status(),StatusCode::OK);drop(response);
         assert_eq!(service.record("tenant", "c").await.unwrap().statistics().await.unwrap().visible_seq,0);
@@ -3092,7 +3020,7 @@ fn openapi_document() -> Value {
     struct Api;
     let mut doc = serde_json::to_value(Api::openapi()).unwrap();
     doc["openapi"] = json!("3.1.0");
-    doc["info"] = json!({"title":"anyseek Record service","version":crate::VERSION,"description":"Bounded single-machine reliable Record/catalog and text/vector retrieval routes. Source and chunk identifiers are ordinary document metadata. Writes require stable operation and record identities. Batch writes are explicitly non-atomic; deletion plans require saved per-target operation IDs. Collection restore and full-service recovery into a new stopped root keep historical credentials disabled. See docs/record-model.md for acceptance limits."});
+    doc["info"] = json!({"title":"anyseek Record service","version":crate::VERSION,"description":"Bounded single-machine reliable Record/catalog and text/vector retrieval routes. Source and chunk identifiers are ordinary document metadata. Writes require stable operation and record identities. Batch writes are explicitly non-atomic; deletion plans require saved per-target operation IDs. Tenant namespaces are supplied by the trusted gateway; one configured service key protects requests. Credentials are never stored in the Catalog or included in backups. Collection restore and full-service recovery preserve namespace ownership and fence historical management operations. See docs/record-model.md for acceptance limits."});
     let schemas = doc["components"]["schemas"].as_object_mut().unwrap();
     schemas.insert("OperationId".into(),json!({"type":"object","required":["epoch","nonce"],"properties":{"epoch":{"type":"integer","minimum":0},"nonce":{"type":"string"}}}));
     schemas.insert("RecordWrite".into(),json!({"type":"object","additionalProperties":false,"required":["operation_id","record_id","expected","document"],"properties":{"operation_id":{"$ref":"#/components/schemas/OperationId"},"record_id":{"type":"string"},"expected":{"oneOf":[{"type":"string","enum":["Absent","Any"]},{"type":"object","required":["Match"],"properties":{"Match":{"type":"integer","minimum":0}},"additionalProperties":false}]},"document":{"type":["object","null"]}}}));
@@ -3116,21 +3044,7 @@ fn openapi_document() -> Value {
     for (path, method, summary, schema) in [
         ("/api/v1/live", "get", "Server version", None),
         ("/api/v1/index/{id}/doc/{record_id}/status", "get", "Current technical version, visibility and pending vector fields", None),
-        ("/api/v1/tenants","get","Master: list Tenant IDs",None),
-        ("/api/v1/tenants","post","Master: create Tenant",Some(json!({"type":"object","additionalProperties":false,"required":["tenant_id","operation_id"],"properties":{"tenant_id":{"type":"string","pattern":"^[a-z][a-z0-9_-]{0,62}$"},"operation_id":{"$ref":"#/components/schemas/OperationId"}}}))),
-        ("/api/v1/apikey", "get", "List collections of the authenticated Tenant", None),
-        (
-            "/api/v1/apikey",
-            "post",
-            "Master: register a client-generated 32-byte API key",
-            Some(json!({"type":"object","additionalProperties":false,"required":["operation_id","key_id","tenant_id","apikey_base64"],"properties":{"operation_id":{"$ref":"#/components/schemas/OperationId"},"key_id":{"type":"string","minLength":1,"maxLength":256},"tenant_id":{"type":"string","pattern":"^[a-z][a-z0-9_-]{0,62}$"},"apikey_base64":{"type":"string"}}})),
-        ),
-        (
-            "/api/v1/apikey",
-            "delete",
-            "Master: revoke a key without deleting data",
-            Some(json!({"type":"object","required":["operation_id","key_id"]})),
-        ),
+        ("/api/v1/index", "get", "List collections in the supplied tenant namespace", None),
         (
             "/api/v1/index",
             "post",
@@ -3292,6 +3206,12 @@ fn openapi_document() -> Value {
         let mut params = vec![
             json!({"name":"apikey","in":"header","required":path!="/api/v1/live","schema":{"type":"string"}}),
         ];
+        if !matches!(path, "/api/v1/live" | "/api/v1/backups" | "/api/v1/backups/{id}"
+            | "/api/v1/service-backups" | "/api/v1/service-restores" | "/api/v1/catalog/operation/{epoch}/{nonce}") {
+            params.push(json!({"name":"X-AnySeek-Tenant","in":"header","required":true,
+                "description":"Tenant namespace supplied by the authenticated gateway; not a user credential.",
+                "schema":{"type":"string","pattern":"^[a-z0-9][a-z0-9_-]{0,62}$"}}));
+        }
         for part in path.split('/') {
             if let Some(name) = part.strip_prefix('{').and_then(|s| s.strip_suffix('}')) {
                 params.push(json!({"name":name,"in":"path","required":true,"schema":{"type":if name=="epoch"{"integer"}else{"string"}}}));

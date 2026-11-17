@@ -88,7 +88,7 @@ export async function sendWrites(
   progress: (done: number) => void = () => {},
 ) {
   if (pending.owner !== owner)
-    throw new Error(t("保留的写入属于另一连接，请使用原 API Key 处理。"));
+    throw new Error(t("保留的写入属于另一连接，请切回原租户处理。"));
   restoreWriteOutcomes(pending);
   if (pending.delivery === "ingest") return sendIngest(pending, key, progress);
   for (let i = pending.completed; i < pending.requests.length; i++) {

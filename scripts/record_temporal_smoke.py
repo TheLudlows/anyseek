@@ -26,8 +26,6 @@ def exercise(call, restart_with, directory, faults):
     config = {'index_name': 'Temporal records', 'schema': [{'field': 'body', 'field_type': 'Text', 'store': True}]}
     call('POST', '/api/v1/index', {'operation_id': operation(), 'collection_id': 'temporal', 'config': config})
     endpoint = '/api/v1/index/temporal'
-    reader=base64.b64encode(os.urandom(32)).decode()
-    call('POST','/api/v1/apikey',{'operation_id':operation(),'key_id':'temporal-reader','apikey_base64':reader})
     record = {'operation_id': operation(), 'record_id': 's',  'expected': 'Absent',
               'document': {'body': 'temporal record'},
               'temporal': {'event_time_ms': 100, 'valid_from_ms': 100, 'valid_to_ms': 200, 'expire_at_ms': now + (100 if faults else 86400000)}}
@@ -38,7 +36,7 @@ def exercise(call, restart_with, directory, faults):
     query = {'query': 'temporal', 'temporal': {'event': {'from_ms': 100, 'to_ms': 101}, 'valid_at_ms': 100}}
     result = call('POST', endpoint + '/query', query)
     assert [h['record']['record_id'] for h in result['hits']] == ['s'], result
-    assert call('POST',endpoint+'/query',query,key=reader)['count_total']==1
+    assert call('POST',endpoint+'/query',query)['count_total']==1
     assert result['evaluation_time_ms'] == result['statistics']['evaluation_time_ms']
     assert call('POST', endpoint + '/query', {**query, 'temporal': {'valid_at_ms': 200}})['count_total'] == 2
     assert call('POST', endpoint + '/query', {**query, 'length': 0})['count_total'] == 1
@@ -116,6 +114,5 @@ def exercise(call, restart_with, directory, faults):
     if faults:
         for cid in ['temporal'] + ['ttl-' + stage.replace('_', '-') for stage in ['after_append_unknown', 'after_durable', 'crash_after_durable', 'crash_after_visible']]:
             call('DELETE', '/api/v1/index/' + cid, {'operation_id': operation()})
-    call('DELETE','/api/v1/apikey',{'operation_id':operation(),'key_id':'temporal-reader'})
     call('DELETE', '/api/v1/backups/' + archive['backup_id'], {'operation_id': operation()})
     restart_with({})

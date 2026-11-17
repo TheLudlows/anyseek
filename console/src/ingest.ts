@@ -21,7 +21,7 @@ export async function sendIngest(pending: PendingWrites, key: string, progress: 
     }
     const unknownBefore = beginWriteAttempt(pending, batch);
     const response = await fetch("/api/v1/" + collectionPath(pending.collection) + "/ingest", {
-      method: "POST", headers: { apikey: key, "Content-Type": "application/json" }, cache: "no-store",
+      method: "POST", headers: { "X-AnySeek-Tenant": key, "Content-Type": "application/json" }, credentials: "same-origin", cache: "no-store",
       body: '{"records":[' + batch.map((item) => item.body).join(",") + "]}",
     });
     const value = parseApiJson(await response.text());
