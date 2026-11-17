@@ -181,23 +181,24 @@ test("ingest accounts for partial receipts on error status, resends only unresol
   const original = pending.requests.map((r) => r.body);
   globalThis.fetch = async (url, options) => {
     assert.equal(url, "/api/v1/index/docs/ingest");
-    assert.equal((options?.headers as any).apikey, "tenant-secret");
+    assert.equal(new Headers(options?.headers).has("apikey"), false);
+    assert.equal(new Headers(options?.headers).get("X-AnySeek-Tenant"), "workspace_demo");
     const body = String(options?.body);
     assert.ok(!body.includes(config.endpoint)); assert.ok(!body.includes(config.model));
     const value = await receipts(JSON.parse(body).records, ["committed", "outcome_unknown", "not_attempted"]).text();
     return new Response(value, { status: 503 });
   };
-  await assert.rejects(sendWrites(pending, "tenant-secret", "owner"));
+  await assert.rejects(sendWrites(pending, "workspace_demo", "owner"));
   pending = storage.get<PendingWrites>("pendingWrites")!;
   assert.equal(pending.completed, 1); assert.equal(pending.unresolved, true);
   globalThis.fetch = async (_url, options) => receipts(JSON.parse(String(options?.body)).records, ["rejected", "not_attempted"]);
-  await assert.rejects(sendWrites(pending, "tenant-secret", "owner"));
+  await assert.rejects(sendWrites(pending, "workspace_demo", "owner"));
   assert.equal(pending.requests[1].outcome, "unknown"); assert.equal(pending.rejected, false);
   globalThis.fetch = async (_url, options) => {
     assert.equal(options?.body, '{"records":[' + original.slice(1).join(",") + "]}");
     return receipts(JSON.parse(String(options?.body)).records, ["committed", "committed"]);
   };
-  await sendWrites(pending, "tenant-secret", "owner");
+  await sendWrites(pending, "workspace_demo", "owner");
   assert.equal(pending.completed, 3); assert.equal(storage.get("pendingWrites"), null);
 });
 
@@ -270,7 +271,7 @@ test("Markdown chunks carry title context through embedding and canonical ingest
     return receipts(body.records, body.records.map(() => "committed"));
   };
   await generatePendingEmbeddings(pending, "owner", collection);
-  await sendWrites(pending, "tenant-secret", "owner");
+  await sendWrites(pending, "workspace_demo", "owner");
   assert.equal(modelCalls, 1); assert.equal(writes, 1);
   assert.equal(storage.get("pendingWrites"), null);
 });

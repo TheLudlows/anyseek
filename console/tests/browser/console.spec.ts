@@ -5,8 +5,8 @@ import { mkdir } from "node:fs/promises";
 const login = async (page: Page) => {
   await page.goto("/");
   await page
-    .getByLabel("Tenant API Key", { exact: true })
-    .fill(process.env.ANYSEEK_TEST_KEY!);
+    .getByLabel("租户命名空间", { exact: true })
+    .fill(process.env.ANYSEEK_TEST_TENANT!);
   await page.getByRole("button", { name: "连接服务", exact: true }).click();
   await expect(page.getByRole("heading", { name: "所有集合" })).toBeVisible();
 };
@@ -26,6 +26,7 @@ const call = async (path: string, body?: object) => {
     method: body ? "POST" : "GET",
     headers: {
       apikey: process.env.ANYSEEK_TEST_KEY!,
+      "X-AnySeek-Tenant": "console_test",
       "Content-Type": "application/json",
     },
     ...(body ? { body: JSON.stringify(body) } : {}),
@@ -51,9 +52,9 @@ test("API-only kernel, connection, real collection list, responsive navigation a
     fullPage: true,
     animations: "disabled",
   });
-  await page.getByLabel("Tenant API Key", { exact: true }).fill("invalid");
+  await page.getByLabel("租户命名空间", { exact: true }).fill("../invalid");
   await page.getByRole("button", { name: "连接服务", exact: true }).click();
-  await expect(page.getByRole("alert").first()).toBeVisible();
+  expect(await page.getByLabel("租户命名空间", {exact:true}).evaluate(input => (input as HTMLInputElement).validity.patternMismatch)).toBe(true);
   await login(page);
   await expect(page.getByRole("table")).toContainText("knowledge_base");
   await page.screenshot({
@@ -323,9 +324,6 @@ test("real cursor pagination and administrator backup/restore", async ({
   const secondIds = await page.locator(".record-link").allTextContents();
   expect(secondIds.filter((id) => firstIds.includes(id))).toEqual([]);
   await page.getByRole("button", { name: "连接与管理", exact: true }).click();
-  await page
-    .getByLabel("Master API Key", { exact: true })
-    .fill(process.env.ANYSEEK_TEST_MASTER!);
   await page
     .getByRole("button", { name: "创建 / 重试备份", exact: true })
     .click();

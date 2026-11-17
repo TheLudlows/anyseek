@@ -36,7 +36,7 @@ def main():
                    ANYSEEK_S3_BUCKET='reclamation', ANYSEEK_S3_REGION='us-east-1',
                    ANYSEEK_S3_ACCESS_KEY_ID='fixture', ANYSEEK_S3_SECRET_ACCESS_KEY='fixture', ANYSEEK_S3_ALLOW_HTTP='1')
     master = base64.b64encode(hashlib.sha256(b'reclamation-smoke').digest()).decode()
-    tenant = base64.b64encode(hashlib.sha256(b'reclamation-tenant').digest()).decode()
+    tenant = master
     operation = lambda: {'epoch': int(time.time() // 86400), 'nonce': uuid.uuid4().hex}
     with tempfile.TemporaryDirectory(prefix='anyseek-reclamation-') as temporary:
         root = Path(temporary) / 'data'
@@ -50,7 +50,7 @@ def main():
         def call(method, path, body=None, key=tenant, status=200):
             request = urllib.request.Request(base + path, method=method,
                 data=None if body is None else json.dumps(body).encode(),
-                headers={'apikey': key, 'Content-Type': 'application/json'})
+                headers={'apikey': key, 'X-AnySeek-Tenant':'test', 'Content-Type': 'application/json'})
             try:
                 with urllib.request.urlopen(request, timeout=30) as response:
                     code, raw = response.status, response.read()
@@ -85,9 +85,6 @@ def main():
 
         try:
             start()
-            call('POST', '/api/v1/tenants', {'operation_id': operation(), 'tenant_id': 'test'}, master)
-            call('POST', '/api/v1/apikey', {'operation_id': operation(), 'key_id': 'tenant', 'tenant_id': 'test',
-                                          'apikey_base64': tenant}, master)
             create = {'operation_id': operation(), 'collection_id': 'c',
                       'config': {'index_name': 'reclamation', 'schema': [{'field': 'body', 'field_type': 'Text'}]}}
             call('POST', '/api/v1/index', create)
@@ -133,7 +130,7 @@ def main():
             start()
             assert len(generations()) == 1
             if not fixture:
-                assert not list(root.rglob('metadata.sqlite')), 'local reclamation opened a metadata database'
+                assert root.joinpath('metadata.sqlite').is_file(), 'Catalog metadata database is missing'
             assert call('GET', '/api/v1/index/c/doc/r')['document']['body'] == 'new'
             call('DELETE', '/api/v1/index/c', delete)
             assert call('GET', '/api/v1/index/c/doc/r')['document']['body'] == 'new'

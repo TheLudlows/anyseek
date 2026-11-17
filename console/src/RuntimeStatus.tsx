@@ -6,8 +6,8 @@ import { getLocale, t } from "./i18n.ts";
 import { counter, indexState } from "./runtime-status.ts";
 import type { Collection, Json } from "./types.ts";
 
-export function RuntimeStatus({ apiKey, collection, showStatistics = false }: {
-  apiKey: string; collection: Collection; showStatistics?: boolean;
+export function RuntimeStatus({ tenant, collection, showStatistics = false }: {
+  tenant: string; collection: Collection; showStatistics?: boolean;
 }) {
   const [revision, setRevision] = useState(0);
   const [progress, setProgress] = useState<Json>(null);
@@ -19,17 +19,17 @@ export function RuntimeStatus({ apiKey, collection, showStatistics = false }: {
     const controller = new AbortController();
     const path = collectionPath(collection.id);
     setBusy(true); setProgress(null); setInfo(null); setError(""); setStatisticsError("");
-    const status = api(apiKey, path + "/ingest", undefined, "GET", controller.signal)
+    const status = api(tenant, path + "/ingest", undefined, "GET", controller.signal)
       .then(value => { if (!controller.signal.aborted) setProgress(value); })
       .catch(e => { if (!controller.signal.aborted) setError(message(e)); });
     const statistics = showStatistics
-      ? api<Collection>(apiKey, path, undefined, "GET", controller.signal)
+      ? api<Collection>(tenant, path, undefined, "GET", controller.signal)
         .then(value => { if (!controller.signal.aborted) setInfo(value); })
         .catch(e => { if (!controller.signal.aborted) setStatisticsError(message(e)); })
       : Promise.resolve();
     void Promise.all([status, statistics]).finally(() => { if (!controller.signal.aborted) setBusy(false); });
     return () => controller.abort();
-  }, [apiKey, collection.id, revision, showStatistics]);
+  }, [tenant, collection.id, revision, showStatistics]);
   const state = indexState(progress);
   const labels = {
     unknown: t("索引状态未知"), recovery: t("需要恢复"), error: t("索引异常"),

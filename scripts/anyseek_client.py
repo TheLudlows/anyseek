@@ -27,18 +27,29 @@ def operation_id():
 
 
 class anyseekClient:
-    def __init__(self, base):
+    def __init__(self, base, tenant=None):
         self.base = base.rstrip('/')
         self._opener = build_opener(ProxyHandler({}))
         self._default_key = None
+        self.tenant = None
+        if tenant is not None:
+            self.set_tenant(tenant)
+
+    def set_tenant(self, tenant):
+        if not isinstance(tenant, str) or not re.fullmatch(r"[a-z][a-z0-9_-]{0,62}", tenant):
+            raise ValueError("invalid tenant namespace")
+        self.tenant = tenant
 
     def set_default_key(self, key):
+        """Set the configured service credential, never a tenant/user key."""
         self._default_key = key
 
     def request(self, method, path, data=None, key=_DEFAULT, expected=200):
         if key is _DEFAULT:
             key = self._default_key
         headers = {} if key is None else {'apikey': key}
+        if self.tenant is not None:
+            headers['X-AnySeek-Tenant'] = self.tenant
         if data is not None:
             data = json.dumps(data, ensure_ascii=False).encode()
             headers['Content-Type'] = 'application/json'
@@ -64,14 +75,6 @@ class anyseekClient:
 
     def health(self):
         return self.api('GET', '/api/v1/live', key=None)
-
-    def create_tenant(self, request, key=_DEFAULT):
-        """Master: {operation_id, tenant_id}; no rename or deletion."""
-        return self.api('POST', '/api/v1/tenants', request, key)
-
-    def register_key(self, request, key=_DEFAULT):
-        """Master: {operation_id, tenant_id, key_id, apikey_base64}; client supplies key."""
-        return self.api('POST', '/api/v1/apikey', request, key)
 
     def create_collection(self, request, key=_DEFAULT):
         """{operation_id, collection_id, config, embedding_space_id?}."""

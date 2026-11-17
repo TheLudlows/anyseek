@@ -41,9 +41,9 @@ def main():
             port = reserve.getsockname()[1]
         secret = 'issue167-disposable-shutdown'
         master = base64.b64encode(hashlib.sha256(secret.encode()).digest()).decode()
-        key = base64.b64encode(hashlib.sha256(b'issue167-tenant').digest()).decode()
-        env = {**os.environ, 'MASTER_KEY_SECRET': secret, 'ANYSEEK_STORAGE_BACKEND': 'local'}
-        client = anyseekClient(f'http://127.0.0.1:{port}')
+        key = master
+        env = {**os.environ, 'MASTER_KEY_SECRET': secret, 'ANYSEEK_STORAGE_BACKEND': 'local', 'RUST_LOG': 'info'}
+        client = anyseekClient(f'http://127.0.0.1:{port}', 'test')
         client.set_default_key(key)
         process = None
         keepalive = []
@@ -83,9 +83,6 @@ def main():
             try:
                 pause.write_text('pause')
                 start(faults=True)
-                client.create_tenant({'operation_id': operation_id(), 'tenant_id': 'test'}, key=master)
-                client.register_key({'operation_id': operation_id(), 'tenant_id': 'test',
-                                     'key_id': 'tenant', 'apikey_base64': key}, key=master)
                 client.create_collection({'operation_id': operation_id(), 'collection_id': 'shutdown',
                                           'config': {'index_name': 'Shutdown', 'schema': [
                                               {'field': 'body', 'field_type': 'Text', 'store': True}]}})
@@ -100,7 +97,7 @@ def main():
                 hold_keepalive()
                 with socket.create_connection(('127.0.0.1', port), timeout=5) as connection:
                     connection.sendall((f'POST /api/v1/index/shutdown/ingest HTTP/1.1\r\nHost: localhost\r\n'
-                                        f'apikey: {key}\r\nContent-Type: application/json\r\n'
+                                        f'apikey: {key}\r\nX-AnySeek-Tenant: test\r\nContent-Type: application/json\r\n'
                                         f'Content-Length: {len(payload)}\r\nConnection: close\r\n\r\n').encode() + payload)
                     until(lambda: pause.with_suffix('.started').exists(), 'write was not admitted')
                 # The HTTP caller is gone, but its accepted owned write must finish.

@@ -10,7 +10,7 @@ test('empty and whitespace lexical queries reach the API', async ({ page }) => {
     } else await route.fulfill({json: [collection]});
   });
   await page.goto('/');
-  await page.getByLabel('Tenant API Key', {exact:true}).fill('test-key');
+  await page.getByLabel('租户命名空间', {exact:true}).fill('test-key');
   await page.getByRole('button', {name:'连接服务', exact:true}).click();
   await page.getByRole('button', {name:'检索调试', exact:true}).click();
   await expect(page.getByLabel('检索内容')).toHaveAttribute('placeholder', '输入关键词；留空可浏览记录…');

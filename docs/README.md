@@ -4,7 +4,7 @@
 | --- | --- |
 | 最快开始使用 | [仓库 README](../README.md#快速开始) |
 | API 启动、配置与接入 | [服务指南](../anyseek/src/server/README.md)：密钥、S3、字段、写入/重试、查询、备份及配额；[HTTP 请求示例](../anyseek/src/server/test_api.rest) |
-| 控制台使用与部署 | [控制台指南](../console/README.md)：初始化、导入、嵌入服务、API 代理、HTTPS 与运行状态 |
+| 控制台使用与部署 | [控制台指南](../console/README.md)：租户连接、导入、嵌入服务、API 代理、HTTPS 与运行状态 |
 | 功能与限制 | [能力概览](features.md) |
 | 检索配置与排序 | [文本归一化、N-gram、字段长度、稳定排序与 Weighted RRF](search.md) |
 | 架构、故障与关闭 | [当前架构](architecture.md)：模块、可查尾段、Segment 所有权、失败封锁与服务排空 |

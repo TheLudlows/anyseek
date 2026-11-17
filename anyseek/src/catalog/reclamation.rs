@@ -68,9 +68,9 @@ impl Inner {
     fn replace_reclamation(&mut self, mut next: State) -> Result<(), CatalogError> {
         next.epoch_watermark = epoch().max(next.epoch_watermark);
         next.operations.retain(|op| op.request.operation_id.epoch.saturating_add(1) >= next.epoch_watermark);
-        journal::validate_state(&next)?;
+        sqlite::validate_state(&next)?;
         self.healthy = false;
-        self.store.checkpoint(&next)?;
+        self.store.persist(&self.state, &next)?;
         self.state = next;
         self.healthy = true;
         Ok(())

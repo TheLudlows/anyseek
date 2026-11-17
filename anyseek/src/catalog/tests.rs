@@ -12,32 +12,7 @@ pub(super) fn config() -> RecordConfig {
     serde_json::from_value(json!({"index":{"name":"shared","lexical_similarity":"Bm25f","tokenizer":"TantivySimpleV1","stop_words":"None","frequent_words":"None","ngram_indexing":0,"clustering":"None","inference":"None"},"schema":[{"field":"body","field_type":"Text","store":false,"index_lexical":true}],"embedding_space_id":null,"max_records":32,"max_record_bytes":4096,"max_operations":100,"max_journal_bytes":1048576,"max_candidates":100})).unwrap()
 }
 async fn setup(path: &Path) -> Catalog {
-    let catalog = Catalog::create_with_key(path, "master".into(), "a".repeat(64))
-        .await
-        .unwrap();
-    for (tenant, key, digest) in [("alpha", "a", "b"), ("beta", "b", "c")] {
-        catalog
-            .execute(request(
-                &format!("tenant-{tenant}"),
-                CatalogCommand::AddTenant {
-                    tenant_id: tenant.into(),
-                },
-            ))
-            .await
-            .unwrap();
-        catalog
-            .execute(request(
-                &format!("key-{key}"),
-                CatalogCommand::AddKey {
-                    key_id: key.into(),
-                    tenant_id: tenant.into(),
-                    verifier: digest.repeat(64),
-                },
-            ))
-            .await
-            .unwrap();
-    }
-    catalog
+    Catalog::create(path).await.unwrap()
 }
 async fn create(catalog: &Catalog, tenant: &str, id: &str) -> CatalogReceipt {
     let receipt = catalog
@@ -158,19 +133,13 @@ fn tenant_and_collection_names_reject_invalid_path_components() {
     }
 }
 #[tokio::test]
-async fn tenant_keys_same_name_collections_and_scoped_retries_survive_reopen() {
+async fn tenant_namespaces_same_name_collections_and_scoped_retries_survive_reopen() {
     let parent = tempfile::tempdir().unwrap();
     let path = parent.path().join("service");
     let catalog = setup(&path).await;
     let alpha = create(&catalog, "alpha", "documents").await;
     let beta = create(&catalog, "beta", "documents").await;
     assert_ne!(alpha.seq, beta.seq);
-    assert_eq!(catalog.authenticate(&"a".repeat(64)).await.unwrap(), MASTER);
-    assert_eq!(
-        catalog.authenticate(&"b".repeat(64)).await.unwrap(),
-        "alpha"
-    );
-    assert_eq!(catalog.authenticate(&"c".repeat(64)).await.unwrap(), "beta");
     assert_eq!(catalog.listing("alpha").await.unwrap().len(), 1);
     assert_eq!(
         catalog
@@ -212,58 +181,26 @@ async fn tenant_keys_same_name_collections_and_scoped_retries_survive_reopen() {
     assert_eq!(catalog.listing("beta").await.unwrap()[0].tenant_id, "beta");
     let entries = catalog.collections().await.unwrap();
     assert_eq!(entries.iter().filter(|entry| entry.collection_id == "documents").count(), 2);
-    assert!(!path.join("metadata.sqlite").exists());
+    assert!(path.join("metadata.sqlite").exists());
 }
 #[tokio::test]
-async fn revoke_rejects_new_authentication_without_waiting_for_owned_work_or_deleting_data() {
+async fn cancelled_namespace_work_does_not_block_unrelated_collection_control() {
     let parent = tempfile::tempdir().unwrap();
-    let path = parent.path().join("service");
-    let catalog = setup(&path).await;
+    let catalog = setup(&parent.path().join("service")).await;
     create(&catalog, "alpha", "documents").await;
-    catalog
-        .execute(request(
-            "second-key",
-            CatalogCommand::AddKey {
-                key_id: "second".into(),
-                tenant_id: "alpha".into(),
-                verifier: "d".repeat(64),
-            },
-        ))
-        .await
-        .unwrap();
     let (entered, ready) = tokio::sync::oneshot::channel();
     let (release, wait) = tokio::sync::oneshot::channel();
     let owner = catalog.clone();
     let caller = tokio::spawn(async move {
-        owner
-            .authorized("alpha".into(), "documents".into(), |_| async move {
-                entered.send(()).unwrap();
-                wait.await.unwrap();
-                42
-            })
-            .await
+        owner.authorized("alpha".into(), "documents".into(), |_| async move {
+            entered.send(()).unwrap(); wait.await.unwrap(); 42
+        }).await
     });
-    ready.await.unwrap();
-    caller.abort();
-    let _ = caller.await;
-    tokio::time::timeout(
-        Duration::from_secs(2),
-        catalog.execute(request(
-            "revoke",
-            CatalogCommand::RevokeKey { key_id: "a".into() },
-        )),
-    )
-    .await
-    .unwrap()
-    .unwrap();
-    assert!(catalog.authenticate(&"b".repeat(64)).await.is_err());
-    assert_eq!(
-        catalog.authenticate(&"d".repeat(64)).await.unwrap(),
-        "alpha"
-    );
+    ready.await.unwrap(); caller.abort(); let _ = caller.await;
+    tokio::time::timeout(Duration::from_secs(2), create(&catalog, "beta", "independent"))
+        .await.unwrap();
     assert_eq!(catalog.listing("alpha").await.unwrap().len(), 1);
     release.send(()).unwrap();
-    // Lifecycle work remains owned after the HTTP waiter is cancelled.
     let _barrier = catalog.execution.freeze().await;
 }
 #[tokio::test]
@@ -337,10 +274,7 @@ async fn invalid_configuration_is_rejected_without_poisoning_catalog() {
                 .is_err()
         );
     }
-    assert_eq!(
-        catalog.authenticate(&"b".repeat(64)).await.unwrap(),
-        "alpha"
-    );
+    assert!(catalog.listing("alpha").await.unwrap().is_empty());
     drop(catalog);
     assert!(
         Catalog::open(&path)
@@ -353,7 +287,7 @@ async fn invalid_configuration_is_rejected_without_poisoning_catalog() {
     );
 }
 #[tokio::test]
-async fn complete_service_restore_retains_tenants_but_disables_historical_keys() {
+async fn complete_service_restore_retains_namespace_ownership_and_fences_historical_operations() {
     let parent = tempfile::tempdir().unwrap();
     let root = parent.path().join("service");
     let catalog = setup(&root).await;
@@ -374,32 +308,18 @@ async fn complete_service_restore_retains_tenants_but_disables_historical_keys()
         .await
         .unwrap();
     let restored = parent.path().join("restored");
-    let receipt = Catalog::restore_service(archive, restored.clone(), "restore".into(), "e".repeat(64))
+    let receipt = Catalog::restore_service(archive, restored.clone(), "restore".into())
         .await.unwrap();
     assert_eq!(receipt.source_catalog_hash.as_ref(), backup.objects.get(""));
     assert!(!restored.join("authority-at-backup").exists());
     let catalog = Catalog::open(&restored).await.unwrap();
     catalog.require_service_completion(&restored).await.unwrap();
-    assert_eq!(catalog.tenants().await.unwrap(), vec!["alpha", "beta"]);
-    assert!(catalog.authenticate(&"b".repeat(64)).await.is_err());
-    assert!(catalog.authenticate(&"c".repeat(64)).await.is_err());
-    assert_eq!(catalog.authenticate(&"e".repeat(64)).await.unwrap(), MASTER);
-    catalog
-        .execute(request(
-            "fresh-key",
-            CatalogCommand::AddKey {
-                tenant_id: "alpha".into(),
-                key_id: "fresh".into(),
-                verifier: "f".repeat(64),
-            },
-        ))
-        .await
-        .unwrap();
-    assert_eq!(
-        catalog.authenticate(&"f".repeat(64)).await.unwrap(),
-        "alpha"
-    );
     assert_eq!(catalog.listing("alpha").await.unwrap().len(), 1);
+    assert!(catalog.listing("beta").await.unwrap().is_empty());
+    assert!(matches!(catalog.execute(request("create-documents", CatalogCommand::PrepareCollection {
+        tenant_id: "alpha".into(), collection_id: "documents".into(), config: config(),
+    })).await, Err(CatalogError::Conflict(_))));
+
 }
 #[tokio::test]
 async fn receipt_pruning_retains_tenant_ownership_and_rejects_expired_retry() {
@@ -430,44 +350,36 @@ async fn panicking_owned_collection_work_fences_new_operations() {
         .await;
     assert!(matches!(outcome, Err(CatalogError::OutcomeUnknown(_))));
     assert_eq!(
-        catalog.authenticate(&"b".repeat(64)).await.unwrap_err(),
+        catalog.listing("alpha").await.unwrap_err(),
         CatalogError::RecoveryRequired
     );
 }
 #[tokio::test]
-#[ignore = "subprocess worker invoked by journal_process_exit_preserves_key_and_receipt_atomicity"]
-async fn journal_crash_worker() {
+#[ignore = "subprocess worker invoked by sqlite_process_exit_preserves_collection_and_receipt_atomicity"]
+async fn sqlite_crash_worker() {
     let root = std::path::PathBuf::from(std::env::var_os("ANYSEEK_CATALOG_CHILD_PATH").unwrap());
     let catalog = Catalog::open(&root).await.unwrap();
-    let stage = std::env::var("ANYSEEK_CATALOG_CHILD_STAGE").unwrap();
-    unsafe {
-        std::env::set_var(
-            if stage.starts_with("journal:") { "ANYSEEK_JOURNAL_CRASH" } else { "ANYSEEK_CATALOG_CRASH" },
-            stage.strip_prefix("journal:").unwrap_or(&stage),
-        );
-    }
+    unsafe { std::env::set_var("ANYSEEK_CATALOG_CRASH", std::env::var("ANYSEEK_CATALOG_CHILD_STAGE").unwrap()); }
     let _ = catalog
         .execute(request(
-            "crash-revoke",
-            CatalogCommand::RevokeKey { key_id: "a".into() },
+            "crash-delete",
+            CatalogCommand::DeleteCollection { tenant_id: "alpha".into(), collection_id: "documents".into() },
         ))
         .await;
     panic!("boundary not reached");
 }
 #[tokio::test]
-async fn journal_process_exit_preserves_key_and_receipt_atomicity() {
-    for stage in [
-        "before_commit", "after_commit", "journal:log_written", "journal:log_synced",
-        "journal:first_witness_torn", "journal:first_witness_written", "journal:first_witness_synced",
-        "journal:second_witness_torn", "journal:second_witness_written", "journal:second_witness_synced",
-    ] {
+async fn sqlite_process_exit_preserves_collection_and_receipt_atomicity() {
+    for stage in ["before_commit", "after_commit"] {
         let parent = tempfile::tempdir().unwrap();
         let root = parent.path().join("service");
-        drop(setup(&root).await);
+        let original = setup(&root).await;
+        create(&original, "alpha", "documents").await;
+        drop(original);
         let output = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
-                "catalog::tests::journal_crash_worker",
+                "catalog::tests::sqlite_crash_worker",
                 "--ignored",
             ])
             .env("ANYSEEK_CATALOG_CHILD_PATH", &root)
@@ -482,19 +394,17 @@ async fn journal_process_exit_preserves_key_and_receipt_atomicity() {
         );
         let catalog = Catalog::open(&root).await.unwrap();
         let receipt = catalog
-            .operation(&OperationId::new("crash-revoke".into()))
+            .operation_for("alpha", &OperationId::new("crash-delete".into()))
             .await
             .unwrap();
         assert_eq!(
-            catalog.authenticate(&"b".repeat(64)).await.is_ok(),
+            !catalog.listing("alpha").await.unwrap().is_empty(),
             receipt.is_none()
         );
-        if stage == "after_commit" || stage == "journal:second_witness_synced" {
+        if stage == "after_commit" {
             assert!(receipt.is_some());
         }
-        if matches!(stage, "before_commit" | "journal:log_written" | "journal:log_synced" | "journal:first_witness_torn") {
-            assert!(receipt.is_none());
-        }
+        if stage == "before_commit" { assert!(receipt.is_none()); }
     }
 }
 

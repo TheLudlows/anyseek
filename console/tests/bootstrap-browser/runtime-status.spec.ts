@@ -10,12 +10,12 @@ for (const language of ['zh', 'en'] as const) {
     await page.route('**/api/v1/**', route => {
       const path = new URL(route.request().url()).pathname;
       if (failed && path.endsWith('/ingest')) return route.fulfill({status:503,json:{code:'busy',message:'status temporarily unavailable'}});
-      const value = path.endsWith('/apikey') ? [collection] : path.endsWith('/ingest') ? progress : collection;
+      const value = path.endsWith('/index') ? [collection] : path.endsWith('/ingest') ? progress : collection;
       return route.fulfill({contentType:'application/json',body:JSON.stringify(value).replaceAll('"COMMIT"','9007199254740993').replaceAll('"LEXICAL"','9007199254740992')});
     });
     await page.goto('/');
     await page.getByLabel('语言 / Language').selectOption(language);
-    await page.getByLabel('Tenant API Key',{exact:true}).fill('test-key');
+    await page.getByLabel(language === 'en' ? 'Tenant namespace' : '租户命名空间',{exact:true}).fill('test-key');
     await page.getByRole('button',{name:language==='zh'?'连接服务':'Connect',exact:true}).click();
     await page.getByRole('button',{name:language==='zh'?'结构':'Schema',exact:true}).click();
     const dialog=page.getByRole('dialog');
@@ -64,13 +64,13 @@ test('ingest acknowledgement replaces the old snapshot without claiming new writ
       }
       return route.fulfill({json:{committed_seq:committed,lexical_seq:0,vector_seq:0,index_error:null,recovery_required:false}});
     }
-    return route.fulfill({json:path.endsWith('/iterator')?{records:[],next:null}:path.endsWith('/apikey')?[collection]:collection});
+    return route.fulfill({json:path.endsWith('/iterator')?{records:[],next:null}:path.endsWith('/index')?[collection]:collection});
   });
   await page.goto('/');
-  await page.getByLabel('Tenant API Key',{exact:true}).fill('test-key');
+  await page.getByLabel('租户命名空间',{exact:true}).fill('test-key');
   await page.getByRole('button',{name:'连接服务',exact:true}).click();
   await page.evaluate(pending=>sessionStorage.setItem('anyseek.pendingWrites',JSON.stringify(pending)),{
-    owner:createHash('sha256').update('test-key').digest('hex'),collection:'docs',delivery:'ingest',
+    owner:createHash('sha256').update('http://127.0.0.1:4174\0test-key').digest('hex'),collection:'docs',delivery:'ingest',
     completed:0,unresolved:true,requests:[{body:original,outcome:'unknown'}],
   });
   await page.getByRole('navigation',{name:'主导航'}).getByRole('button',{name:'数据',exact:true}).click();

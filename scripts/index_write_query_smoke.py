@@ -14,14 +14,15 @@ import uuid
 from anyseek_client import anyseekClient, check, operation_id, WriteError
 
 
-def exercise(base, key, request_file):
-    client = anyseekClient(base)
+def exercise(base, key, request_file, tenant="test"):
+    client = anyseekClient(base, tenant)
     client.set_default_key(key)
     client.health()
     request_file = Path(request_file)
     if request_file.exists():
         saved = json.loads(request_file.read_text())
         check(saved['base'] == base, 'saved requests belong to another service URL')
+        check(saved['tenant_id'] == tenant, 'saved requests belong to another tenant namespace')
     else:
         collection = 'c'+uuid.uuid4().hex
         documents = [
@@ -31,6 +32,7 @@ def exercise(base, key, request_file):
         ]
         saved = {
             'base': base,
+            'tenant_id': tenant,
             'create': {'operation_id': operation_id(), 'collection_id': collection,
                        'config': {'index_name': 'write_query_smoke', 'schema': [
                            {'field': 'title', 'field_type': 'Text'},
@@ -69,11 +71,12 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--port', type=int, default=8080)
     parser.add_argument('--requests', type=Path, required=True, help='save/replay original requests; no API key saved')
+    parser.add_argument('--tenant', default=os.environ.get('ANYSEEK_TENANT', 'test'), help='explicit tenant namespace')
     args = parser.parse_args()
     key = os.environ.get('ANYSEEK_API_KEY')
     if not key:
         parser.error('set ANYSEEK_API_KEY to the startup master API key')
-    exercise(f'http://127.0.0.1:{args.port}', key, args.requests)
+    exercise(f'http://127.0.0.1:{args.port}', key, args.requests, args.tenant)
 
 
 if __name__ == '__main__':

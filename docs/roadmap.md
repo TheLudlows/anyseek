@@ -2,43 +2,41 @@
 
 核对基线：2026-11-17 主干 `bb53b80`；本轮分支的 Catalog 持久化调整与验证见下表。本文集中维护剩余工作和证据入口；当前能力见[功能与边界](features.md)，实现见[架构](architecture.md)，接口与资源限制见[服务指南](../anyseek/src/server/README.md)。合入不等于发布或完成性能验收。
 
-## SQLite 依赖收敛（2026-11-17）
+## Catalog 与服务认证职责收敛（2026-11-17）
 
-基于 master `bb53b80`。按“减少依赖、保留 SQLite”实施：Catalog 改用原生
-`PartitionJournal`，本地服务运行不再需要元数据库；仅 S3 Record 协调继续使用 SQLite。
-`rusqlite`/bundled SQLite 仍参与默认编译。
+基于 master `bb53b80`。集合、备份归属和管理回执继续使用 SQLite；删除租户注册及
+租户 Key 签发、持久化、撤销和认证。用户认证及权限由 Origence／网关完成，AnySeek
+仅校验进程配置派生的服务凭据，保留可信租户命名空间。
 
-- 删除 Catalog 的 SQL 存储模块、六张 `catalog_*` 表及其索引。Tenant、Key verifier、
-  Collection、备份归属和管理回执复用现有原生 WAL/checkpoint、单 owner 锁与发布证书。
-  普通命令和回执在同一条日志提交；回执整理、集合回收和空间压力通过 checkpoint 持久化。
-- Catalog 6 使用新建根目录；旧 SQLite Catalog 5 不自动迁移、转换或覆盖。损坏/缺失日志
-  不初始化为空库，不确定发布继续隔离并在重开后确认；完整服务恢复不复活历史普通 Key。
-- 新增七项原生 Catalog 回归，替换五项 SQL 存储测试。故障退出验证扩展至十个提交边界，
-  包括日志和 witness 更新；S3 数据库持有写锁时 Catalog 仍能提交，且不创建目录表。
-- 对象身份、水位、构建令牌和发布结果使用独立存储契约；authority 首次创建与已有库打开
-  分离，后台严格校验既有库。上传预留复用同事务观察，备份预留/pin 一次完成，IO 后仍复核
-  退休状态；head CAS、回执和 GC 保护保留。S3 schema 3 与备份快照 2 不变。
-- HTTP 回收烟测改查实际代次目录和返回结果，不再查询 Catalog 内部 SQL 表；本地服务
-  烟测显式检查启动、重启与完整快照/恢复过程未产生 `metadata.sqlite`。
+- Catalog 7 只保留 `catalog_meta`、`catalog_collections`、`catalog_backups`、
+  `catalog_operations` 四张表。集合变更与管理回执在同一短事务提交；备份归属、代次回收、
+  历史管理 ID 隔离和完整服务恢复保留。不维护 Catalog 原生日志，也不保存 master 验证材料。
+- 数据接口要求 `apikey` 服务凭据和 `X-AnySeek-Tenant`；租户不需要注册。删除
+  `/api/v1/tenants`、`/api/v1/apikey`，集合列表统一为 `GET /api/v1/index`。管理回执查询
+  有租户头时按命名空间查找，缺省用于服务级操作。错误凭据、缺失或重复租户头在 body 前拒绝。
+- 控制台只选择租户，通过上游登录会话访问网关；服务凭据只在网关或本地 Vite 代理进程中。
+  待确认操作的连接指纹按来源和命名空间隔离，删除旧 Key 初始化流程，保留记录重试数据。
+- S3 authority schema 3 与备份快照 2 保持原协议，和 Catalog 共用 `metadata.sqlite`。
+  存储契约、严格已有库打开、减少重复上传预留/登记 SQL 及 IO 后退休复核继续保留。
+- 仅支持新建 Catalog 7 根目录，旧 SQLite Catalog 5、原生 Catalog 6 和旧备份不自动迁移、
+  转换或覆盖。master 不写库，目标恢复服务使用自己的进程配置。
 
-Linux / Rust 1.99.1 本地验证：
+Linux / Rust 1.99.1 验证：
 
 | 检查 | 结果 |
 | --- | --- |
-| 默认 core 精确清单 | PASS：212 项，含七项原生 Catalog 与三个 authority 连接/预留回归 |
-| 无默认特性 Catalog 测试 | PASS：20 项，另有 1 项 subprocess worker 显式 ignored，不单独计通过 |
-| 无默认特性服务测试 | PASS：35 项 |
-| 本地完整 HTTP（fault-injection） | PASS：含 Catalog 初始化、提交故障、集合与完整服务备份/恢复，全程无元数据库 |
-| 集合回收 HTTP（local / S3 fixture） | PASS：备份保护、同名代次隔离、物理清理、迟到对象删除与重启重试 |
-| S3 fixture 全套（fault-injection） | PASS：8 个阶段，含六组冷缓存语义及检查点/备份/恢复；不是云端 S3 验收 |
-| `cargo check --locked --no-default-features --all-targets` | PASS |
-| `cargo clippy --locked --lib --bins` | PASS，保留既有告警 |
-| 默认及 fault-injection 服务构建、默认生产二进制启动 | PASS |
-| 三个静态边界检查、S3 入口 UT、新模块 rustfmt | PASS |
+| 默认 core 精确清单 | PASS：212 项 |
+| 无默认特性 Catalog / 服务层 | PASS：20 / 35 项；另有 1 项子进程 worker ignored，由父测试调用 |
+| 无默认特性 all-targets check、生产 lib/bin Clippy | PASS，Clippy 保留既有告警 |
+| 本地 HTTP 全部语义与显式故障 | PASS：启动、base、temporal、history、ingest、indexer、服务认证和命名空间 |
+| 本地及 S3 fixture 集合回收 | PASS：备份保护、代次隔离、物理回收、迟到对象和重启 |
+| POSIX SIGTERM 关闭 | PASS：断连后 owned 写入、消费者、root owner 和原 ID 重开；显式 info 日志核对完成 |
+| S3 fixture 全套（fault-injection） | PASS：8 阶段，含六组冷缓存语义与检查点/备份/恢复 |
+| 控制台 | PASS：38 单元测试、13 模拟网关浏览器测试、10 真实服务浏览器测试和生产构建 |
+| 静态边界与 S3 runner UT | PASS：三个边界检查、语义套件入口 UT、Python 编译和新增 SQL 模块 rustfmt |
 
-未执行 Windows、生产容量、真实 S3 endpoint 或断电验收。原有全目标 Clippy 在未修改的
-生命周期测试两处 `async_yields_async` 上失败，不计为通过；不以 SQL 次数下降推定生产
-吞吐或 P99 改善。
+未执行 Windows、真实云端 S3、生产容量或断电验收，不据此推定吞吐或 P99 改善。
+原有全目标 Clippy 的生命周期测试 `async_yields_async` 问题不计为通过。
 
 ## 检索配置与诊断切片（2026-11-17）
 
@@ -140,6 +138,6 @@ W5 对照：Windows/default debug、local 新库、相同请求与临时数据�
 
 完整逻辑 State 仍驻内存；10 万档是准入上界，不是任意数据形态的容量承诺。有限准入和显式缓冲预算不是全进程 RSS 或全磁盘硬上限。默认服务共用 SQLite authority 及其校验对象缓存；多 authority、物化索引和独立备份仍需整体评估。
 
-回执默认最早两日后具备回收资格，另受重试窗口、认证 history floor、epoch、读者与备份保护约束，不是固定清理期限。不能通过删除窗口内回执解除容量限制。S3 模式必须同时保留 Catalog 原生日志、metadata.sqlite、SQLite WAL 与 owner 锁文件，不能只凭 bucket 重建权威；SQLite 首版不提供跨主机 HA 或权威卷丢失零 RPO。
+回执默认最早两日后具备回收资格，另受重试窗口、认证 history floor、epoch、读者与备份保护约束，不是固定清理期限。不能通过删除窗口内回执解除容量限制。S3 模式必须同时保留 metadata.sqlite、SQLite WAL 与 owner 锁文件，不能只凭 bucket 重建权威；SQLite 首版不提供跨主机 HA 或权威卷丢失零 RPO。
 
 超大 collection 分片、自动 split/merge、跨主机 HA、直接远端 Directory、预取与自动调度按实际容量需求后置。#107 的 Catalog/Generation 研究 PR #110 已关闭，只有实际负载证明确有瓶颈时再启动测量。不预设统一内部水位、UUID 替换 Operation ID 或重建执行框架。来源、关系和记忆策略在应用层；模型推理、解析切块、Embedding/Reflect、SQL/JOIN、完整图语言和旧格式迁移不进入本轮。

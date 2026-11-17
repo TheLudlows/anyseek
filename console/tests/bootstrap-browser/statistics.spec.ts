@@ -8,12 +8,12 @@ for (const language of ['zh', 'en'] as const) {
       physical_versions:20,checkpoint_bytes:1536,visible_seq:'SEQUENCE',evaluation_time_ms:0,
     },limits:{max_records:10000,max_operations:20000,max_journal_bytes:1048576,max_candidates:100}};
     await page.route('**/api/v1/**', route => {
-      const value = route.request().url().endsWith('/apikey') ? [collection] : route.request().url().endsWith('/ingest') ? {committed_seq:0,lexical_seq:0,vector_seq:0,index_error:null,recovery_required:false} : collection;
+      const value = route.request().url().endsWith('/index') ? [collection] : route.request().url().endsWith('/ingest') ? {committed_seq:0,lexical_seq:0,vector_seq:0,index_error:null,recovery_required:false} : collection;
       return route.fulfill({contentType:'application/json',body:JSON.stringify(value).replaceAll('"SEQUENCE"','9007199254740993')});
     });
     await page.goto('/');
     await page.getByLabel('语言 / Language').selectOption(language);
-    await page.getByLabel('Tenant API Key',{exact:true}).fill('test-key');
+    await page.getByLabel(language === 'en' ? 'Tenant namespace' : '租户命名空间',{exact:true}).fill('test-key');
     await page.getByRole('button',{name:language==='zh'?'连接服务':'Connect',exact:true}).click();
     await page.getByRole('button',{name:language==='zh'?'结构':'Schema',exact:true}).click();
     const dialog=page.getByRole('dialog');
@@ -34,9 +34,9 @@ for (const language of ['zh', 'en'] as const) {
 
 test('missing statistics are not reported as zero or unlimited',async({page})=>{
   const collection={id:'empty',name:'empty',schema:[],statistics:{active_records:0},limits:null};
-  await page.route('**/api/v1/**',route=>route.fulfill({json:route.request().url().endsWith('/apikey')?[collection]:collection}));
+  await page.route('**/api/v1/**',route=>route.fulfill({json:route.request().url().endsWith('/index')?[collection]:collection}));
   await page.goto('/');
-  await page.getByLabel('Tenant API Key',{exact:true}).fill('test-key');
+  await page.getByLabel('租户命名空间',{exact:true}).fill('test-key');
   await page.getByRole('button',{name:'连接服务',exact:true}).click();
   await page.getByRole('button',{name:'结构',exact:true}).click();
   await page.getByRole('dialog').locator('summary').click();

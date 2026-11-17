@@ -38,7 +38,7 @@ def main():
         sock=socket.socket();sock.bind(('127.0.0.1',0));port=sock.getsockname()[1];sock.close()
         base=f'http://127.0.0.1:{port}'
         master=base64.b64encode(hashlib.sha256(b'issue57-service-test').digest()).decode()
-        tenant_key=base64.b64encode(hashlib.sha256(b'issue98-tenant-test').digest()).decode()
+        service_key=master
         default_key=object()
         log=open(pathlib.Path(tmp)/'server.log','w+')
         process=None
@@ -57,19 +57,17 @@ def main():
                 try:
                     urllib.request.urlopen(base+'/api/v1/live',timeout=1).read()
                     if os.environ.get('ANYSEEK_STORAGE_BACKEND', 'local') == 'local':
-                        assert not list(pathlib.Path(tmp).rglob('metadata.sqlite')), 'local service opened a metadata database'
+                        assert root.joinpath('metadata.sqlite').is_file(), 'Catalog metadata database is missing'
                     elapsed=time.monotonic()-started
                     if elapsed>5:print(f'READY after {elapsed:.3f}s',flush=True)
                     return
                 except (OSError,urllib.error.URLError):time.sleep(.05)
             log.seek(0);raise AssertionError('server startup timeout: '+log.read()[-8192:])
-        def call(method,path,body=None,key=default_key,status=200):
-            if key is default_key:
-                management=(path=='/api/v1/tenants' or path in ['/api/v1/service-backups','/api/v1/service-restores'] or path.startswith('/api/v1/catalog/') or (path=='/api/v1/apikey' and method in ['POST','DELETE']) or path.startswith('/api/v1/backups'))
-                key=master if management else tenant_key
-            if method=='POST' and path=='/api/v1/apikey' and body is not None:
-                body={'tenant_id':'test',**body}
-            req=urllib.request.Request(base+path,data=None if body is None else json.dumps(body).encode(),headers={'apikey':key,'Content-Type':'application/json'},method=method)
+        def call(method,path,body=None,key=default_key,status=200,tenant='test'):
+            if key is default_key: key=master
+            headers={'apikey':key,'Content-Type':'application/json'}
+            if tenant is not None: headers['X-AnySeek-Tenant']=tenant
+            req=urllib.request.Request(base+path,data=None if body is None else json.dumps(body).encode(),headers=headers,method=method)
             control_retry=status==200 and path in ['/api/v1/service-backups','/api/v1/service-restores']
             deadline=time.monotonic()+300
             while True:
@@ -105,7 +103,7 @@ def main():
             import importlib
             exercise=importlib.import_module('record_'+name+'_smoke').exercise
             if name == 'ingest':
-                exercise(call,restart_with,root.parent,args.faults,base,tenant_key)
+                exercise(call,restart_with,root.parent,args.faults,base,service_key)
             else:
                 exercise(call,restart_with,root.parent,args.faults)
         try:
@@ -117,27 +115,30 @@ def main():
                     finally:
                         if child.poll() is None:child.kill();child.wait(timeout=20)
             start()
-            call('POST','/api/v1/tenants',{'operation_id':operation(),'tenant_id':'test'})
-            call('POST','/api/v1/apikey',{'operation_id':operation(),'key_id':'tenant-default','tenant_id':'test','apikey_base64':tenant_key})
             if args.section == 'startup':
-                call('GET','/api/v1/apikey')
+                call('GET','/api/v1/index')
                 restart()
-                call('GET','/api/v1/apikey')
+                call('GET','/api/v1/index')
                 log.flush(); log.seek(0); startup_log = log.read()
-                for sensitive in ['issue57-service-test', master, tenant_key, 'Master API key:']:
+                for sensitive in ['issue57-service-test', master, service_key, 'Master API key:']:
                     assert sensitive not in startup_log, 'startup log exposed credentials'
-                print('PASS startup rejects missing/blank secrets, explicit derivation, silent credentials, tenant key after restart', flush=True)
+                print('PASS startup rejects missing/blank secrets, explicit derivation, silent credentials, service credential and tenant namespace after restart', flush=True)
                 return
             if args.section and args.section!='base':
                 section(args.section)
                 return
-            # A second owner and a changed bootstrap secret must never rebuild this root.
+            # A second owner must never rebuild this root, regardless of its configured secret.
             for secret in ['issue57-service-test','wrong-master']:
                 child=subprocess.Popen([binary,f'index_path={root}',f'local_port={port+1}','local_ip=127.0.0.1'],env={**os.environ,'MASTER_KEY_SECRET':secret},stdout=log,stderr=log)
                 assert child.wait(timeout=30)!=0
 
-            keys={name:base64.b64encode(os.urandom(32)).decode() for name in ['a','b']}
-            for name,key in keys.items():call('POST','/api/v1/apikey',{'operation_id':operation(),'key_id':name,'apikey_base64':key})
+            keys={name:master for name in ['a','b']}
+            invalid_service_key=base64.b64encode(os.urandom(32)).decode()
+            for endpoint in ['/api/v1/tenants','/api/v1/apikey']:
+                for method in ['GET','POST','DELETE']: call(method,endpoint,{},status=404)
+            call('GET','/api/v1/index',key=invalid_service_key,status=401)
+            call('GET','/api/v1/index',tenant=None,status=400)
+            call('GET','/api/v1/index',tenant='../test',status=400)
             create={'operation_id':operation(),'collection_id':'shared','config':{'index_name':'Shared records','schema':[{'field':'body','field_type':'Text','store':True},{'field':'title','field_type':'Text','store':True},{'field':'date','field_type':'Timestamp','store':True,'filterable':True}]}}
             assert call('POST','/api/v1/index',create,key=keys['a'])['collection_id']=='shared'
             assert call('POST','/api/v1/index',create,key=keys['a'])['collection_id']=='shared'
@@ -171,17 +172,16 @@ def main():
             # Lose the entire HTTP response. Retry only the original identity;
             # a status miss is deliberately not interpreted as known failure.
             uncertain={**writes[0],'operation_id':operation(),'record_id':'response-loss','expected':'Absent'}
-            raw=json.dumps({"writes":[uncertain]}).encode();client=socket.create_connection(('127.0.0.1',port));client.sendall(f'POST /api/v1/index/shared/batch HTTP/1.1\r\nHost: localhost\r\napikey: {keys["a"]}\r\nContent-Type: application/json\r\nContent-Length: {len(raw)}\r\nConnection: close\r\n\r\n'.encode()+raw);client.close()
+            raw=json.dumps({"writes":[uncertain]}).encode();client=socket.create_connection(('127.0.0.1',port));client.sendall(f'POST /api/v1/index/shared/batch HTTP/1.1\r\nHost: localhost\r\napikey: {keys["a"]}\r\nX-AnySeek-Tenant: test\r\nContent-Type: application/json\r\nContent-Length: {len(raw)}\r\nConnection: close\r\n\r\n'.encode()+raw);client.close()
             confirmed=write_one(call, '/api/v1/index/shared', uncertain, key=keys['b'])['receipt'];assert confirmed['version']==1
             call('PATCH','/api/v1/index/shared',key=keys['b'])
             restart()
             assert call('GET','/api/v1/index/shared/doc/r1',key=keys['b'])['document']['unindexed']=={'original':[1,2,3]}
             oid=replacement['operation_id'];assert call('GET',f'/api/v1/index/shared/operation/{oid["epoch"]}/{oid["nonce"]}',key=keys['b'])['receipt']==receipt
-            rev={'operation_id':operation(),'key_id':'a'};call('DELETE','/api/v1/apikey',rev)
-            call('GET','/api/v1/apikey',key=keys['a'],status=403)
-            call('GET',f'/api/v1/index/shared/operation/{oid["epoch"]}/{oid["nonce"]}',key=keys['a'],status=403)
+            call('GET',f'/api/v1/index/shared/operation/{oid["epoch"]}/{oid["nonce"]}',key=invalid_service_key,status=401)
             assert call('GET','/api/v1/index/shared/doc/r0',key=keys['b'])['version']==2
-            restart();call('GET','/api/v1/index/shared',key=keys['a'],status=403)
+            restart()
+            call('GET','/api/v1/index/shared',key=invalid_service_key,status=401)
             assert call('GET','/api/v1/index/shared',key=keys['b'])['statistics']['active_records']==4
             deletion={**replacement,'operation_id':operation(),'expected':{'Match':2},'document':None}
             assert write_one(call, '/api/v1/index/shared', deletion, key=keys['b'])['receipt']['version']==3
@@ -423,7 +423,7 @@ def main():
             for _ in range(3):call('POST','/api/v1/index/after-source-delete/backup',{'operation_id':operation()},status=400)
             assert {p.name for p in root.iterdir()}==before
             # Retirement is durable and never lets an original backup ID capture a new point.
-            call('GET','/api/v1/backups',key=keys['b'],status=403)
+            call('GET','/api/v1/backups',key=invalid_service_key,status=401)
             listed=call('GET','/api/v1/backups');assert any(x['backup_id']==backup['backup_id'] for x in listed)
             call('DELETE','/api/v1/backups/'+backup['backup_id'].upper(),{'operation_id':operation()},status=400)
             call('POST','/api/v1/restore',{'operation_id':operation(),'collection_id':'case-restore','backup_id':backup['backup_id'].upper()},status=400)
@@ -436,16 +436,12 @@ def main():
             assert any(x['backup_id']==backup['backup_id'] and x['retired'] and not x['on_disk'] for x in call('GET','/api/v1/backups'))
             call('POST','/api/v1/index/after-source-delete/backup',{'operation_id':operation()})
             print('PASS Record lifecycle: stable-view iterator, non-atomic conditional batch/delete plans, backup retries, complete restore, Tenant-scoped restore, same-name recreation and stale delete retry across restart')
-            print('PASS real HTTP: default Record/catalog, same-Tenant keys, conditional writes, retry/response loss, checkpoint, crash restart, revoked operation lookup, full query parameters, vectors')
-            # Whole service cut, including revoked authority and independent backups.
-            ckey=base64.b64encode(os.urandom(32)).decode()
-            add_key={'operation_id':operation(),'key_id':'snapshot-user','apikey_base64':ckey}
-            call('POST','/api/v1/apikey',add_key)
+            print('PASS real HTTP: default Record/catalog, service authentication and tenant namespaces, conditional writes, retry/response loss, checkpoint, crash restart, authenticated operation lookup, full query parameters, vectors')
+            # Whole service cut includes namespace ownership and independent backups.
             whole_request={'operation_id':operation()}
-            call('POST','/api/v1/service-backups',whole_request,key=ckey,status=403)
+            call('POST','/api/v1/service-backups',whole_request,key=invalid_service_key,status=401)
             whole=call('POST','/api/v1/service-backups',whole_request)
             assert whole['snapshot']['collection_backups']
-            call('DELETE','/api/v1/apikey',{'operation_id':operation(),'key_id':'snapshot-user'})
             assert call('POST','/api/v1/service-backups',whole_request)==whole
             service_restore={'operation_id':operation(),'backup_id':whole['backup_id']}
             restored=call('POST','/api/v1/service-restores',service_restore)
@@ -453,7 +449,10 @@ def main():
             assert not restored['started']
             original_base=base
             other_port=port+2
-            restore_env = {}
+            original_service_key=service_key
+            original_master=master
+            restored_master=base64.b64encode(hashlib.sha256(b'restored-service-test').digest()).decode()
+            restore_env = {'MASTER_KEY_SECRET':'restored-service-test'}
             if os.environ.get('ANYSEEK_STORAGE_BACKEND') == 's3':
                 restore_env['ANYSEEK_S3_BUCKET'] = os.environ['ANYSEEK_S3_TEST_RESTORE_BUCKET']
             restored_process=subprocess.Popen([binary,f"index_path={restored['target_root']}",f'local_port={other_port}','local_ip=127.0.0.1'],env={**os.environ,'MASTER_KEY_SECRET':'issue57-service-test',**restore_env},stdout=log,stderr=log)
@@ -466,26 +465,25 @@ def main():
                     except (OSError,urllib.error.URLError):time.sleep(.05)
                 else:
                     log.seek(0);raise AssertionError('restored service startup timeout: '+log.read()[-8192:])
-                call('GET','/api/v1/index/after-source-delete',key=ckey,status=403)
-                call('GET','/api/v1/index/after-source-delete',key=keys['b'],status=403)
-                original_tenant_key=tenant_key
-                restored_key=base64.b64encode(os.urandom(32)).decode()
-                call('POST','/api/v1/apikey',{'operation_id':operation(),'key_id':'restored-access','tenant_id':'test','apikey_base64':restored_key})
-                tenant_key=restored_key
+                call('GET','/api/v1/index/after-source-delete',key=invalid_service_key,status=401)
+                call('GET','/api/v1/index/after-source-delete',key=keys['b'],status=401)
+                original_service_key=service_key
+                master=restored_master
+                service_key=master
                 call('GET','/api/v1/index/after-source-delete')
                 call('GET','/api/v1/index/shared',status=403)
                 assert call('GET','/api/v1/index/plain-metadata/doc/chunk')['document']==metadata['document']
-                call('POST','/api/v1/apikey',add_key,status=409)
-                old=add_key['operation_id'];call('GET',f"/api/v1/catalog/operation/{old['epoch']}/{old['nonce']}",status=409)
+                call('DELETE','/api/v1/backups/'+backup['backup_id'],retire,status=409)
+                old=retire['operation_id'];call('GET',f"/api/v1/catalog/operation/{old['epoch']}/{old['nonce']}",status=409,tenant=None)
                 assert write_one(call, '/api/v1/index/after-source-delete', writes[0])['receipt']['version']==1
                 # A copied independent collection snapshot is usable after root recovery.
                 copied=next(iter(whole['snapshot']['collection_backups']))
                 call('POST','/api/v1/restore',{'operation_id':operation(),'collection_id':'from-copied-backup','backup_id':copied})
-                restored_base=base;base=original_base
+                restored_base=base;base=original_base;master=original_master
                 assert call('POST','/api/v1/service-restores',service_restore)==restored
-                base=restored_base
+                base=restored_base;master=restored_master
             finally:
-                restored_process.kill();restored_process.wait(timeout=20);base=original_base;tenant_key=original_tenant_key
+                restored_process.kill();restored_process.wait(timeout=20);base=original_base;service_key=original_service_key;master=original_master
             assert call('POST','/api/v1/service-restores',service_restore)==restored # Target was legitimately modified.
             if args.faults:
                 for kind in ([] if args.cold_restarts else ['backup','restore']):
@@ -512,12 +510,12 @@ def main():
                     start();result=call('POST',endpoint,body)
                     assert call('POST',endpoint,body)==result
             if os.environ.get('ANYSEEK_STORAGE_BACKEND', 'local') == 'local':
-                assert not list(pathlib.Path(tmp).rglob('metadata.sqlite')), 'local snapshot/restore opened a metadata database'
-            print('PASS complete service snapshot: common catalog cut, all retained collections/live backups, new-root recovery, no revived keys, historical control rejection, data retry preserved')
+                assert all(path.joinpath('metadata.sqlite').is_file() for path in [root,pathlib.Path(restored['target_root'])]), 'Catalog metadata was not preserved by restore'
+            print('PASS complete service snapshot: common catalog cut, all retained collections/live backups, new-root recovery, process-configured service credentials, historical control rejection, data retry preserved')
             from index_write_query_smoke import exercise as client_exercise
             client_requests=root.parent/'client-requests.json'
-            client_exercise(base,tenant_key,client_requests)
-            client_exercise(base,tenant_key,client_requests)
+            client_exercise(base,service_key,client_requests)
+            client_exercise(base,service_key,client_requests)
             call('DELETE','/api/v1/backups/'+early['backup_id'],{'operation_id':operation()})
             if args.section=='base':return
             section('ingest')
