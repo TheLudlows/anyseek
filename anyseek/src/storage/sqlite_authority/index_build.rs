@@ -2,18 +2,6 @@
 //! live here; Record state and derived index contents remain immutable objects.
 use super::*;
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct IndexBuild {
-    pub partition_id: String,
-    pub build_epoch: u64,
-    pub owner_epoch: u64,
-    pub cut_seq: u64,
-    pub base_manifest: Option<ObjectRef>,
-    pub base_indexed_seq: u64,
-    pub cut_wal_tip: Option<ObjectRef>,
-    pub deadline_ms: i64,
-}
 fn pin_prefix(partition: &str) -> String {
     // Length-delimited identity avoids collisions between arbitrary partition IDs.
     format!("indexer:{}:{partition}:", partition.len())

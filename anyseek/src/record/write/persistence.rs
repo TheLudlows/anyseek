@@ -48,15 +48,15 @@ impl RecordPartition {
 pub(in crate::record) struct RemoteUpload {
     store: crate::storage::s3_compatible::S3CompatibleStore,
     pub(in crate::record) path: std::path::PathBuf,
-    head: crate::storage::sqlite_authority::PartitionHead,
+    head: crate::storage::authority::PartitionHead,
     max_bytes: usize,
     #[cfg(test)]
     root: std::path::PathBuf,
 }
 pub(in crate::record) struct UploadedBatch {
-    head: crate::storage::sqlite_authority::PartitionHead,
+    head: crate::storage::authority::PartitionHead,
     block: crate::storage::object_log::ObjectLogBlock,
-    reference: crate::storage::sqlite_authority::ObjectRef,
+    reference: crate::storage::authority::ObjectRef,
 }
 impl RemoteUpload {
     async fn upload(self, prepared: &PreparedBatch<'_>) -> Result<UploadedBatch, RecordError> {
@@ -114,7 +114,7 @@ impl RemoteUpload {
         ));
         // Independent short SQLite transactions avoid holding the shared authority
         // connection while awaiting network I/O. Retired objects cannot resurrect.
-        let mut authority = crate::storage::sqlite_authority::SqliteAuthority::open(
+        let mut authority = crate::storage::sqlite_authority::SqliteAuthority::open_existing(
             &self.path,
             std::time::Duration::from_secs(5),
         )
@@ -168,8 +168,8 @@ impl UploadedBatch {
             )
             .map_err(|error| RecordError::OutcomeUnknown(error.to_string()))?;
         match result {
-            crate::storage::sqlite_authority::PublishOutcome::Published(head)
-            | crate::storage::sqlite_authority::PublishOutcome::AlreadyPublished(head)
+            crate::storage::authority::PublishOutcome::Published(head)
+            | crate::storage::authority::PublishOutcome::AlreadyPublished(head)
                 if head.committed_seq == self.block.last_seq =>
             {
                 Ok(())

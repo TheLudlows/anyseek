@@ -2,6 +2,42 @@
 
 核对基线：2026-11-07 主干 `a810b19`（#204）；本轮写入简化与验证见下表。本文集中维护剩余工作和证据入口；当前能力见[功能与边界](features.md)，实现见[架构](architecture.md)，接口与资源限制见[服务指南](../anyseek/src/server/README.md)。合入不等于发布或完成性能验收。
 
+## SQLite 依赖收敛（2026-11-17）
+
+基于 master `bb53b80`。按“减少依赖、保留 SQLite”的范围实施：
+SQLite 继续保存 Catalog 与 S3 的协调元数据，本地 Record 使用原生 WAL，检索仍由原生索引执行。
+
+- 对象身份、分区水位、构建令牌和发布结果移到独立存储契约，Record/对象存储/缓存不再
+  从 SQLite 实现模块导入这些值类型。数据库驱动和现有构建入口保留。
+- 新建与打开已有 authority 分离。既有连接不重复执行建表事务，后台连接要求数据库、
+  schema 和 WAL 模式已经有效；缺失、不兼容或不完整的元数据直接报错。
+- 预留返回同事务观察到的对象状态，登记合并摘要/长度/状态查询；备份预留与 pin 一次完成。
+  对象 IO 后的退休复核、head CAS、回执与 GC 保护保持原语义。
+- 新增三个连接/预留回归进入 Linux/Windows core 清单。完整 core 验证中发现一项旧本地
+  缓存合并测试在后台持有者退出前重开文件，已按关闭合同显式等待退出后再验证恢复。
+- S3 故障烟测按已有的共享 WAL 前缀合同核对 uncertain/pending 项，逐条验证重启后的
+  原始回执、顺序与正文；仅未提交的 crash 请求后缀保持不存在。
+
+Linux / Rust 1.99.1 本地验证：
+
+| 检查 | 结果 |
+| --- | --- |
+| 默认 core 精确清单 | PASS：210 项，包含新增三个连接/预留回归 |
+| 无默认特性存储、Catalog、远端检查点与组写定向测试 | PASS：103 项；另有 3 项显式 ignored，不计通过 |
+| 无默认特性服务测试 | PASS：35 项 |
+| S3 fixture 全套（fault-injection） | PASS：8 个阶段，对象合同、六组无缓存语义、检查点/备份/恢复；不是云端 S3 验收 |
+| 默认三个连接/预留测试最终复核 | PASS：包含已有写锁、缺失/不完整/不兼容元数据、错误 journal mode 与并发退休 |
+| `cargo check --locked --no-default-features --all-targets` | PASS |
+| `cargo clippy --locked --lib --bins` | PASS，保留既有告警 |
+| 默认/fault-injection 服务构建、三个静态边界检查及 S3 入口 UT | PASS |
+
+全目标 Clippy 在未修改的 [生命周期测试](../anyseek/src/resources/lifecycle.rs) 两处
+`async_yields_async` 上失败，未计为通过。新文件使用 Rust 1.99.1 rustfmt 检查；
+未执行 Windows、生产容量、真实 S3 endpoint 或断电验收。
+
+这里减少的是重复 SQL、写锁和实现耦合；没有新增替代数据库或修改持久格式，
+不以 SQL 次数下降推定生产吞吐或 P99 改善。
+
 ## 检索配置与诊断切片（2026-11-17）
 
 基于 master `6614bbf`，为 Origence 接入补齐 analysis 配置摘要与查询诊断。

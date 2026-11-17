@@ -4,7 +4,7 @@
 //! bytes before returning an ObjectRef. Callers may register that reference with
 //! SQLite only after this method succeeds. This module deliberately exposes no
 //! delete method; deletion requires the authority/backup/pin reachability protocol.
-use super::sqlite_authority::ObjectRef;
+use super::authority::ObjectRef;
 use object_store::{
     aws::AmazonS3Builder,
     path::Path as ObjectPath,
@@ -225,15 +225,17 @@ impl S3CompatibleStore {
         created_at_ms: i64,
     ) -> Result<ObjectRef, UploadRegisterError> {
         let budget = self.upload_budget(key, bytes.len())?;
-        self.register_budgeted(authority, key, bytes, created_at_ms, budget).await
+        let planned = ObjectRef {key:key.to_owned(),sha256:Sha256::digest(bytes).into(),length:bytes.len() as u64};
+        let durable = authority.reserve_upload(&planned,created_at_ms).map_err(UploadRegisterError::Metadata)?;
+        self.register_reserved(authority, planned, bytes, created_at_ms, budget, durable).await
     }
-    async fn register_budgeted(&self, authority: &mut SqliteAuthority, key: &str, bytes: &[u8], created_at_ms: i64, budget: UploadBudget) -> Result<ObjectRef, UploadRegisterError> {
-        let planned=ObjectRef{key:key.to_owned(),sha256:Sha256::digest(bytes).into(),length:bytes.len() as u64};
-        authority.reserve_upload(&planned,created_at_ms).map_err(UploadRegisterError::Metadata)?;
+    // The caller has atomically reserved inventory (and any backup pin) already.
+    // Always revalidate retirement after object I/O, including durable reuse.
+    async fn register_reserved(&self, authority: &mut SqliteAuthority, planned: ObjectRef, bytes: &[u8], created_at_ms: i64, budget: UploadBudget, durable: bool) -> Result<ObjectRef, UploadRegisterError> {
         // Reuse registered immutable bytes without issuing another PUT. Read the
         // backend, never the cache: publication retains its corruption detection
         // point and a missing object must not be silently repaired here.
-        if authority.is_durable_object(&planned).map_err(UploadRegisterError::Metadata)? {
+        if durable {
             let UploadBudget { _io, _payload, readback } = budget;
             let existing = self.download_verified(&planned, readback).await
                 .map_err(UploadRegisterError::ObjectStore)?;
@@ -245,7 +247,7 @@ impl S3CompatibleStore {
             authority.register_durable_object(&planned,created_at_ms).map_err(UploadRegisterError::Metadata)?;
             return Ok(planned);
         }
-        let reference = self.put_budgeted(key, bytes, budget).await.map_err(UploadRegisterError::ObjectStore)?;
+        let reference = self.put_budgeted(&planned.key, bytes, budget).await.map_err(UploadRegisterError::ObjectStore)?;
         authority.register_durable_object(&reference, created_at_ms)
             .map_err(UploadRegisterError::Metadata)?;
         Ok(reference)
@@ -255,10 +257,10 @@ impl S3CompatibleStore {
         ->Result<ObjectRef,UploadRegisterError> {
         let budget = self.upload_budget(key, bytes.len())?;
         let planned=ObjectRef{key:key.to_owned(),sha256:Sha256::digest(bytes).into(),length:bytes.len() as u64};
-        authority.reserve_backup_upload(&planned,at,Some(backup_id)).map_err(UploadRegisterError::Metadata)?;
+        let durable = authority.reserve_backup_upload(&planned,at,Some(backup_id)).map_err(UploadRegisterError::Metadata)?;
         #[cfg(feature="fault-injection")]
         if std::env::var("ANYSEEK_REMOTE_BACKUP_FAULT").as_deref()==Ok("after_inventory") {std::process::exit(92);}
-        self.register_budgeted(authority,key,bytes,at,budget).await
+        self.register_reserved(authority,planned,bytes,at,budget,durable).await
     }
 
     /// Fetch and verify an object against an authority-published reference.
@@ -333,7 +335,7 @@ impl S3CompatibleStore {
         owner_epoch: u64,
         checkpoint_bytes: &[u8],
         created_at_ms: i64,
-    ) -> Result<super::sqlite_authority::PartitionHead, UploadRegisterError> {
+    ) -> Result<super::authority::PartitionHead, UploadRegisterError> {
         let head = authority.read_head(partition_id)
             .map_err(UploadRegisterError::Metadata)?
             .ok_or_else(|| UploadRegisterError::Metadata(rusqlite::Error::QueryReturnedNoRows))?;
@@ -650,7 +652,7 @@ mod tests {
     async fn real_s3_compatible_contract() {
         use std::{env, panic::AssertUnwindSafe, time::{Duration, SystemTime}};
         use futures::FutureExt;
-        use super::super::{object_log, sqlite_authority::PublishOutcome};
+        use super::super::{object_log, authority::PublishOutcome};
         let required = |name: &str| env::var(name).unwrap_or_else(|_| panic!("set {name} for this ignored integration test"));
         let endpoint=required("ANYSEEK_S3_TEST_ENDPOINT");
         let bucket=required("ANYSEEK_S3_TEST_BUCKET");
@@ -795,7 +797,7 @@ mod tests {
         let head = authority.read_head("p0").unwrap().unwrap();
         assert_eq!(head.committed_seq, 0, "upload/registration must not commit the record");
         let outcome = authority.publish_commit("p0", head.head_version, 1, "op-1", [4;32], 1, reference, None).unwrap();
-        assert!(matches!(outcome, super::super::sqlite_authority::PublishOutcome::Published(_)));
+        assert!(matches!(outcome, super::super::authority::PublishOutcome::Published(_)));
         assert_eq!(authority.read_head("p0").unwrap().unwrap().committed_seq, 1);
         drop(authority);
         let _=std::fs::remove_file(&path);
@@ -834,7 +836,7 @@ mod tests {
         let store = S3CompatibleStore::from_store(Arc::new(InMemory::new()), 1024 * 1024);
         let reference = store.put_and_register(&mut source, "p0/log/1", b"committed operation", 10).await.unwrap();
         let result = source.publish_commit("p0", head.head_version, 5, "op-1", [7;32], 1, reference.clone(), None).unwrap();
-        assert!(matches!(result, super::super::sqlite_authority::PublishOutcome::Published(_)));
+        assert!(matches!(result, super::super::authority::PublishOutcome::Published(_)));
         let bundle = store.create_backup_bundle(&mut source,None, "backup-001", &[reference], 20, 1024 * 1024).await.unwrap();
 
         let mut target = SqliteAuthority::open(&target_path, Duration::from_secs(1)).unwrap();
