@@ -2,7 +2,7 @@
 
 本文集中说明本地 WAL/Segment 与 SQLite/S3 的持久化、checkpoint、备份和回收协议。请求语义见[Record 契约](record-model.md)，配置见[服务指南](../anyseek/src/server/README.md)，实现与剩余验收见[路线](roadmap.md)。
 
-Tenant/Catalog 与 S3 authority 共用 SQLite。Catalog 格式为 5，authority schema 为 3，authority 备份快照为 2；旧 Catalog 日志及旧数据库格式不提供迁移。
+Catalog 复用原生 `PartitionJournal`，格式为 6；仅 S3 authority 使用 SQLite（schema 3，备份快照 2）。本地服务不创建或读取 `metadata.sqlite`。旧 Catalog 日志、SQLite Catalog 5 和旧数据库格式不提供迁移，已有根目录不自动转换或覆盖；本版使用新建服务根目录。
 
 ## 本地 Segment 与共同视图
 
@@ -20,19 +20,21 @@ Tenant/Catalog 与 S3 authority 共用 SQLite。Catalog 格式为 5，authority 
 
 ## 权威与数据归属
 
-在 S3 模式下，SQLite 是唯一可变协调权威，保存 head/owner epoch、提交和索引水位、不可变引用、有限期幂等协调、对象依赖、pin、退休状态和备份/恢复协调记录。正文、原始向量、索引和 WAL 内容均在对象存储中。本地日志、payload 和索引是可以重建的缓存。
+在 S3 模式下，Record 分区的可变提交协调权威是 SQLite，保存 head/owner epoch、提交和索引水位、不可变引用、有限期幂等协调、对象依赖、pin、退休状态和备份/恢复协调记录。正文、原始向量、索引和 WAL 内容均在对象存储中。分区的本地 Record 日志、payload 和索引是可以重建的缓存；Catalog 原生日志是持久权威，不属于缓存。
 
-服务使用根目录下的 `metadata.sqlite`，同时保存 Catalog 管理元数据与 S3 Record 协调状态；Catalog 不再维护独立持久化日志。Catalog 更新与管理回执在同一短事务提交，不复制正文、向量或完整 Record State。SQLite 使用 WAL 与 `synchronous=FULL`，不在事务内执行对象上传。Record 对象后端按分区持有稳定的本地 owner 文件锁；同一分区不能由两个 Record 实例同时持有，不同分区可以共享该数据库。集合备份只导出该分区的当前对象闭包和协调记录；恢复绑定按分区隔离，GC 只退休和删除本分区前缀的对象，全库可达性仍保护其他分区及 pin。集合本地目录直接派生为 `collections/{tenant_id}/{collection_id}/{generation}`，不保存名称到生成目录的映射。对象前缀为 `anyseek/{tenant_id}/{collection_id}/`，下分 `wal/records/lexical/vector/manifests`；内部代次编码在对象 ID 中。相同名称重建使用新代次，旧任务、回执与 GC 继续绑定原代次；客户端不传代次。没有自动 namespace 或 Bucket 归属标记，不同独立服务必须使用不同 bucket。
+Catalog 在服务根目录下复用现有 `PartitionJournal` 的稳定 owner 锁、三 witness WAL 与代次发布协议，不新增另一套持久化引擎。普通管理命令与回执存为同一日志条目，内存状态在确认提交后安装；回执过期整理、代次回收及日志空间不足时生成原生 checkpoint。checkpoint 只包含有界 Catalog 状态（编码后最多 16 MiB），单代日志上限 32 MiB，发布期间可能并存两代，旧代清理失败时保留待重试；不复制 Record 正文、向量或索引。发布不确定时保持 fenced，重开后按认证日志确认回执，损坏不回退或初始化为空库。完整服务快照通过原有屏障固定 Catalog 与各集合，恢复仍禁用历史普通 Key。
+
+S3 模式另在根目录下创建 `metadata.sqlite`，仅保存 S3 Record 协调状态，不建立 `catalog_*` 表。Catalog 命令不获取 SQLite 写锁；两者不提供跨持久介质事务，集合生命周期继续依靠意图、原有执行屏障与恢复协议。SQLite 使用 WAL 与 `synchronous=FULL`，不在事务内执行对象上传。Record 对象后端按分区持有稳定的本地 owner 文件锁；同一分区不能由两个 Record 实例同时持有，不同分区可以共享该数据库。集合备份只导出该分区的当前对象闭包和协调记录；恢复绑定按分区隔离，GC 只退休和删除本分区前缀的对象，全库可达性仍保护其他分区及 pin。集合本地目录直接派生为 `collections/{tenant_id}/{collection_id}/{generation}`，不保存名称到生成目录的映射。对象前缀为 `anyseek/{tenant_id}/{collection_id}/`，下分 `wal/records/lexical/vector/manifests`；内部代次编码在对象 ID 中。相同名称重建使用新代次，旧任务、回执与 GC 继续绑定原代次；客户端不传代次。没有自动 namespace 或 Bucket 归属标记，不同独立服务必须使用不同 bucket。
 
 普通写入先登记上传身份，再完成不可变 PUT、读回长度/字节/SHA-256 校验，最后由 SQLite 事务条件发布 head 与回执，再应用本地权威状态并同步或排队派生索引。`/ingest` 不等待两个索引消费者追平。对象缺失或校验失败不会回退为旧缓存成功。
 
 ## SQLite 使用边界与连接
 
-SQLite 继续承担上述目录和协调职责，默认构建与持久格式保持现有合同。
+SQLite 只承担 S3 协调职责；仍在默认构建中保留 `rusqlite`/bundled SQLite，不宣称消除了编译依赖。Catalog 持久格式按上文切换到原生日志。
 对象身份、分区 head、构建令牌与发布结果定义在 `storage/authority.rs`，不绑定数据库驱动。
 
 - 新协调库由初始化入口创建。已有库只校验 schema 3 及必要表/列；缺表或不兼容版本拒绝打开，
-  不自动补表。Catalog-only 的共享数据库可在首次启用 S3 协调时建立 authority 表。
+  不自动补表。首次启用 S3 时才建立协调库。
 - 上传/后台构建使用严格的 `open_existing`，不会创建缺失的 metadata 文件或执行建表事务。
   已有 WAL 模式不重复设置，连接仍使用 `synchronous=FULL` 和原 busy timeout。
 - 上传预留在同一事务中返回已观察的 durable 状态，避免再次查询相同对象；登记时一次读取摘要、
@@ -40,7 +42,7 @@ SQLite 继续承担上述目录和协调职责，默认构建与持久格式保�
 - 预留观察只决定是否复用既有不可变对象。IO 后仍在短事务内复核状态；并发退休不能被旧观察
   撤销。head CAS、回执、pin 和 GC 的提交与保护规则保留，不跨网络持有数据库事务。
 
-这些变更减少重复 SQL、建表写锁和类型耦合，不构成生产吞吐或 P99 改善结论。
+Catalog 的运行持久化不再依赖数据库，S3 路径另减少重复 SQL、建表写锁和类型耦合；不据此推定生产吞吐或 P99 改善。
 
 ## 远端检查点与 Segment 发布
 

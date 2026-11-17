@@ -210,25 +210,9 @@ async fn tenant_keys_same_name_collections_and_scoped_retries_survive_reopen() {
     let catalog = Catalog::open(&path).await.unwrap();
     assert_eq!(catalog.execute(retry).await.unwrap(), alpha);
     assert_eq!(catalog.listing("beta").await.unwrap()[0].tenant_id, "beta");
-    let db = rusqlite::Connection::open(path.join("metadata.sqlite")).unwrap();
-    assert_eq!(
-        db.query_row::<u64, _, _>(
-            "SELECT count(*) FROM catalog_collections WHERE collection_id='documents'",
-            [],
-            |r| r.get(0)
-        )
-        .unwrap(),
-        2
-    );
-    assert_eq!(
-        db.query_row::<u64, _, _>(
-            "SELECT count(*) FROM sqlite_master WHERE name='catalog_grants'",
-            [],
-            |r| r.get(0)
-        )
-        .unwrap(),
-        0
-    );
+    let entries = catalog.collections().await.unwrap();
+    assert_eq!(entries.iter().filter(|entry| entry.collection_id == "documents").count(), 2);
+    assert!(!path.join("metadata.sqlite").exists());
 }
 #[tokio::test]
 async fn revoke_rejects_new_authentication_without_waiting_for_owned_work_or_deleting_data() {
@@ -451,14 +435,15 @@ async fn panicking_owned_collection_work_fences_new_operations() {
     );
 }
 #[tokio::test]
-#[ignore = "subprocess worker invoked by sqlite_process_exit_preserves_key_and_receipt_atomicity"]
-async fn sqlite_crash_worker() {
+#[ignore = "subprocess worker invoked by journal_process_exit_preserves_key_and_receipt_atomicity"]
+async fn journal_crash_worker() {
     let root = std::path::PathBuf::from(std::env::var_os("ANYSEEK_CATALOG_CHILD_PATH").unwrap());
     let catalog = Catalog::open(&root).await.unwrap();
+    let stage = std::env::var("ANYSEEK_CATALOG_CHILD_STAGE").unwrap();
     unsafe {
         std::env::set_var(
-            "ANYSEEK_CATALOG_CRASH",
-            std::env::var("ANYSEEK_CATALOG_CHILD_STAGE").unwrap(),
+            if stage.starts_with("journal:") { "ANYSEEK_JOURNAL_CRASH" } else { "ANYSEEK_CATALOG_CRASH" },
+            stage.strip_prefix("journal:").unwrap_or(&stage),
         );
     }
     let _ = catalog
@@ -470,15 +455,19 @@ async fn sqlite_crash_worker() {
     panic!("boundary not reached");
 }
 #[tokio::test]
-async fn sqlite_process_exit_preserves_key_and_receipt_atomicity() {
-    for stage in ["before_commit", "after_commit"] {
+async fn journal_process_exit_preserves_key_and_receipt_atomicity() {
+    for stage in [
+        "before_commit", "after_commit", "journal:log_written", "journal:log_synced",
+        "journal:first_witness_torn", "journal:first_witness_written", "journal:first_witness_synced",
+        "journal:second_witness_torn", "journal:second_witness_written", "journal:second_witness_synced",
+    ] {
         let parent = tempfile::tempdir().unwrap();
         let root = parent.path().join("service");
         drop(setup(&root).await);
         let output = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
-                "catalog::tests::sqlite_crash_worker",
+                "catalog::tests::journal_crash_worker",
                 "--ignored",
             ])
             .env("ANYSEEK_CATALOG_CHILD_PATH", &root)
@@ -500,8 +489,11 @@ async fn sqlite_process_exit_preserves_key_and_receipt_atomicity() {
             catalog.authenticate(&"b".repeat(64)).await.is_ok(),
             receipt.is_none()
         );
-        if stage == "after_commit" {
+        if stage == "after_commit" || stage == "journal:second_witness_synced" {
             assert!(receipt.is_some());
+        }
+        if matches!(stage, "before_commit" | "journal:log_written" | "journal:log_synced" | "journal:first_witness_torn") {
+            assert!(receipt.is_none());
         }
     }
 }

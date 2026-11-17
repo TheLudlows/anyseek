@@ -11,7 +11,7 @@ AnySeek 是通过 HTTP API 和独立 Web 控制台使用的 Rust 存储与检索
 | 层 | 代码 | 职责 |
 | --- | --- | --- |
 | HTTP 服务 | `server/record_service.rs`、`server/server.rs`、`server/main.rs` | 认证、准入、请求与响应、启动恢复和关闭 |
-| 控制权威 | `catalog.rs`、`catalog/sqlite.rs`、`catalog/service_snapshot.rs` | Tenant、Key verifier、集合代次、管理回执和服务快照 |
+| 控制权威 | `catalog.rs`、`catalog/journal.rs`、`catalog/service_snapshot.rs` | Tenant、Key verifier、集合代次、管理回执和服务快照 |
 | 数据权威 | `record.rs`、`record/committed.rs`、`record/write.rs` | 原文/原始向量、稳定身份、版本、墓碑、幂等和持久批提交 |
 | 协调元数据契约 | `storage/authority.rs` | 共享对象身份、分区水位、构建令牌及发布结果；不含 SQL 或数据库连接 |
 | 持久化 | `storage/journal.rs`、`storage/partition.rs`、`storage/sqlite_authority.rs`、`storage/s3_compatible.rs` | 本地 WAL，或 SQLite 协调权威与不可变对象；owner lock 与恢复 |
@@ -23,7 +23,8 @@ AnySeek 是通过 HTTP API 和独立 Web 控制台使用的 Rust 存储与检索
 
 `server/api_types.rs` 与 `server/api_schema.rs` 定义 HTTP DTO 和 OpenAPI。Rust 服务不嵌入前端资源；默认构建包含 HTTP 与本地/S3 存储。
 
-SQLite 保留为服务目录与 S3 的持久协调实现，本地 Record 仍由原生 WAL/证书恢复，
+Catalog 与本地 Record 复用原生 WAL/证书恢复；本地服务运行不需要元数据库。
+SQLite 只保留为 S3 的持久协调实现，
 全文与向量查询在 Record/派生索引上执行。共享协调类型由存储契约持有，Record、对象日志、
 对象存储与校验缓存按契约引用这些值，SQL 连接与事务由 SQLite 适配器管理。
 上传和后台构建打开已有元数据库时只校验既有格式和表结构；初始化仅发生在首次建立协调库时。

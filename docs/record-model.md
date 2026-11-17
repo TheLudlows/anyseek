@@ -48,7 +48,7 @@ HTTP `/batch` 只负责请求校验和逐项响应编码；核心 `write_indepen
 
 ## 授权与恢复
 
-Catalog 在 SQLite 保存 Tenant、租户 Key、Collection、备份归属与管理回执。普通 Key 只认证 Tenant；Tenant 内集合访问范围一致。master 管理 Tenant/凭据，不读取集合数据。没有 User、Project、Collection Grant 或角色模型。
+Catalog 用原生 WAL/checkpoint 保存 Tenant、租户 Key、Collection、备份归属与管理回执；命令与回执作为同一日志条目提交，本地模式不创建元数据库。普通 Key 只认证 Tenant；Tenant 内集合访问范围一致。master 管理 Tenant/凭据，不读取集合数据。没有 User、Project、Collection Grant 或角色模型。
 
 凭据撤销只影响后续认证；已认证工作和输出允许完成。保留集合生命周期与完整服务快照的执行屏障，以及数据有效性的输出检查。租户和集合名称采用统一正则，服务端不信任客户端声明的 Tenant。
 

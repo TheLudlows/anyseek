@@ -56,6 +56,8 @@ def main():
                     log.seek(0);raise AssertionError(log.read())
                 try:
                     urllib.request.urlopen(base+'/api/v1/live',timeout=1).read()
+                    if os.environ.get('ANYSEEK_STORAGE_BACKEND', 'local') == 'local':
+                        assert not list(pathlib.Path(tmp).rglob('metadata.sqlite')), 'local service opened a metadata database'
                     elapsed=time.monotonic()-started
                     if elapsed>5:print(f'READY after {elapsed:.3f}s',flush=True)
                     return
@@ -509,6 +511,8 @@ def main():
                     assert process.wait(timeout=30)==87
                     start();result=call('POST',endpoint,body)
                     assert call('POST',endpoint,body)==result
+            if os.environ.get('ANYSEEK_STORAGE_BACKEND', 'local') == 'local':
+                assert not list(pathlib.Path(tmp).rglob('metadata.sqlite')), 'local snapshot/restore opened a metadata database'
             print('PASS complete service snapshot: common catalog cut, all retained collections/live backups, new-root recovery, no revived keys, historical control rejection, data retry preserved')
             from index_write_query_smoke import exercise as client_exercise
             client_requests=root.parent/'client-requests.json'

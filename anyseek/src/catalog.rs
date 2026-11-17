@@ -1,4 +1,4 @@
-//! SQLite tenant identity and collection lifecycle authority. Data directories
+//! Native-journal tenant identity and collection lifecycle authority. Data directories
 //! are independent of identities; revoking a key never deletes a collection.
 //! The HTTP service integration is tracked in docs/record-model.md.
 use crate::{
@@ -20,7 +20,7 @@ use tokio::sync::{Mutex, Semaphore};
 mod execution;
 mod reclamation;
 mod service_snapshot;
-mod sqlite;
+mod journal;
 #[cfg(test)]
 mod tests;
 pub use service_snapshot::ServiceSnapshot;
@@ -314,7 +314,7 @@ struct Inner {
     state: State,
     healthy: bool,
     failed: Arc<AtomicBool>,
-    store: sqlite::Store,
+    store: journal::Store,
     #[cfg(test)]
     operation_limit: usize,
     #[cfg(test)]
@@ -329,9 +329,9 @@ impl Inner {
         next.epoch_watermark = now.max(next.epoch_watermark);
         next.operations
             .retain(|op| op.request.operation_id.epoch.saturating_add(1) >= next.epoch_watermark);
-        sqlite::validate_state(&next)?;
+        journal::validate_state(&next)?;
         self.healthy = false;
-        match self.store.persist(&self.state, &next) {
+        match self.store.checkpoint(&next) {
             Ok(()) => {
                 self.state = next;
                 self.healthy = true;
@@ -569,11 +569,12 @@ fn apply(state: &mut State, event: &Applied) -> Result<(), CatalogError> {
     Ok(())
 }
 impl Catalog {
-    /// Resume a durably prepared, unserved initial database.
+    /// Resume a durably prepared, unserved initial catalog.
     pub async fn resume_initialization(path: &Path) -> Result<(), CatalogError> {
-        sqlite::resume(path)
+        crate::resources::file_transaction(|| journal::resume(path))
+            .await.map_err(|_| CatalogError::Busy)?
     }
-    /// Create an empty SQLite catalog in a new root.
+    /// Create an empty native-journal catalog in a new root.
     pub async fn create(path: &Path) -> Result<Self, CatalogError> {
         Self::create_state(path, State::default()).await
     }
@@ -603,23 +604,25 @@ impl Catalog {
     async fn create_state(path: &Path, state: State) -> Result<Self, CatalogError> {
         let path = path.to_owned();
         crate::resources::spawn(async move {
-            let store = sqlite::create(&path, &state)?;
+            let store = crate::resources::file_transaction(|| journal::create(&path, &state))
+                .await.map_err(|_| CatalogError::Busy)??;
             Ok(Self::from_parts(state, store))
         })
         .await
         .map_err(|e| CatalogError::OutcomeUnknown(e.to_string()))?
     }
-    /// Open a valid existing SQLite catalog; never replace missing metadata.
+    /// Open an existing native-journal catalog; never replace missing metadata.
     pub async fn open(path: &Path) -> Result<Self, CatalogError> {
         let path = path.to_owned();
         crate::resources::spawn(async move {
-            let (store, state) = sqlite::Store::open(&path)?;
+            let (store, state) = crate::resources::file_transaction(|| journal::Store::open(&path))
+                .await.map_err(|_| CatalogError::Busy)??;
             Ok(Self::from_parts(state, store))
         })
         .await
         .map_err(storage)?
     }
-    fn from_parts(state: State, store: sqlite::Store) -> Self {
+    fn from_parts(state: State, store: journal::Store) -> Self {
         Self {
             inner: Arc::new(Mutex::new(Inner {
                 state,
@@ -685,7 +688,8 @@ impl Catalog {
             #[cfg(not(test))]
             let limit = MAX_OPERATIONS;
             if inner.state.operations.len() >= limit {
-                inner.compact(now)?;
+                crate::resources::file_transaction(|| inner.compact(now))
+                    .await.map_err(|_| CatalogError::Busy)??;
                 if inner.state.operations.len() >= limit {
                     return Err(CatalogError::Rejected(
                         "catalog operation budget exhausted".into(),
@@ -704,12 +708,12 @@ impl Catalog {
             };
             let mut next = inner.state.clone();
             apply(&mut next, &event)?;
-            sqlite::validate_state(&next)?;
-            inner.healthy = false;
-            {
+            journal::validate_state(&next)?;
+            crate::resources::file_transaction(|| {
+                inner.healthy = false;
                 let Inner { store, state, .. } = &mut *inner;
-                store.persist(state, &next)?;
-            }
+                store.append(state, &event)
+            }).await.map_err(|_| CatalogError::Busy)??;
             #[cfg(test)]
             if inner.fail_after_durable {
                 return Err(CatalogError::OutcomeUnknown(
@@ -906,7 +910,8 @@ impl Catalog {
             return Err(CatalogError::RecoveryRequired);
         }
         let now = epoch().max(inner.state.epoch_watermark);
-        inner.compact(now)
+        crate::resources::file_transaction(|| inner.compact(now))
+            .await.map_err(|_| CatalogError::Busy)?
     }
     /// Look up a platform management receipt.
     pub async fn operation(
