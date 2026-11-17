@@ -132,27 +132,36 @@ fn tenant_and_collection_names_reject_invalid_path_components() {
         assert!(validate_name(value).is_err(), "{value}");
     }
 }
+#[test]
+fn tenant_uuid_names_remain_safe_path_components() {
+    for value in ["12345678-1234-4234-8234-123456789012", "0name", "tenant"] {
+        validate_tenant(value).unwrap();
+    }
+    for value in ["", "../x", "A", "@master", "a/b", "a\\b", "中文", &"a".repeat(64)] {
+        assert!(validate_tenant(value).is_err(), "{value}");
+    }
+}
 #[tokio::test]
 async fn tenant_namespaces_same_name_collections_and_scoped_retries_survive_reopen() {
     let parent = tempfile::tempdir().unwrap();
     let path = parent.path().join("service");
     let catalog = setup(&path).await;
-    let alpha = create(&catalog, "alpha", "documents").await;
+    let alpha = create(&catalog, "12345678-1234-4234-8234-123456789012", "documents").await;
     let beta = create(&catalog, "beta", "documents").await;
     assert_ne!(alpha.seq, beta.seq);
-    assert_eq!(catalog.listing("alpha").await.unwrap().len(), 1);
+    assert_eq!(catalog.listing("12345678-1234-4234-8234-123456789012").await.unwrap().len(), 1);
     assert_eq!(
         catalog
-            .authorized("alpha".into(), "documents".into(), |e| async move {
+            .authorized("12345678-1234-4234-8234-123456789012".into(), "documents".into(), |e| async move {
                 e.tenant_id
             })
             .await
             .unwrap(),
-        "alpha"
+        "12345678-1234-4234-8234-123456789012"
     );
     assert!(
         catalog
-            .authorized("alpha".into(), "missing".into(), |_| async {})
+            .authorized("12345678-1234-4234-8234-123456789012".into(), "missing".into(), |_| async {})
             .await
             .is_err()
     );
@@ -160,7 +169,7 @@ async fn tenant_namespaces_same_name_collections_and_scoped_retries_survive_reop
     let retry = request(
         "create-documents",
         CatalogCommand::PrepareCollection {
-            tenant_id: "alpha".into(),
+            tenant_id: "12345678-1234-4234-8234-123456789012".into(),
             collection_id: "documents".into(),
             config: config(),
         },
@@ -168,7 +177,7 @@ async fn tenant_namespaces_same_name_collections_and_scoped_retries_survive_reop
     assert_eq!(catalog.execute(retry.clone()).await.unwrap(), alpha);
     let mut different = retry.clone();
     different.command = CatalogCommand::DeleteCollection {
-        tenant_id: "alpha".into(),
+        tenant_id: "12345678-1234-4234-8234-123456789012".into(),
         collection_id: "documents".into(),
     };
     assert!(matches!(

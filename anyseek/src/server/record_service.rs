@@ -655,7 +655,7 @@ impl Service {
         let Some(tenant) = tenants.next() else { return Ok(MASTER.into()); };
         if tenants.next().is_some() { return Err(bad("one X-AnySeek-Tenant header is required")); }
         let tenant = tenant.to_str().map_err(bad)?;
-        anyseek::catalog::validate_name(tenant)?;
+        anyseek::catalog::validate_tenant(tenant)?;
         Ok(tenant.to_owned())
     }
     async fn admin(&self, headers: &HeaderMap) -> Result<String, Error> {
@@ -2583,6 +2583,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn live_validates_supplied_service_credentials_and_accepts_uuid_namespaces() {
+        use tower::ServiceExt;
+        let(service,path,headers)=setup().await; let app=router(service.clone());
+        let invalid=STANDARD.encode([8;32]);
+        for (key, expected) in [(None,StatusCode::OK),(Some(headers["apikey"].to_str().unwrap()),StatusCode::OK),(Some(invalid.as_str()),StatusCode::UNAUTHORIZED)] {
+            let mut req=axum::http::Request::builder().uri("/api/v1/live");
+            if let Some(key)=key {req=req.header("apikey",key);}
+            assert_eq!(app.clone().oneshot(req.body(Body::empty()).unwrap()).await.unwrap().status(),expected);
+        }
+        let mut scoped=headers.clone(); scoped.insert(TENANT_HEADER,"12345678-1234-4234-8234-123456789012".parse().unwrap());
+        let create=json!({"operation_id":OperationId::new("uuid-create".into()),"collection_id":"ws_12345678123442348234123456789012","config":{"index_name":"test","schema":[{"field":"body","field_type":"Text"}]}});
+        create_collection(State(service.clone()),scoped.clone(),serde_json::to_vec(&create).unwrap().into()).await.unwrap();
+        let list=list_collections(State(service.clone()),scoped).await.unwrap();
+        assert_eq!(list.status(),StatusCode::OK);
+        drop(list);drop(app);drop(service);std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[tokio::test]
     async fn admitted_namespace_is_not_rebound_by_handler_headers() {
         let(service,path,headers)=setup().await;
         let error=AUTHENTICATED.scope("other".into(), info(State(service.clone()),headers,Path("c".into()))).await.unwrap_err();
@@ -3192,7 +3210,7 @@ fn openapi_document() -> Value {
             | "/api/v1/service-backups" | "/api/v1/service-restores" | "/api/v1/catalog/operation/{epoch}/{nonce}") {
             params.push(json!({"name":"X-AnySeek-Tenant","in":"header","required":true,
                 "description":"Tenant namespace supplied by the authenticated gateway; not a user credential.",
-                "schema":{"type":"string","pattern":"^[a-z][a-z0-9_-]{0,62}$"}}));
+                "schema":{"type":"string","pattern":"^[a-z0-9][a-z0-9_-]{0,62}$"}}));
         }
         for part in path.split('/') {
             if let Some(name) = part.strip_prefix('{').and_then(|s| s.strip_suffix('}')) {

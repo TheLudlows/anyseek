@@ -84,7 +84,7 @@ export default function App() {
     setBusy(true);
     setError("");
     try {
-      if (!/^[a-z][a-z0-9_-]{0,62}$/.test(key.trim()))
+      if (!/^[a-z0-9][a-z0-9_-]{0,62}$/.test(key.trim()))
         throw new Error(t("请输入有效的租户命名空间。"));
       const fingerprint = await ownerFor(key.trim());
       const list = await api<Collection[]>(key.trim(), "index");
@@ -408,7 +408,7 @@ function ConnectForm({
       <label>
         {t("租户命名空间")}
         <input
-          pattern="[a-z][a-z0-9_\-]{0,62}"
+          pattern="[a-z0-9][a-z0-9_\-]{0,62}"
           maxLength={63}
           autoComplete="off"
           value={key}

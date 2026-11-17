@@ -2,6 +2,21 @@
 
 核对基线：2026-11-17 主干 `bb53b80`；本轮分支的 Catalog 持久化调整与验证见下表。本文集中维护剩余工作和证据入口；当前能力见[功能与边界](features.md)，实现见[架构](architecture.md)，接口与资源限制见[服务指南](../anyseek/src/server/README.md)。合入不等于发布或完成性能验收。
 
+## Origence workspace 自动路由（2026-11-17）
+
+租户命名空间独立校验为 `^[a-z0-9][a-z0-9_-]{0,62}$`，支持业务 UUID；集合名继续采用
+原有小写字母开头规则。Catalog 目录、SQLite 严格重开、服务备份路径校验、HTTP、SDK 和
+控制台使用一致的命名空间规则。Origence 直接传 tenant UUID，并将 workspace 映射为
+`ws_<无连字符 UUID>`，由宿主首次使用时创建集合，不新增租户注册、租户 Key 或映射表。
+`/api/v1/live` 保持公开；携带 `apikey` 时验证服务凭据，支持无预置集合的宿主启动检查。
+
+Linux / Rust 1.99.1：Catalog 测试 21 项通过（另 1 项子进程 worker ignored）；正常
+服务测试 27 项通过；无默认特性 all-targets check、正常服务构建、生产 lib/bin Clippy 通过，
+Clippy 保留已有告警。控制台测试 38 项及 build、Rust/console 边界检查、Python SDK 编译通过。
+使用本次正常生产二进制与 Origence 联调，8 项真实引擎契约和 HTTP/stdio MCP 验收通过，
+包括首次建集合、数字开头 UUID、隔离、发布未知结果恢复和进程重开。
+本轮未执行 Windows 本地构建或真实云 S3 验收；下节结果保留原批次范围。
+
 ## Catalog 与服务认证职责收敛（2026-11-17）
 
 基于 master `bb53b80`。集合、备份归属和管理回执继续使用 SQLite；删除租户注册及

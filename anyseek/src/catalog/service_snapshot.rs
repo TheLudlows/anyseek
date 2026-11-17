@@ -69,7 +69,7 @@ fn object_hash(root: &Path) -> Result<String, CatalogError> {
 fn safe_directory(name: &str) -> bool {
     let parts = name.split('/').collect::<Vec<_>>();
     parts.len() == 4 && parts[0] == "collections"
-        && super::validate_name(parts[1]).is_ok() && super::validate_name(parts[2]).is_ok()
+        && super::validate_tenant(parts[1]).is_ok() && super::validate_name(parts[2]).is_ok()
         && parts[3].len() == 16 && parts[3].bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 fn safe_backup(name: &str) -> bool {

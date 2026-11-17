@@ -30,7 +30,7 @@ target/debug/anyseek_server print_master_key=true
 
 Windows PowerShell 使用 `.\target\debug\anyseek_server.exe print_master_key=true`。此命令只向标准输出打印 `Base64(SHA-256(secret 的 UTF-8 字节))` 并退出，不打开数据目录、不启动服务；输出本身就是管理凭据，不要记录到共享日志。它不生成或轮换密钥。
 
-服务凭据通过 `apikey` 请求头用于 Origence／网关到 AnySeek 的全部受保护接口；数据接口另需 `X-AnySeek-Tenant`。用户认证与权限由上游完成，网关须校验用户对所选租户及服务管理操作的权限。AnySeek 不注册租户，不签发、保存或撤销租户 Key。集合列表为 GET `/api/v1/index`；`/api/v1/tenants` 和 `/api/v1/apikey` 已移除。租户及集合名称须匹配 `^[a-z][a-z0-9_-]{0,62}$`，不转换大小写。默认数据目录位于可执行文件旁的 `anyseek_index`。首次 `index_path` 必须不存在且父目录存在；重启须指向可恢复的 Catalog 根。Catalog 7 仅支持新库，不迁移或覆盖旧格式。
+服务凭据通过 `apikey` 请求头用于 Origence／网关到 AnySeek 的全部受保护接口；数据接口另需 `X-AnySeek-Tenant`。`/api/v1/live` 保持公开；如果请求携带 `apikey`，则严格验证该服务凭据，支持宿主在无租户/集合时检查连接。用户认证与权限由上游完成，网关须校验用户对所选租户及服务管理操作的权限。AnySeek 不注册租户，不签发、保存或撤销租户 Key。集合列表为 GET `/api/v1/index`；`/api/v1/tenants` 和 `/api/v1/apikey` 已移除。租户命名空间须匹配 `^[a-z0-9][a-z0-9_-]{0,62}$`（支持数字开头的 UUID），集合名须匹配 `^[a-z][a-z0-9_-]{0,62}$`，不转换大小写。Origence 直接传业务 tenant UUID，并以 `ws_<workspace UUID 无连字符>` 作为集合名。默认数据目录位于可执行文件旁的 `anyseek_index`。首次 `index_path` 必须不存在且父目录存在；重启须指向可恢复的 Catalog 根。Catalog 7 仅支持新库，不迁移或覆盖旧格式。
 
 | 参数 | 默认值与约束 |
 | --- | --- |

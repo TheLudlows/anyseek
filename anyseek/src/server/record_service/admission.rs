@@ -52,9 +52,9 @@ pub(super) async fn request(service: &Service, request: axum::extract::Request) 
     let preflight = if lane == Lane::Control { &service.control_preflight } else { &service.preflight };
     let _preflight = preflight.clone().try_acquire_owned().map_err(|_| Error::from(CatalogError::Busy))?;
     let mut tenant=None;
-    if lane != Lane::Public {
+    if lane != Lane::Public || (path == "/api/v1/live" && parts.headers.contains_key("apikey")) {
         let principal=service.authenticate_credentials(&parts.headers).await?;
-        let global = matches!(path.as_str(), "/api/v1/backups" | "/api/v1/backups/{id}"
+        let global = matches!(path.as_str(), "/api/v1/live" | "/api/v1/backups" | "/api/v1/backups/{id}"
             | "/api/v1/service-backups" | "/api/v1/service-restores"
             | "/api/v1/catalog/operation/{epoch}/{nonce}");
         if !global && principal == MASTER {

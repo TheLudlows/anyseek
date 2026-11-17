@@ -15,7 +15,7 @@ API_TARGET=http://your-authenticated-gateway npm run dev
 ```
 
 打开终端显示的地址，输入租户命名空间并连接。集合列表通过 `GET /api/v1/index` 获取。
-命名空间采用 `^[a-z][a-z0-9_-]{0,62}$`，不需要在 AnySeek 注册。
+命名空间采用 `^[a-z0-9][a-z0-9_-]{0,62}$`（支持 UUID），不需要在 AnySeek 注册。
 
 本机开发调试可直接连接绑定到本机的 AnySeek，由 **Vite 服务端**注入服务凭据：
 

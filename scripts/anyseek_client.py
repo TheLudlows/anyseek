@@ -36,7 +36,7 @@ class anyseekClient:
             self.set_tenant(tenant)
 
     def set_tenant(self, tenant):
-        if not isinstance(tenant, str) or not re.fullmatch(r"[a-z][a-z0-9_-]{0,62}", tenant):
+        if not isinstance(tenant, str) or not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,62}", tenant):
             raise ValueError("invalid tenant namespace")
         self.tenant = tenant
 

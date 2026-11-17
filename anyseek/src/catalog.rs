@@ -68,7 +68,7 @@ fn epoch() -> u64 {
 /// Reserved service-wide management receipt scope, outside the tenant alphabet.
 pub const MASTER: &str = "@master";
 
-/// Validate a tenant/collection path component without normalization.
+/// Validate a collection path component without normalization.
 pub fn validate_name(value: &str) -> Result<(), CatalogError> {
     if !(1..=63).contains(&value.len())
         || !value.as_bytes()[0].is_ascii_lowercase()
@@ -82,8 +82,18 @@ pub fn validate_name(value: &str) -> Result<(), CatalogError> {
     }
     Ok(())
 }
+/// Namespace path components also accept UUIDs beginning with a digit.
+pub fn validate_tenant(value: &str) -> Result<(), CatalogError> {
+    if !(1..=63).contains(&value.len())
+        || !value.as_bytes()[0].is_ascii_alphanumeric()
+        || !value.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
+    {
+        return Err(CatalogError::Rejected("tenant must match ^[a-z0-9][a-z0-9_-]{0,62}$".into()));
+    }
+    Ok(())
+}
 fn scope(tenant: &str, collection: &str) -> Result<String, CatalogError> {
-    validate_name(tenant)?;
+    validate_tenant(tenant)?;
     validate_name(collection)?;
     Ok(format!("{tenant}/{collection}"))
 }
@@ -233,7 +243,7 @@ impl CollectionEntry {
     }
     /// Durably establish the name hierarchy before publishing a child partition.
     pub fn prepare_parent(&self, root: &Path) -> Result<(), CatalogError> {
-        validate_name(&self.tenant_id)?;
+        validate_tenant(&self.tenant_id)?;
         validate_name(&self.collection_id)?;
         let parent = root.join(self.directory()).parent().unwrap().to_path_buf();
         std::fs::create_dir_all(&parent).map_err(storage)?;
@@ -636,7 +646,7 @@ impl Catalog {
     }
     /// Check backup tenant ownership, including retained completed restores.
     pub async fn require_backup(&self, tenant: &str, id: &str) -> Result<(), CatalogError> {
-        validate_name(tenant)?;
+        validate_tenant(tenant)?;
         let inner = self.inner.lock().await;
         if !inner.is_healthy() {
             return Err(CatalogError::RecoveryRequired);
@@ -680,7 +690,7 @@ impl Catalog {
     }
     /// List active collections belonging to an already authenticated tenant.
     pub async fn listing(&self, tenant: &str) -> Result<Vec<CollectionEntry>, CatalogError> {
-        validate_name(tenant)?;
+        validate_tenant(tenant)?;
         let inner = self.inner.lock().await;
         if !inner.is_healthy() {
             return Err(CatalogError::RecoveryRequired);
