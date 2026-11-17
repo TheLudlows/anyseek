@@ -122,6 +122,14 @@ async fn catalog_rejects_legacy_formats_without_conversion_or_replacement() {
             .unwrap(),
         5
     );
+    db.execute("UPDATE catalog_meta SET format=7", []).unwrap();
+    db.pragma_update(None, "journal_mode", "DELETE").unwrap();
+    assert!(Catalog::open(&root).await.is_err());
+    assert_eq!(
+        db.pragma_query_value::<String, _>(None, "journal_mode", |row| row.get(0))
+            .unwrap(),
+        "delete"
+    );
     let native = parent.path().join("native");
     drop(PartitionJournal::create(&native, BUDGET, b"legacy-native-catalog").unwrap());
     assert!(Catalog::open(&native).await.is_err());

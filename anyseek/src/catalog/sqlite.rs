@@ -55,9 +55,18 @@ impl Store {
         connection
             .busy_timeout(Duration::from_secs(5))
             .map_err(storage)?;
-        connection
-            .pragma_update(None, "journal_mode", "WAL")
-            .map_err(storage)?;
+        if create {
+            connection
+                .pragma_update(None, "journal_mode", "WAL")
+                .map_err(storage)?;
+        } else {
+            let mode: String = connection
+                .pragma_query_value(None, "journal_mode", |row| row.get(0))
+                .map_err(storage)?;
+            if !mode.eq_ignore_ascii_case("wal") {
+                return Err(storage("catalog requires existing WAL mode"));
+            }
+        }
         connection
             .pragma_update(None, "synchronous", "FULL")
             .map_err(storage)?;
