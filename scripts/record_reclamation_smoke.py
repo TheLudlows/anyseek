@@ -36,7 +36,7 @@ def main():
                    ANYSEEK_S3_BUCKET='reclamation', ANYSEEK_S3_REGION='us-east-1',
                    ANYSEEK_S3_ACCESS_KEY_ID='fixture', ANYSEEK_S3_SECRET_ACCESS_KEY='fixture', ANYSEEK_S3_ALLOW_HTTP='1')
     master = base64.b64encode(hashlib.sha256(b'reclamation-smoke').digest()).decode()
-    tenant = base64.b64encode(hashlib.sha256(b'reclamation-tenant').digest()).decode()
+    tenant = master
     operation = lambda: {'epoch': int(time.time() // 86400), 'nonce': uuid.uuid4().hex}
     with tempfile.TemporaryDirectory(prefix='anyseek-reclamation-') as temporary:
         root = Path(temporary) / 'data'
@@ -50,7 +50,7 @@ def main():
         def call(method, path, body=None, key=tenant, status=200):
             request = urllib.request.Request(base + path, method=method,
                 data=None if body is None else json.dumps(body).encode(),
-                headers={'apikey': key, 'Content-Type': 'application/json'})
+                headers={'apikey': key, 'X-AnySeek-Tenant':'test', 'Content-Type': 'application/json'})
             try:
                 with urllib.request.urlopen(request, timeout=30) as response:
                     code, raw = response.status, response.read()
@@ -78,23 +78,20 @@ def main():
                     return False
             wait(ready)
 
-        def metadata():
-            with closing(sqlite3.connect(root / 'metadata.sqlite')) as db:
-                return [json.loads(row[0]) for row in db.execute('SELECT metadata FROM catalog_collections')]
+        def generations():
+            parent = root / 'collections' / 'test' / 'c'
+            return sorted(path for path in parent.glob('*') if path.is_dir()
+                          and len(path.name) == 16 and all(c in '0123456789abcdef' for c in path.name))
 
         try:
             start()
-            call('POST', '/api/v1/tenants', {'operation_id': operation(), 'tenant_id': 'test'}, master)
-            call('POST', '/api/v1/apikey', {'operation_id': operation(), 'key_id': 'tenant', 'tenant_id': 'test',
-                                          'apikey_base64': tenant}, master)
             create = {'operation_id': operation(), 'collection_id': 'c',
                       'config': {'index_name': 'reclamation', 'schema': [{'field': 'body', 'field_type': 'Text'}]}}
             call('POST', '/api/v1/index', create)
             write_one(call, '/api/v1/index/c', {'operation_id': operation(), 'record_id': 'r',
                                                'expected': 'Absent', 'document': {'body': 'old'}})
-            old = metadata()[0]
-            generation = f"{old['generation']:016x}"
-            old_path = root / 'collections' / 'test' / 'c' / generation
+            old_path, = generations()
+            generation = old_path.name
             backup = call('POST', '/api/v1/index/c/backup', {'operation_id': operation()})['backup_id']
             delete = {'operation_id': operation()}
             call('DELETE', '/api/v1/index/c', delete)
@@ -104,7 +101,7 @@ def main():
                                                'expected': 'Absent', 'document': {'body': 'new'}})
             time.sleep(1.2)
             assert old_path.exists(), 'live backup must protect the deleted incarnation'
-            assert not next(row for row in metadata() if row['generation'] == old['generation'])['reclaiming']
+            assert len(generations()) == 2, 'protected old and live new generations must coexist'
             if fixture:
                 # Fault injection: an accepted PUT whose completion is unknown.
                 late_key = f'anyseek/test/c/records/{generation}-late-put'
@@ -113,9 +110,12 @@ def main():
                     db.execute('INSERT INTO object_uploads VALUES(?,?,?,?,?)',
                                (late_key, hashlib.sha256(late_body).digest(), len(late_body), 0, 0))
             call('DELETE', '/api/v1/backups/' + backup, {'operation_id': operation()}, master)
-            wait(lambda: all(row['generation'] != old['generation'] for row in metadata()))
-            assert not old_path.exists()
-            assert not list(old_path.parent.glob(f'.retired*{generation}'))
+            # The first bounded pass only renames to trash; wait for its full
+            # retirement, including S3 cleanup, rather than the initial rename.
+            wait(lambda: not old_path.exists()
+                 and not list(old_path.parent.glob(f'.retired*{generation}'))
+                 and not old_path.parent.joinpath(f'.initial-resume-{generation}').exists())
+            assert len(generations()) == 1
             if fixture:
                 with S3.lock:
                     assert not any('/' + generation + '-' in key for key in S3.objects), 'old objects remain'
@@ -128,7 +128,9 @@ def main():
             assert call('GET', '/api/v1/index/c/doc/r')['document']['body'] == 'new'
             process.kill(); process.wait(timeout=20)
             start()
-            assert len(metadata()) == 1
+            assert len(generations()) == 1
+            if not fixture:
+                assert root.joinpath('metadata.sqlite').is_file(), 'Catalog metadata database is missing'
             assert call('GET', '/api/v1/index/c/doc/r')['document']['body'] == 'new'
             call('DELETE', '/api/v1/index/c', delete)
             assert call('GET', '/api/v1/index/c/doc/r')['document']['body'] == 'new'

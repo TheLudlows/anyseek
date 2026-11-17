@@ -4,7 +4,7 @@ import { clearEmbeddingConfig } from "./embeddings.ts";
 import { loadPendingWrites } from "./pending-writes.ts";
 
 export type PendingDelete = { owner: string; collection: string; body: string; confirmed?: boolean };
-export async function deleteCollection(owner: string, apiKey: string, collection: string) {
+export async function deleteCollection(owner: string, tenant: string, collection: string) {
   let pending = storage.get<PendingDelete>("pendingDelete");
   if (pending && (pending.owner !== owner || pending.collection !== collection))
     throw new Error(t("请先回到原连接与集合处理待确认删除。"));
@@ -16,7 +16,7 @@ export async function deleteCollection(owner: string, apiKey: string, collection
     storage.set("pendingDelete", pending);
   }
   if (!pending.confirmed) {
-    const response = await api(apiKey, collectionPath(collection), pending.body, "DELETE");
+    const response = await api(tenant, collectionPath(collection), pending.body, "DELETE");
     if (response?.deleted !== true) throw new Error(t("未收到删除确认，请使用原始请求重试。"));
     pending.confirmed = true;
     storage.set("pendingDelete", pending);

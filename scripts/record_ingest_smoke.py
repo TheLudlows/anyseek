@@ -19,7 +19,7 @@ def exercise(call, restart, directory, faults, base, master):
         return {'operation_id': operation(), 'record_id': identity,
                 'expected': 'Absent', 'document': {'body': 'alpha ' + identity}}
 
-    client = anyseekClient(base)
+    client = anyseekClient(base, "test")
     client.set_default_key(master)
     collection, = set(root.glob('collections/*/*/*')) - existing
     pauses = [collection / ('.test-' + lane + '-consumer-pause') for lane in ['lexical', 'vector']]
@@ -113,7 +113,7 @@ def exercise(call, restart, directory, faults, base, master):
     payload = json.dumps({'records': [lost]}).encode()
     address = urlsplit(base)
     stream = socket.create_connection((address.hostname, address.port), timeout=5)
-    stream.sendall((f'POST {path}/ingest HTTP/1.1\r\nHost: localhost\r\napikey: {master}\r\n'
+    stream.sendall((f'POST {path}/ingest HTTP/1.1\r\nHost: localhost\r\napikey: {master}\r\nX-AnySeek-Tenant: test\r\n'
                     f'Content-Type: application/json\r\nContent-Length: {len(payload)}\r\nConnection: close\r\n\r\n').encode() + payload)
     deadline = time.monotonic() + 10
     while not pause.with_suffix('.started').exists():

@@ -27,11 +27,11 @@ import type { Collection, Hit, Json, Mode, QueryResult } from "./types.ts";
 
 export function Search({
   collection,
-  apiKey,
+  tenant,
   owner,
 }: {
   collection: Collection;
-  apiKey: string;
+  tenant: string;
   owner: string;
 }) {
   const [modelConfig] = useState(() => loadEmbeddingConfig(owner, collection.id));
@@ -194,7 +194,7 @@ export function Search({
       const body = source.slice(0, -1) + ',"offset":' + next * 10 + "}";
       setPhase(t("正在检索集合"));
       const response = await api<QueryResult>(
-        apiKey,
+        tenant,
         collectionPath(collection.id) + "/query",
         body,
         "POST",

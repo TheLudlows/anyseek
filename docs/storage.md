@@ -2,8 +2,9 @@
 
 本文集中说明本地 WAL/Segment 与 SQLite/S3 的持久化、checkpoint、备份和回收协议。请求语义见[Record 契约](record-model.md)，配置见[服务指南](../anyseek/src/server/README.md)，实现与剩余验收见[路线](roadmap.md)。
 
-Tenant/Catalog 与 S3 authority 共用 SQLite。Catalog 格式为 5，authority schema 为 3，authority 备份快照为 2；旧 Catalog 日志及旧数据库格式不提供迁移。
-
+Catalog 格式为 7，使用 SQLite；S3 authority schema 为 3，authority 备份快照为 2。
+本地和 S3 模式都创建 `metadata.sqlite`。仅支持新建根目录，旧 SQLite Catalog 5、原生
+Catalog 6 和旧数据库格式不迁移、不自动转换或覆盖。
 ## 本地 Segment 与共同视图
 
 每个向量/元数据组件记录包必须完整保存与 keys 一一对应的 revisions 和 fingerprint（SHA-256）。加载时统一检查数量及活动身份；缺失字段、空 fingerprint 或不一致的身份数量直接拒绝，不保留旧包等待 checkpoint 补全的分支。空组件也显式保存空身份数组。
@@ -20,11 +21,37 @@ Tenant/Catalog 与 S3 authority 共用 SQLite。Catalog 格式为 5，authority 
 
 ## 权威与数据归属
 
-SQLite 是唯一可变协调权威，保存 head/owner epoch、提交和索引水位、不可变引用、有限期幂等协调、对象依赖、pin、退休状态和备份/恢复协调记录。正文、原始向量、索引和 WAL 内容均在对象存储中。本地日志、payload 和索引是可以重建的缓存。
+在 S3 模式下，Record 分区的可变提交协调权威是 SQLite，保存 head/owner epoch、提交和索引水位、不可变引用、有限期幂等协调、对象依赖、pin、退休状态和备份/恢复协调记录。正文、原始向量、索引和 WAL 内容均在对象存储中。分区的本地 Record 日志、payload 和索引是可以重建的缓存；Catalog 与 S3 authority 的 SQLite 元数据是持久权威，不属于缓存。
 
-服务使用根目录下的 `metadata.sqlite`，同时保存 Catalog 管理元数据与 S3 Record 协调状态；Catalog 不再维护独立持久化日志。Catalog 更新与管理回执在同一短事务提交，不复制正文、向量或完整 Record State。SQLite 使用 WAL 与 `synchronous=FULL`，不在事务内执行对象上传。Record 对象后端按分区持有稳定的本地 owner 文件锁；同一分区不能由两个 Record 实例同时持有，不同分区可以共享该数据库。集合备份只导出该分区的当前对象闭包和协调记录；恢复绑定按分区隔离，GC 只退休和删除本分区前缀的对象，全库可达性仍保护其他分区及 pin。集合本地目录直接派生为 `collections/{tenant_id}/{collection_id}/{generation}`，不保存名称到生成目录的映射。对象前缀为 `anyseek/{tenant_id}/{collection_id}/`，下分 `wal/records/lexical/vector/manifests`；内部代次编码在对象 ID 中。相同名称重建使用新代次，旧任务、回执与 GC 继续绑定原代次；客户端不传代次。没有自动 namespace 或 Bucket 归属标记，不同独立服务必须使用不同 bucket。
+Catalog 使用服务根目录的 `metadata.sqlite`，仅建立四张目录表：
+`catalog_meta`、`catalog_collections`、`catalog_backups`、`catalog_operations`。
+集合状态、备份归属、退休状态和管理回执在短事务中提交；完整 Catalog 编码有 16 MiB
+预算，不复制 Record 正文、向量或索引。没有租户注册表、Key 表或 Catalog 原生日志。
+单 Catalog owner 文件锁防止两个内存目录视图同时服务；提交不确定时保持隔离，重开后确认。
+完整服务归档通过原有屏障固定 Catalog 与各集合，恢复不携带服务凭据，并保留历史操作隔离。
+
+S3 模式在同库增加十张 authority 协调表，保存分区 head、幂等提交、对象登记/依赖/pin、
+索引构建、备份恢复及退休状态。Catalog 与 Record 各自使用短事务，不把跨对象网络操作
+包进事务；集合生命周期仍依靠意图、执行屏障与恢复协议。SQLite 使用 WAL 与
+`synchronous=FULL`，不在事务内执行对象上传。Record 对象后端按分区持有稳定的本地 owner 文件锁；同一分区不能由两个 Record 实例同时持有，不同分区可以共享该数据库。集合备份只导出该分区的当前对象闭包和协调记录；恢复绑定按分区隔离，GC 只退休和删除本分区前缀的对象，全库可达性仍保护其他分区及 pin。集合本地目录直接派生为 `collections/{tenant_id}/{collection_id}/{generation}`，不保存名称到生成目录的映射。对象前缀为 `anyseek/{tenant_id}/{collection_id}/`，下分 `wal/records/lexical/vector/manifests`；内部代次编码在对象 ID 中。相同名称重建使用新代次，旧任务、回执与 GC 继续绑定原代次；客户端不传代次。没有自动 namespace 或 Bucket 归属标记，不同独立服务必须使用不同 bucket。
 
 普通写入先登记上传身份，再完成不可变 PUT、读回长度/字节/SHA-256 校验，最后由 SQLite 事务条件发布 head 与回执，再应用本地权威状态并同步或排队派生索引。`/ingest` 不等待两个索引消费者追平。对象缺失或校验失败不会回退为旧缓存成功。
+
+## SQLite 使用边界与连接
+
+SQLite 保存 Catalog 管理元数据及 S3 协调状态，默认构建保留 `rusqlite`/bundled SQLite。正文和检索不依赖 SQL。
+对象身份、分区 head、构建令牌与发布结果定义在 `storage/authority.rs`，不绑定数据库驱动。
+
+- 新协调库由初始化入口创建。已有库只校验 schema 3 及必要表/列；缺表或不兼容版本拒绝打开，
+  不自动补表。首次启用 S3 时在已有 Catalog 库中建立 authority 表。
+- 上传/后台构建使用严格的 `open_existing`，不会创建缺失的 metadata 文件或执行建表事务。
+  已有 WAL 模式不重复设置，连接仍使用 `synchronous=FULL` 和原 busy timeout。
+- 上传预留在同一事务中返回已观察的 durable 状态，避免再次查询相同对象；登记时一次读取摘要、
+  长度和状态。备份控制对象的预留及 pin 只执行一次，原故障注入边界保留。
+- 预留观察只决定是否复用既有不可变对象。IO 后仍在短事务内复核状态；并发退休不能被旧观察
+  撤销。head CAS、回执、pin 和 GC 的提交与保护规则保留，不跨网络持有数据库事务。
+
+Catalog 保留必要的管理元数据事务，S3 路径减少重复 SQL、建表写锁和类型耦合；不据此推定生产吞吐或 P99 改善。
 
 ## 远端检查点与 Segment 发布
 
@@ -49,7 +76,7 @@ SQLite 是唯一可变协调权威，保存 head/owner epoch、提交和索引�
 
 ### 有界后台 cut 发布
 
-`RecordPartition::start_index_committed` 在准入后返回 owned job，`finish` 等待结果；丢弃句柄不取消已接受工作。`index_committed` 是等待式包装。HTTP PATCH 在集合生命周期屏障内启动任务，屏障外等待；已认证任务不因凭据撤销而中断，失败 fence 的输出保护仍保留。
+`RecordPartition::start_index_committed` 在准入后返回 owned job，`finish` 等待结果；丢弃句柄不取消已接受工作。`index_committed` 是等待式包装。HTTP PATCH 在集合生命周期屏障内启动任务，屏障外等待；已接管任务保留原命名空间，不重新查询上游用户权限，失败 fence 的输出保护仍保留。
 
 当前进程最多两个构建，每 partition 一个；显式构建准入超额返回 Busy，自动维护有下文所述的有界等待。期限由调用者指定，最大五分钟，HTTP 为三十秒。快照与新增 tail 分别使用既有共享内存准入；捕获 tail 上限为 journal 预算与 64 MiB 的较小值，超限取消本轮构建，保留前台已确认操作，构建文件及并发 WAL 使用同一个磁盘 scope；这是保守估算，继续不承诺 RSS 硬上限。完整 State 仍驻内存。完整 checkpoint 按固定 cut 构建，另有自动时间回收、日志压力维护和派生缓存合并，不等同于通用增量 checkpoint。
 
@@ -63,7 +90,7 @@ SQLite 新增每 partition 一行 `index_builds`，只保存单调 build epoch�
 
 锁顺序为全局快照屏障 → Tenant/Collection 执行屏障 → Catalog 元数据。普通工作在捕获租户所属集合后释放元数据锁，数据执行在锁外完成。集合创建、激活、删除按租户限定的集合键串行；完整服务快照和备份退休仍通过必要屏障协调。不得在持元数据锁时等待执行屏障。
 
-凭据撤销不排空已认证的数据工作，也不再维护 Grant revision 或 Catalog 输出授权许可。已接收的工作仍归 owned task 所有，调用方取消不提前释放屏障。异常工作只关闭后续 Catalog 操作，不建立新的角色/权限系统；Record 数据保护保持独立。
+用户权限由上游网关判定，AnySeek 不维护租户凭据、Grant revision 或 Catalog 输出授权许可。已接收的工作仍归 owned task 所有，调用方取消不提前释放屏障。异常工作只关闭后续 Catalog 操作，不建立新的角色/权限系统；Record 数据保护保持独立。
 
 前台、恢复和后台采用分级准入、共享/每集合显式缓冲与 I/O 额度；取消后的 owned task 和传输 Bytes 保留租约。S3 GET 的租约随返回缓冲，而非下载函数返回就结束；PUT 读后验证仍访问远端。能证明 SQLite 发布前的预算拒绝为 Busy，其他不确定错误继续 fenced；既有 reader/build/backup 保护与 GC 闭包不变。默认值与范围见[服务指南](../anyseek/src/server/README.md)，组合隔离验收见[路线](roadmap.md)。
 
@@ -105,7 +132,7 @@ metadata snapshot 和 descriptor 使用不可变对象；备份 ID 按 Tenant、
 
 恢复保留 Record 版本、tombstone、原始向量和操作回执。独立快照不自动获得当前删除历史权威：保留 `independent_snapshot`，并更换历史恢复 scope；不包含服务凭据。
 
-完整服务归档复用既有 catalog/本地不可变归档协议，新增对 S3 collection backup 的私有物化输入。该归档包含完整独立数据，不依赖源 bucket 继续保留那些 collection backup pin。恢复服务禁用历史普通 Key，由目标 master 为已有 Tenant 重新签发 Key；在 S3 模式首次启动时，已认证的独立归档被发布到目标独立 bucket。归档中的 collection backup 仍可再次恢复。
+完整服务归档复用既有 catalog/本地不可变归档协议，新增对 S3 collection backup 的私有物化输入。该归档包含完整独立数据，不依赖源 bucket 继续保留那些 collection backup pin。服务凭据不进入归档，由目标服务进程配置提供；在 S3 模式首次启动时，已认证的独立归档被发布到目标独立 bucket。归档中的 collection backup 仍可再次恢复。
 
 私有输入逐个物化为认证 journal 路径，随后由 catalog 逐个打开、预检和导出，每次释放其索引与预算租约；不同时持有所有 retained collection/备份的检索视图。私有工作目录在成功或失败后清理，现有共享内存与归档大小预算继续生效。
 
@@ -134,7 +161,7 @@ S3 模式由 SQLite 选择远端 manifest，owner epoch 与失败 fence 阻止�
 
 HTTP fixture 不等于真实 S3 服务认证，实际 endpoint、系统/文件系统崩溃与硬断电单独待验收。SQLite 为单主机持久卷权威，不提供跨主机 HA 或权威卷丢失零 RPO。
 
-Catalog 管理操作在写事务之前仅做一次完整预算/可恢复性校验。完整服务归档格式为 2；恢复只保留源 Catalog cut/hash、来源身份及必要旧 Operation ID 隔离，不再复制完整历史 Catalog 或 Key 验证材料。HTTP 中间件在读取 body 前认证一次，已认证上下文供 handler 和 owned 工作复用；集合实际执行仍在生命周期屏障内检查代次。
+Catalog 管理操作在写事务之前仅做一次完整预算/可恢复性校验。完整服务归档格式为 2；恢复只保留源 Catalog cut/hash、来源身份及必要旧 Operation ID 隔离，不复制完整历史 Catalog，数据库和归档均不包含 Key 验证材料。HTTP 中间件在读取 body 前认证一次，已认证上下文供 handler 和 owned 工作复用；集合实际执行仍在生命周期屏障内检查代次。
 
 ## 已删除集合代次的最终回收
 

@@ -4,11 +4,11 @@ test('switching preserves drafts and pending requests; reload remembers language
   let calls=0;
   await page.route('**/api/v1/**',async route=>{calls++;await route.fulfill({json:[collection]});});
   await page.goto('/');
-  await page.getByLabel('Tenant API Key',{exact:true}).fill('test-key');
+  await page.getByLabel('租户命名空间',{exact:true}).fill('test-key');
   await page.getByLabel('语言 / Language').selectOption('en');
   await expect(page).toHaveTitle('AnySeek · Semantic Space');
   await expect(page.locator('html')).toHaveAttribute('lang','en');
-  await expect(page.getByLabel('Tenant API Key',{exact:true})).toHaveValue('test-key');
+  await expect(page.getByLabel('Tenant namespace',{exact:true})).toHaveValue('test-key');
   await page.getByRole('button',{name:'Connect',exact:true}).click();
   await expect(page.getByRole('heading',{name:'All collections'})).toBeVisible();
   await page.evaluate(()=>sessionStorage.setItem('pendingWrites','{"owner":"other","requests":[]}'));
@@ -31,7 +31,7 @@ test('switching preserves drafts and pending requests; reload remembers language
 test('switching leaves search input unchanged',async({page})=>{
   await page.route('**/api/v1/**',route=>route.fulfill({json:[collection]}));
   await page.goto('/');
-  await page.getByLabel('Tenant API Key',{exact:true}).fill('test-key');
+  await page.getByLabel('租户命名空间',{exact:true}).fill('test-key');
   await page.getByRole('button',{name:'连接服务',exact:true}).click();
   await page.getByRole('button',{name:'检索调试',exact:true}).click();
   await expect(page.locator('.eyebrow')).toHaveCount(0);

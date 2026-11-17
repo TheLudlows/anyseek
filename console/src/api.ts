@@ -12,7 +12,7 @@ export class ApiError extends Error {
   }
 }
 export async function api<T = Json>(
-  key: string,
+  tenant: string,
   path: string,
   body?: string,
   method = body === undefined ? "GET" : "POST",
@@ -20,7 +20,8 @@ export async function api<T = Json>(
 ): Promise<T> {
   const response = await fetch("/api/v1/" + path, {
     method,
-    headers: { apikey: key, "Content-Type": "application/json" },
+    headers: { "X-AnySeek-Tenant": tenant, "Content-Type": "application/json" },
+    credentials: "same-origin",
     ...(body === undefined ? {} : { body }),
     cache: "no-store",
     signal,
@@ -38,7 +39,7 @@ export async function api<T = Json>(
   if (!response.ok)
     throw new ApiError(
       response.status === 401
-        ? t("API Key 无效或已失效，请重新连接。")
+        ? t("网关认证未通过，请重新登录上游服务。")
         : value?.message || t("请求失败（HTTP {0}）", response.status),
       response.status,
       value?.code,
@@ -61,11 +62,11 @@ export const storage = {
     sessionStorage.removeItem("anyseek." + name);
   },
 };
-export async function ownerFor(key: string) {
+export async function ownerFor(tenant: string) {
   requireSecureContext();
   const bytes = await crypto.subtle.digest(
     "SHA-256",
-    new TextEncoder().encode(key),
+    new TextEncoder().encode((globalThis.location?.origin ?? "") + "\0" + tenant),
   );
   return Array.from(new Uint8Array(bytes), (n) =>
     n.toString(16).padStart(2, "0"),

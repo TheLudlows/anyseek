@@ -69,7 +69,7 @@ def main():
         for key in required+['ALLOW_HTTP']:
             env[f'ANYSEEK_S3_{key}']=os.environ.get(f'ANYSEEK_S3_TEST_{key}','0')
     master=base64.b64encode(hashlib.sha256(b's3-test').digest()).decode()
-    tenant_key=base64.b64encode(hashlib.sha256(b's3-tenant').digest()).decode()
+    service_key=master
     default_key=object()
     def operation():return {'epoch':int(time.time()//86400),'nonce':uuid.uuid4().hex}
     with tempfile.TemporaryDirectory(prefix='anyseek-s3-',dir=os.environ.get('ANYSEEK_TEST_ROOT')) as directory:
@@ -91,13 +91,11 @@ def main():
             log.seek(0);raise AssertionError('S3 service startup timed out: '+log.read()[-8192:])
         def stop():
             if process and process.poll() is None:process.kill();process.wait(timeout=30)
-        def call(method,path,body=None,status=200,key=default_key,timeout=60):
-            if key is default_key:
-                management=(path=='/api/v1/tenants' or path in ['/api/v1/service-backups','/api/v1/service-restores'] or path.startswith('/api/v1/catalog/') or (path=='/api/v1/apikey' and method in ['POST','DELETE']) or path.startswith('/api/v1/backups'))
-                key=master if management else tenant_key
-            if method=='POST' and path=='/api/v1/apikey' and body is not None:body={'tenant_id':'test',**body}
-            req=urllib.request.Request(base+path,data=None if body is None else json.dumps(body).encode(),
-                headers={'apikey':key,'Content-Type':'application/json'},method=method)
+        def call(method,path,body=None,status=200,key=default_key,timeout=60,tenant='test'):
+            if key is default_key: key=master
+            headers={'apikey':key,'Content-Type':'application/json'}
+            if tenant is not None: headers['X-AnySeek-Tenant']=tenant
+            req=urllib.request.Request(base+path,data=None if body is None else json.dumps(body).encode(),headers=headers,method=method)
             try:
                 with urllib.request.urlopen(req,timeout=timeout) as response:code=response.status;raw=response.read()
             except urllib.error.HTTPError as error:code=error.code;raw=error.read()
@@ -150,14 +148,14 @@ def main():
                 page=call('POST',f'/api/v1/index/{collection}/query',request)
                 result.append((page['count_total'],[(h['record']['record_id'],h['record']['version'],h['record']['document'],h['score']) for h in page['hits']]))
             return result
-        def wait_history_ready(key):
+        def wait_history_ready(tenant):
             # Remote history trim publishes asynchronously. Bound this read-only
             # readiness probe by the existing 60-second request budget; all
             # query, cold-recovery and receipt assertions stay at the call sites.
             deadline=time.monotonic()+60
             probe=urllib.request.Request(base+'/api/v1/index/main/query',
                 data=json.dumps({'query':'alpha','operator':'or'}).encode(),
-                headers={'apikey':key,'Content-Type':'application/json'},method='POST')
+                headers={'apikey':master,'X-AnySeek-Tenant':tenant,'Content-Type':'application/json'},method='POST')
             for _ in range(600):
                 remaining=deadline-time.monotonic()
                 assert remaining>0,'remote history maintenance readiness deadline'
@@ -178,8 +176,6 @@ def main():
                 'document':{'body':body,'vector':[2,0]}}
         try:
             start()
-            call('POST','/api/v1/tenants',{'operation_id':operation(),'tenant_id':'test'})
-            call('POST','/api/v1/apikey',{'operation_id':operation(),'key_id':'test-default','apikey_base64':tenant_key})
             config={'index_name':'S3','schema':[{'field':'body','field_type':'Text'},
                 {'field':'vector','field_type':'Json','index_vector':True}],'vector':{'dimensions':2}}
             call('POST','/api/v1/index',{'operation_id':operation(),'collection_id':'main','embedding_space_id':'fixture','config':config})
@@ -195,31 +191,28 @@ def main():
             call('GET','/api/v1/index/main/doc/b',status=404)
             print('PASS S3 checkpoint + unindexed tail: cold cache, update/delete, lexical/vector/hybrid and original receipt',flush=True)
             # Same collection name in another tenant must select different S3 objects.
-            call('POST','/api/v1/tenants',{'operation_id':operation(),'tenant_id':'other'})
-            other_key=base64.b64encode(os.urandom(32)).decode()
-            call('POST','/api/v1/apikey',{'operation_id':operation(),'tenant_id':'other','key_id':'other','apikey_base64':other_key})
-            call('POST','/api/v1/index',{'operation_id':operation(),'collection_id':'main','embedding_space_id':'fixture','config':config},key=other_key)
-            assert call('GET','/api/v1/index/main',key=other_key)['statistics']['active_records']==0
-            write_one(call, '/api/v1/index/main', write('foreign','a','foreign tenant'), key=other_key)
-            assert call('GET','/api/v1/index/main/doc/a',key=other_key)['version']==1
+            call('POST','/api/v1/index',{'operation_id':operation(),'collection_id':'main','embedding_space_id':'fixture','config':config},tenant='other')
+            assert call('GET','/api/v1/index/main',tenant='other')['statistics']['active_records']==0
+            write_one(call, '/api/v1/index/main', write('foreign','a','foreign tenant'), tenant='other')
+            assert call('GET','/api/v1/index/main/doc/a',tenant='other')['version']==1
             assert call('GET','/api/v1/index/main/doc/a')['version']==2
-            foreign_backup=call('POST','/api/v1/index/main/backup',{'operation_id':operation()},key=other_key)
+            foreign_backup=call('POST','/api/v1/index/main/backup',{'operation_id':operation()},tenant='other')
             call('POST','/api/v1/restore',{'operation_id':operation(),'collection_id':'forbidden','backup_id':foreign_backup['backup_id']},status=403)
             cold_restart()
-            assert call('GET','/api/v1/index/main/doc/a',key=other_key)['document']['body']=='foreign tenant'
+            assert call('GET','/api/v1/index/main/doc/a',tenant='other')['document']['body']=='foreign tenant'
             assert call('GET','/api/v1/index/main/doc/a')['version']==2
             print('PASS S3 Tenant isolation: same-name collections, separate objects, backup ownership and cold restart',flush=True)
             # Reuse the public name and operation ID, never its old lifecycle objects.
             old_write=write('old-generation','same','old incarnation')
-            write_one(call, '/api/v1/index/main', old_write, key=other_key)
+            write_one(call, '/api/v1/index/main', old_write, tenant='other')
             deleted={'operation_id':operation()}
-            call('DELETE','/api/v1/index/main',deleted,key=other_key)
-            call('POST','/api/v1/index',{'operation_id':operation(),'collection_id':'main','embedding_space_id':'fixture','config':config},key=other_key)
+            call('DELETE','/api/v1/index/main',deleted,tenant='other')
+            call('POST','/api/v1/index',{'operation_id':operation(),'collection_id':'main','embedding_space_id':'fixture','config':config},tenant='other')
             fresh={**old_write,'document':{'body':'new incarnation','vector':[2,0]}}
-            assert write_one(call, '/api/v1/index/main', fresh, key=other_key)['receipt']['version']==1
-            call('DELETE','/api/v1/index/main',deleted,key=other_key)
+            assert write_one(call, '/api/v1/index/main', fresh, tenant='other')['receipt']['version']==1
+            call('DELETE','/api/v1/index/main',deleted,tenant='other')
             cold_restart()
-            assert call('GET','/api/v1/index/main/doc/same',key=other_key)['document']['body']=='new incarnation'
+            assert call('GET','/api/v1/index/main/doc/same',tenant='other')['document']['body']=='new incarnation'
             if fixture:
                 with S3.lock:keys=list(S3.objects)
                 assert any('/anyseek/other/main/wal/' in k for k in keys)
@@ -247,7 +240,7 @@ def main():
                 expected=query()
                 print('PASS confirmed SQLite commit + failed local cache append: durable_pending, fenced output, cold recovery and original receipt',flush=True)
             clock.write_text(str(int(clock.read_text())+8*86400000))
-            wait_history_ready(tenant_key)
+            wait_history_ready('test')
             assert query()==expected
             cold_restart();assert query()==expected
             print('PASS remote history maintenance and query views survive cache loss',flush=True)
@@ -284,10 +277,9 @@ def main():
             print('PASS joint backup retry, interrupted restore, generation isolation, retirement and cold restart',flush=True)
             # Keep a collection backup in the complete-service archive.
             archive=call('POST','/api/v1/index/main/backup',{'operation_id':operation()})
-            user=base64.b64encode(os.urandom(32)).decode()
-            call('POST','/api/v1/apikey',{'operation_id':operation(),'key_id':'reader','apikey_base64':user})
+            invalid_service_key=base64.b64encode(os.urandom(32)).decode()
             # The same clock advance also ages the other tenant's live collection.
-            wait_history_ready(other_key)
+            wait_history_ready('other')
             whole_request={'operation_id':operation()}
             whole=control('POST','/api/v1/service-backups',whole_request)
             assert whole['snapshot']['collection_backups']
@@ -296,9 +288,7 @@ def main():
             target_root=pathlib.Path(restored['target_root']);stop()
             env['ANYSEEK_S3_BUCKET'] = 'disposable-restored' if args.backend == 'fixture' else os.environ['ANYSEEK_S3_TEST_RESTORE_BUCKET']
             start(target=target_root)
-            call('GET','/api/v1/index/main',key=user,status=403)
-            tenant_key=base64.b64encode(os.urandom(32)).decode()
-            call('POST','/api/v1/apikey',{'operation_id':operation(),'key_id':'restored-access','apikey_base64':tenant_key})
+            call('GET','/api/v1/index/main',key=invalid_service_key,status=401)
             assert call('GET','/api/v1/index/main/doc/a')['version']==2
             # Old collection archives in a service snapshot remain usable.
             copied=archive['backup_id']  # Created above by this tenant for main.
@@ -312,7 +302,7 @@ def main():
             assert call('GET','/api/v1/index/main/doc/a')['version']==2
             assert call('GET','/api/v1/index/copied-archive/doc/a')['version']==2
             assert not target_root.joinpath('s3-namespace').exists()
-            print('PASS complete service archive: retained S3 backups, isolated restore, disabled old keys and cold restart',flush=True)
+            print('PASS complete service archive: retained S3 backups, isolated restore, configured service credentials and cold restart',flush=True)
         finally:
             for child in children:
                 if child.poll() is None:child.kill();child.wait(timeout=30)

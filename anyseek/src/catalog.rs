@@ -1,5 +1,5 @@
-//! SQLite tenant identity and collection lifecycle authority. Data directories
-//! are independent of identities; revoking a key never deletes a collection.
+//! SQLite collection lifecycle authority. Data directories
+//! Tenant namespaces come from the trusted caller; credentials are not persisted.
 //! The HTTP service integration is tracked in docs/record-model.md.
 use crate::{
     record::{OperationId, RecordConfig},
@@ -65,10 +65,10 @@ fn epoch() -> u64 {
         / 86400
 }
 
-/// Reserved authenticated platform identity, outside the tenant ID alphabet.
+/// Reserved service-wide management receipt scope, outside the tenant alphabet.
 pub const MASTER: &str = "@master";
 
-/// Validate a tenant/collection path component without normalization.
+/// Validate a collection path component without normalization.
 pub fn validate_name(value: &str) -> Result<(), CatalogError> {
     if !(1..=63).contains(&value.len())
         || !value.as_bytes()[0].is_ascii_lowercase()
@@ -82,8 +82,18 @@ pub fn validate_name(value: &str) -> Result<(), CatalogError> {
     }
     Ok(())
 }
+/// Namespace path components also accept UUIDs beginning with a digit.
+pub fn validate_tenant(value: &str) -> Result<(), CatalogError> {
+    if !(1..=63).contains(&value.len())
+        || !value.as_bytes()[0].is_ascii_alphanumeric()
+        || !value.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
+    {
+        return Err(CatalogError::Rejected("tenant must match ^[a-z0-9][a-z0-9_-]{0,62}$".into()));
+    }
+    Ok(())
+}
 fn scope(tenant: &str, collection: &str) -> Result<String, CatalogError> {
-    validate_name(tenant)?;
+    validate_tenant(tenant)?;
     validate_name(collection)?;
     Ok(format!("{tenant}/{collection}"))
 }
@@ -99,19 +109,6 @@ fn identity(value: &str) -> Result<(), CatalogError> {
 /// Trusted management/lifecycle commands. HTTP enforces the caller boundary.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum CatalogCommand {
-    /// Create an immutable tenant identity.
-    AddTenant { tenant_id: String },
-    /// Bind a new credential verifier to one existing tenant.
-    AddKey {
-        /// Stable credential ID; never reused after revocation.
-        key_id: String,
-        /// Immutable tenant identity.
-        tenant_id: String,
-        /// SHA-256 verifier; raw credentials are not persisted.
-        verifier: String,
-    },
-    /// Disable a credential without deleting tenant data.
-    RevokeKey { key_id: String },
     /// Persist a collection initialization intent before opening its data engine.
     PrepareCollection {
         /// Immutable tenant identity.
@@ -207,15 +204,6 @@ pub struct CatalogReceipt {
     /// Durable catalog sequence.
     pub seq: u64,
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
-struct Key {
-    /// SHA-256 verifier; raw credentials are not persisted.
-    verifier: String,
-    /// Physical initialization is complete and visible.
-    active: bool,
-    /// Immutable tenant identity.
-    tenant_id: Option<String>,
-}
 /// Tenant-owned physical initialization/lifecycle metadata.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CollectionEntry {
@@ -255,7 +243,7 @@ impl CollectionEntry {
     }
     /// Durably establish the name hierarchy before publishing a child partition.
     pub fn prepare_parent(&self, root: &Path) -> Result<(), CatalogError> {
-        validate_name(&self.tenant_id)?;
+        validate_tenant(&self.tenant_id)?;
         validate_name(&self.collection_id)?;
         let parent = root.join(self.directory()).parent().unwrap().to_path_buf();
         std::fs::create_dir_all(&parent).map_err(storage)?;
@@ -284,8 +272,6 @@ struct Applied {
 struct State {
     seq: u64,
     epoch_watermark: u64,
-    tenants: std::collections::BTreeSet<String>,
-    keys: BTreeMap<String, Key>,
     collections: BTreeMap<String, CollectionEntry>,
     backups: BTreeMap<String, BackupEntry>,
     operations: Vec<Applied>,
@@ -385,59 +371,6 @@ fn apply(state: &mut State, event: &Applied) -> Result<(), CatalogError> {
         return Err(storage("catalog sequence mismatch"));
     }
     match &event.request.command {
-        CatalogCommand::AddTenant { tenant_id } => {
-            validate_name(tenant_id)?;
-            if !state.tenants.insert(tenant_id.clone()) {
-                return Err(CatalogError::Conflict("tenant exists".into()));
-            }
-        }
-        CatalogCommand::AddKey {
-            key_id,
-            tenant_id,
-            verifier,
-        } => {
-            identity(key_id)?;
-            validate_name(tenant_id)?;
-            if !state.tenants.contains(tenant_id) {
-                return Err(CatalogError::Rejected("tenant not found".into()));
-            }
-            if key_id == "master"
-                || verifier.len() != 64
-                || !verifier.bytes().all(|b| b.is_ascii_hexdigit())
-            {
-                return Err(CatalogError::Rejected(
-                    "reserved key ID or invalid SHA-256 verifier".into(),
-                ));
-            }
-            if state.keys.contains_key(key_id)
-                || state
-                    .keys
-                    .values()
-                    .any(|k| k.verifier.eq_ignore_ascii_case(verifier))
-            {
-                return Err(CatalogError::Conflict(
-                    "key ID or verifier already retained".into(),
-                ));
-            }
-            state.keys.insert(
-                key_id.clone(),
-                Key {
-                    verifier: verifier.to_ascii_lowercase(),
-                    active: true,
-                    tenant_id: Some(tenant_id.clone()),
-                },
-            );
-        }
-        CatalogCommand::RevokeKey { key_id } => {
-            if key_id == "master" {
-                return Err(CatalogError::Rejected("master cannot be revoked".into()));
-            }
-            state
-                .keys
-                .get_mut(key_id)
-                .ok_or(CatalogError::Unauthorized)?
-                .active = false;
-        }
         CatalogCommand::PrepareCollection {
             tenant_id,
             collection_id,
@@ -450,9 +383,6 @@ fn apply(state: &mut State, event: &Applied) -> Result<(), CatalogError> {
             ..
         } => {
             let id = scope(tenant_id, collection_id)?;
-            if !state.tenants.contains(tenant_id) {
-                return Err(CatalogError::Unauthorized);
-            }
             crate::record::validate_config(config)
                 .map_err(|e| CatalogError::Rejected(e.to_string()))?;
             if state.collection(&id).is_some_and(|e| !e.deleted) {
@@ -569,51 +499,31 @@ fn apply(state: &mut State, event: &Applied) -> Result<(), CatalogError> {
     Ok(())
 }
 impl Catalog {
-    /// Resume a durably prepared, unserved initial database.
+    /// Resume a durably prepared, unserved initial catalog.
     pub async fn resume_initialization(path: &Path) -> Result<(), CatalogError> {
-        sqlite::resume(path)
+        crate::resources::file_transaction(|| sqlite::resume(path))
+            .await.map_err(|_| CatalogError::Busy)?
     }
     /// Create an empty SQLite catalog in a new root.
     pub async fn create(path: &Path) -> Result<Self, CatalogError> {
         Self::create_state(path, State::default()).await
     }
-    /// Initialize the platform credential without a tenant data identity.
-    pub async fn create_with_key(
-        path: &Path,
-        key_id: String,
-        verifier: String,
-    ) -> Result<Self, CatalogError> {
-        if key_id != "master"
-            || verifier.len() != 64
-            || !verifier.bytes().all(|b| b.is_ascii_hexdigit())
-        {
-            return Err(CatalogError::Rejected("invalid platform credential".into()));
-        }
-        let mut state = State::default();
-        state.keys.insert(
-            key_id,
-            Key {
-                verifier: verifier.to_ascii_lowercase(),
-                active: true,
-                tenant_id: None,
-            },
-        );
-        Self::create_state(path, state).await
-    }
     async fn create_state(path: &Path, state: State) -> Result<Self, CatalogError> {
         let path = path.to_owned();
         crate::resources::spawn(async move {
-            let store = sqlite::create(&path, &state)?;
+            let store = crate::resources::file_transaction(|| sqlite::create(&path, &state))
+                .await.map_err(|_| CatalogError::Busy)??;
             Ok(Self::from_parts(state, store))
         })
         .await
         .map_err(|e| CatalogError::OutcomeUnknown(e.to_string()))?
     }
-    /// Open a valid existing SQLite catalog; never replace missing metadata.
+    /// Open an existing SQLite catalog; never replace missing metadata.
     pub async fn open(path: &Path) -> Result<Self, CatalogError> {
         let path = path.to_owned();
         crate::resources::spawn(async move {
-            let (store, state) = sqlite::Store::open(&path)?;
+            let (store, state) = crate::resources::file_transaction(|| sqlite::Store::open(&path))
+                .await.map_err(|_| CatalogError::Busy)??;
             Ok(Self::from_parts(state, store))
         })
         .await
@@ -685,7 +595,8 @@ impl Catalog {
             #[cfg(not(test))]
             let limit = MAX_OPERATIONS;
             if inner.state.operations.len() >= limit {
-                inner.compact(now)?;
+                crate::resources::file_transaction(|| inner.compact(now))
+                    .await.map_err(|_| CatalogError::Busy)??;
                 if inner.state.operations.len() >= limit {
                     return Err(CatalogError::Rejected(
                         "catalog operation budget exhausted".into(),
@@ -705,11 +616,11 @@ impl Catalog {
             let mut next = inner.state.clone();
             apply(&mut next, &event)?;
             sqlite::validate_state(&next)?;
-            inner.healthy = false;
-            {
+            crate::resources::file_transaction(|| {
+                inner.healthy = false;
                 let Inner { store, state, .. } = &mut *inner;
-                store.persist(state, &next)?;
-            }
+                store.persist(state, &next)
+            }).await.map_err(|_| CatalogError::Busy)??;
             #[cfg(test)]
             if inner.fail_after_durable {
                 return Err(CatalogError::OutcomeUnknown(
@@ -723,28 +634,6 @@ impl Catalog {
         .await
         .map_err(|e| CatalogError::OutcomeUnknown(e.to_string()))?
     }
-    /// Resolve the authenticated tenant once. Revocation affects subsequent authentication.
-    pub async fn authenticate(&self, verifier: &str) -> Result<String, CatalogError> {
-        let inner = self.inner.lock().await;
-        if !inner.is_healthy() {
-            return Err(CatalogError::RecoveryRequired);
-        }
-        inner
-            .state
-            .keys
-            .values()
-            .find(|k| k.active && k.verifier == verifier)
-            .map(|k| k.tenant_id.clone().unwrap_or_else(|| MASTER.into()))
-            .ok_or(CatalogError::Unauthorized)
-    }
-    /// List tenant IDs for the authenticated management layer.
-    pub async fn tenants(&self) -> Result<Vec<String>, CatalogError> {
-        let inner = self.inner.lock().await;
-        if !inner.is_healthy() {
-            return Err(CatalogError::RecoveryRequired);
-        }
-        Ok(inner.state.tenants.iter().cloned().collect())
-    }
     /// Inventory of logically retired backups.
     pub async fn retired_backups(
         &self,
@@ -757,7 +646,7 @@ impl Catalog {
     }
     /// Check backup tenant ownership, including retained completed restores.
     pub async fn require_backup(&self, tenant: &str, id: &str) -> Result<(), CatalogError> {
-        validate_name(tenant)?;
+        validate_tenant(tenant)?;
         let inner = self.inner.lock().await;
         if !inner.is_healthy() {
             return Err(CatalogError::RecoveryRequired);
@@ -801,13 +690,10 @@ impl Catalog {
     }
     /// List active collections belonging to an already authenticated tenant.
     pub async fn listing(&self, tenant: &str) -> Result<Vec<CollectionEntry>, CatalogError> {
-        validate_name(tenant)?;
+        validate_tenant(tenant)?;
         let inner = self.inner.lock().await;
         if !inner.is_healthy() {
             return Err(CatalogError::RecoveryRequired);
-        }
-        if !inner.state.tenants.contains(tenant) {
-            return Err(CatalogError::Unauthorized);
         }
         Ok(inner
             .state
@@ -906,7 +792,8 @@ impl Catalog {
             return Err(CatalogError::RecoveryRequired);
         }
         let now = epoch().max(inner.state.epoch_watermark);
-        inner.compact(now)
+        crate::resources::file_transaction(|| inner.compact(now))
+            .await.map_err(|_| CatalogError::Busy)?
     }
     /// Look up a platform management receipt.
     pub async fn operation(

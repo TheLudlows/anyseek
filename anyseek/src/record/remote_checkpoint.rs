@@ -2,7 +2,7 @@
 //! immutable local files to bounded object chunks; it contains no payload copies.
 //! SQLite alone selects the descriptor. Old graphs remain immutable for backups.
 use super::*;
-use crate::storage::{sqlite_authority::ObjectRef, object_keys};
+use crate::storage::{authority::ObjectRef, object_keys};
 use sha2::{Digest, Sha256};
 use std::io::{Read, Write};
 
@@ -112,11 +112,11 @@ fn combined_files<'a>(root:&Path,base:&'a [File],index:&'a [File],budget:u64,chu
 }
 
 impl RemotePersistence {
-    async fn selected(&self,head:&crate::storage::sqlite_authority::PartitionHead,fresh:bool)->Result<Selected,RecordError> {
+    async fn selected(&self,head:&crate::storage::authority::PartitionHead,fresh:bool)->Result<Selected,RecordError> {
         Self::selected_from(&self.store,&self.partition_id,head,fresh).await
     }
     async fn selected_from(source:&crate::storage::s3_compatible::S3CompatibleStore,partition_id:&str,
-        head:&crate::storage::sqlite_authority::PartitionHead,fresh:bool)->Result<Selected,RecordError> {
+        head:&crate::storage::authority::PartitionHead,fresh:bool)->Result<Selected,RecordError> {
         #[derive(Deserialize)] struct Header{format:u32}
         let store=if fresh {source.uncached()}else{source.clone()};
         let selected=head.manifest.as_ref().ok_or(RecordError::RecoveryRequired)?;
@@ -152,7 +152,7 @@ impl RemotePersistence {
         })
     }
     async fn verify_index_cut(&self,root:&Path,index:&mut IndexOnly,
-        head:&crate::storage::sqlite_authority::PartitionHead,committed_tip:Option<ObjectRef>,
+        head:&crate::storage::authority::PartitionHead,committed_tip:Option<ObjectRef>,
         config:&RecordConfig,base:&State)->Result<(),RecordError> {
         if index.config_sha!=checkpoint_codec::json_digest(config)? || base.seq!=index.checkpoint_seq
             || committed_tip!=index.wal_tip {
@@ -180,6 +180,7 @@ impl RemotePersistence {
             state.admit_replay_frame(entry.payload.len())?;
             match serde_json::from_slice::<Entry>(&entry.payload).map_err(storage)? {
                 Entry::Applied(op)=>apply(&mut state,&op)?,
+                Entry::GroupApplied(d)=>group_plan::apply(&mut state,&d)?,
                 Entry::Expired(event)=>temporal::apply(&mut state,&event)?,
                 _=>return Err(storage("unexpected authority or same-sequence event in index suffix")),
             }
@@ -2307,9 +2308,9 @@ impl RecordPartition {
 /// Independent SQLite connection keeps long object I/O outside both the Record
 /// guard and its foreground authority mutex. All connections use the same DB.
 pub(super) struct RemoteBuild {
-    source_head:crate::storage::sqlite_authority::PartitionHead,
+    source_head:crate::storage::authority::PartitionHead,
     max_tail_bytes:usize,
-    pub build: crate::storage::sqlite_authority::IndexBuild,
+    pub build: crate::storage::authority::IndexBuild,
     store: crate::storage::s3_compatible::S3CompatibleStore,
     authority_path: PathBuf,
     partition_id: String,
@@ -2368,7 +2369,7 @@ impl RemoteBuild {
         }
         // Appends after the pinned cut are legal and proved by catch-up. A
         // different owner or selected authority is not a permissible suffix.
-        let authority=crate::storage::sqlite_authority::SqliteAuthority::open(&self.authority_path,std::time::Duration::from_secs(5)).map_err(storage)?;
+        let authority=crate::storage::sqlite_authority::SqliteAuthority::open_existing(&self.authority_path,std::time::Duration::from_secs(5)).map_err(storage)?;
         let current=authority.read_head(&self.partition_id).map_err(storage)?.ok_or(RecordError::RecoveryRequired)?;
         if current.owner_epoch!=head.owner_epoch || current.manifest!=head.manifest || current.indexed_seq!=head.indexed_seq || current.committed_seq<head.committed_seq {
             return Err(RecordError::RecoveryRequired);
@@ -2402,7 +2403,7 @@ impl RemoteBuild {
     }
     pub(super) async fn upload(&self, root:&Path, reference:&anchor::Reference,
         payloads:&crate::storage::payload_pool::Closure, authority_budget:u64) -> Result<ObjectRef,RecordError> {
-        let mut authority = crate::storage::sqlite_authority::SqliteAuthority::open(&self.authority_path,std::time::Duration::from_secs(5)).map_err(storage)?;
+        let mut authority = crate::storage::sqlite_authority::SqliteAuthority::open_existing(&self.authority_path,std::time::Duration::from_secs(5)).map_err(storage)?;
         let mut files = Vec::new();
         let mut total = 0u64;
         let mut chunk_count = 0usize;

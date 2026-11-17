@@ -7,7 +7,7 @@ for (const language of ['zh', 'en'] as const) {
     await page.route('**/api/v1/**', route => { requests++; return route.abort(); });
     await page.goto('/');
     await page.getByLabel('语言 / Language').selectOption(language);
-    await page.getByLabel('Tenant API Key', {exact:true}).fill('test-key');
+    await page.getByLabel(language === 'en' ? 'Tenant namespace' : '租户命名空间', {exact:true}).fill('test-key');
     await page.getByRole('button', {name:language === 'zh' ? '连接服务' : 'Connect', exact:true}).click();
     await expect(page.locator('form').getByRole('alert')).toContainText('HTTPS');
     await expect(page.locator('form').getByRole('alert')).toContainText('127.0.0.1');

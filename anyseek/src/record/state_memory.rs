@@ -153,6 +153,7 @@ impl State {
         Ok(Self {
             lineage: self.lineage.clone(),
             history: self.history.clone(),
+            groups: self.groups.clone(),
             independent_snapshot: self.independent_snapshot,
             seq: self.seq,
             epoch_watermark: self.epoch_watermark,

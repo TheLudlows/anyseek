@@ -34,12 +34,12 @@ import type { Collection, Json, Page, RecordData } from "./types.ts";
 
 export function Data({
   collection,
-  apiKey,
+  tenant,
   owner,
   onWritten,
 }: {
   collection: Collection;
-  apiKey: string;
+  tenant: string;
   owner: string;
   onWritten: () => Promise<void>;
 }) {
@@ -58,7 +58,7 @@ export function Data({
     setPage(null);
     setSelected(null);
     api<Page>(
-      apiKey,
+      tenant,
       collectionPath(collection.id) + "/iterator",
       '{"length":20,"cursor":' + apiJsonText(cursors[position]) + "}",
       "POST",
@@ -72,7 +72,7 @@ export function Data({
         if (!controller.signal.aborted) setBusy(false);
       });
     return () => controller.abort();
-  }, [collection.id, apiKey, position, revision]);
+  }, [collection.id, tenant, position, revision]);
   const fields = collection.schema
     .filter((f) => f.store !== false && !f.index_vector)
     .slice(0, 3);
@@ -239,7 +239,7 @@ export function Data({
       {importing && (
         <ImportData
           collection={collection}
-          apiKey={apiKey}
+          tenant={tenant}
           owner={owner}
           close={() => setImporting(false)}
           onWritten={async () => {
@@ -253,13 +253,13 @@ export function Data({
 }
 function ImportData({
   collection,
-  apiKey,
+  tenant,
   owner,
   close,
   onWritten,
 }: {
   collection: Collection;
-  apiKey: string;
+  tenant: string;
   owner: string;
   close: () => void;
   onWritten: () => Promise<void>;
@@ -323,7 +323,7 @@ function ImportData({
         await generatePendingEmbeddings(request, owner, collection, (done) => setStatus(t("已生成向量 {0} / {1} 条", done, request!.requests.length)), controller.signal);
         controller.signal.throwIfAborted();
       }
-      await sendWrites(request, apiKey, owner, (done) =>
+      await sendWrites(request, tenant, owner, (done) =>
         setStatus(t("已确认 {0} / {1} 条", done, request!.requests.length)),
       );
       setPending(null);
@@ -426,7 +426,7 @@ function ImportData({
         )}
         <Notice>{error}</Notice>
         <Notice kind="success">{status}</Notice>
-        {!busy && <RuntimeStatus collection={collection} apiKey={apiKey} />}
+        {!busy && <RuntimeStatus collection={collection} tenant={tenant} />}
         <div className="modal-actions">
           {pending && !foreign && (pending.rejected || (pending.delivery === "ingest" && !pending.unresolved)) && (
             <button

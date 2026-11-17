@@ -1,7 +1,7 @@
 //! Discardable, bounded immutable-object bytes. No cache file is ever mmap'ed:
 //! consumers receive owned bytes and materialize independently certified files.
 //! A cache hit proves content only, never current ownership, head or permission.
-use super::sqlite_authority::ObjectRef;
+use super::authority::ObjectRef;
 use sha2::{Digest, Sha256};
 use std::{fs, io::{self, Read, Write}, path::PathBuf};
 

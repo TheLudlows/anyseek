@@ -1,8 +1,85 @@
 # 后续路线与验收证据
 
-核对基线：2026-11-07 主干 `a810b19`（#204）；本轮写入简化与验证见下表。本文集中维护剩余工作和证据入口；当前能力见[功能与边界](features.md)，实现见[架构](architecture.md)，接口与资源限制见[服务指南](../anyseek/src/server/README.md)。合入不等于发布或完成性能验收。
+核对基线：2026-11-17 主干 `bb53b80`；本轮分支的 Catalog 持久化调整与验证见下表。本文集中维护剩余工作和证据入口；当前能力见[功能与边界](features.md)，实现见[架构](architecture.md)，接口与资源限制见[服务指南](../anyseek/src/server/README.md)。合入不等于发布或完成性能验收。
+
+## Origence workspace 自动路由（2026-11-17）
+
+租户命名空间独立校验为 `^[a-z0-9][a-z0-9_-]{0,62}$`，支持业务 UUID；集合名继续采用
+原有小写字母开头规则。Catalog 目录、SQLite 严格重开、服务备份路径校验、HTTP、SDK 和
+控制台使用一致的命名空间规则。Origence 直接传 tenant UUID，并将 workspace 映射为
+`ws_<无连字符 UUID>`，由宿主首次使用时创建集合，不新增租户注册、租户 Key 或映射表。
+`/api/v1/live` 保持公开；携带 `apikey` 时验证服务凭据，支持无预置集合的宿主启动检查。
+
+Linux / Rust 1.99.1：Catalog 测试 21 项通过（另 1 项子进程 worker ignored）；正常
+服务测试 27 项通过；无默认特性 all-targets check、正常服务构建、生产 lib/bin Clippy 通过，
+Clippy 保留已有告警。控制台测试 38 项及 build、Rust/console 边界检查、Python SDK 编译通过。
+使用本次正常生产二进制与 Origence 联调，8 项真实引擎契约和 HTTP/stdio MCP 验收通过，
+包括首次建集合、数字开头 UUID、隔离、发布未知结果恢复和进程重开。
+本轮未执行 Windows 本地构建或真实云 S3 验收；下节结果保留原批次范围。
+
+## Catalog 与服务认证职责收敛（2026-11-17）
+
+基于 master `bb53b80`。集合、备份归属和管理回执继续使用 SQLite；删除租户注册及
+租户 Key 签发、持久化、撤销和认证。用户认证及权限由 Origence／网关完成，AnySeek
+仅校验进程配置派生的服务凭据，保留可信租户命名空间。
+
+- Catalog 7 只保留 `catalog_meta`、`catalog_collections`、`catalog_backups`、
+  `catalog_operations` 四张表。集合变更与管理回执在同一短事务提交；备份归属、代次回收、
+  历史管理 ID 隔离和完整服务恢复保留。不维护 Catalog 原生日志，也不保存 master 验证材料。
+- 数据接口要求 `apikey` 服务凭据和 `X-AnySeek-Tenant`；租户不需要注册。删除
+  `/api/v1/tenants`、`/api/v1/apikey`，集合列表统一为 `GET /api/v1/index`。管理回执查询
+  有租户头时按命名空间查找，缺省用于服务级操作。错误凭据、缺失或重复租户头在 body 前拒绝。
+- 控制台只选择租户，通过上游登录会话访问网关；服务凭据只在网关或本地 Vite 代理进程中。
+  待确认操作的连接指纹按来源和命名空间隔离，删除旧 Key 初始化流程，保留记录重试数据。
+- S3 authority schema 3 与备份快照 2 保持原协议，和 Catalog 共用 `metadata.sqlite`。
+  存储契约、严格已有库打开、减少重复上传预留/登记 SQL 及 IO 后退休复核继续保留。
+- 仅支持新建 Catalog 7 根目录，旧 SQLite Catalog 5、原生 Catalog 6 和旧备份不自动迁移、
+  转换或覆盖。master 不写库，目标恢复服务使用自己的进程配置。
+
+Linux / Rust 1.99.1 验证：
+
+| 检查 | 结果 |
+| --- | --- |
+| 默认 core 精确清单 | PASS：212 项 |
+| 无默认特性 Catalog / 服务层 | PASS：20 / 35 项；另有 1 项子进程 worker ignored，由父测试调用 |
+| 无默认特性 all-targets check、生产 lib/bin Clippy | PASS，Clippy 保留既有告警 |
+| 本地 HTTP 全部语义与显式故障 | PASS：启动、base、temporal、history、ingest、indexer、服务认证和命名空间 |
+| 本地及 S3 fixture 集合回收 | PASS：备份保护、代次隔离、物理回收、迟到对象和重启 |
+| POSIX SIGTERM 关闭 | PASS：断连后 owned 写入、消费者、root owner 和原 ID 重开；显式 info 日志核对完成 |
+| S3 fixture 全套（fault-injection） | PASS：8 阶段，含六组冷缓存语义与检查点/备份/恢复 |
+| 控制台 | PASS：38 单元测试、13 模拟网关浏览器测试、10 真实服务浏览器测试和生产构建 |
+| 静态边界与 S3 runner UT | PASS：三个边界检查、语义套件入口 UT、Python 编译和新增 SQL 模块 rustfmt |
+
+未执行 Windows、真实云端 S3、生产容量或断电验收，不据此推定吞吐或 P99 改善。
+原有全目标 Clippy 的生命周期测试 `async_yields_async` 问题不计为通过。
+
+## 检索配置与诊断切片（2026-11-17）
+
+基于 master `6614bbf`，为 Origence 接入补齐 analysis 配置摘要与查询诊断。
+保留已有版本、容量、embedding_space_id、消费进度及排名贡献；新增关联 ID、明确的
+模式/时间边界和内容无关的错误标记，不修改检索排序、持久格式或授权规则。
+服务端新回归验证请求/正文关联、错误响应、独立请求 ID 和自定义词表脱敏，并加入
+core 服务检查。Linux / Rust 1.99.1 本地验证：
+
+- `cargo check --locked --no-default-features --bin anyseek_server` 通过。
+- `cargo test --locked --no-default-features --bin anyseek_server -- --test-threads=1`：34 项通过。
+- 默认特性 `cargo test --locked --bin anyseek_server diagnostic_tests -- --test-threads=1`：2 项通过。
+- 无默认特性服务构建通过；脚本 UT 1 项通过。新模块使用已安装的 Rust 1.98 rustfmt 格式化。
+- 与 Origence `dcde761` 上的诊断切片真实联调：8 项合同、HTTP/stdio MCP、Run 关联/重试/重开通过。
+
+以上为本地检查，既有编译告警保留；未执行 Windows、真实 S3、生产容量或断电验收，
+不作为检索效果或吞吐改善证明。
 
 ## 当前优先项
+
+### 检索诊断复核修复（2026-11-17）
+
+基于 `88ab7c1`，查询诊断升为 v2，增加当前集合 embedding_space_id 的 SHA256，
+未配置为空值。它独立于原生分析摘要，可由调用方在每次查询时核对同维度的空间变化；
+原始标识不进入诊断，向量来源校验仍由调用方负责。
+Linux / Rust 1.99.1：无默认特性服务测试 35 项、默认特性诊断测试 3 项及服务构建通过；
+新用例用真实路由验证两种相同维度、相同分析配置但不同空间的摘要不同。
+保留原生包格式与分析摘要定义，未改变排序或授权规则。
 
 ### 写入流程简化（2026-11-07）
 
@@ -76,6 +153,6 @@ W5 对照：Windows/default debug、local 新库、相同请求与临时数据�
 
 完整逻辑 State 仍驻内存；10 万档是准入上界，不是任意数据形态的容量承诺。有限准入和显式缓冲预算不是全进程 RSS 或全磁盘硬上限。默认服务共用 SQLite authority 及其校验对象缓存；多 authority、物化索引和独立备份仍需整体评估。
 
-回执默认最早两日后具备回收资格，另受重试窗口、认证 history floor、epoch、读者与备份保护约束，不是固定清理期限。不能通过删除窗口内回执解除容量限制。S3 模式必须保留 metadata.sqlite、SQLite WAL 与 owner 锁文件，不能只凭 bucket 重建权威；SQLite 首版不提供跨主机 HA 或权威卷丢失零 RPO。
+回执默认最早两日后具备回收资格，另受重试窗口、认证 history floor、epoch、读者与备份保护约束，不是固定清理期限。不能通过删除窗口内回执解除容量限制。S3 模式必须同时保留 metadata.sqlite、SQLite WAL 与 owner 锁文件，不能只凭 bucket 重建权威；SQLite 首版不提供跨主机 HA 或权威卷丢失零 RPO。
 
 超大 collection 分片、自动 split/merge、跨主机 HA、直接远端 Directory、预取与自动调度按实际容量需求后置。#107 的 Catalog/Generation 研究 PR #110 已关闭，只有实际负载证明确有瓶颈时再启动测量。不预设统一内部水位、UUID 替换 Operation ID 或重建执行框架。来源、关系和记忆策略在应用层；模型推理、解析切块、Embedding/Reflect、SQL/JOIN、完整图语言和旧格式迁移不进入本轮。

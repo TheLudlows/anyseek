@@ -477,6 +477,7 @@ impl Reference {
                 replayed.admit_replay_frame(checkpoint_codec::json_length(&entry)?)?;
                 match entry {
                     Entry::Applied(op)=>apply(&mut replayed,&op),
+                    Entry::GroupApplied(d)=>group_plan::apply(&mut replayed,&d),
                     Entry::Expired(event)=>temporal::apply(&mut replayed,&event),
                     Entry::HistoryTrim(event)=>history::apply_trim(&mut replayed,&config.history,&event),
                     Entry::Anchor(_)|Entry::Checkpoint{..}=>Err(storage("authority in WAL suffix")),

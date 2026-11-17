@@ -46,7 +46,8 @@ impl Catalog {
             if !current.reclaiming {
                 let mut next = inner.state.clone();
                 next.collections.get_mut(&id).unwrap().reclaiming = true;
-                inner.replace_reclamation(next)?;
+                crate::resources::file_transaction(|| inner.replace_reclamation(next))
+                    .await.map_err(|_| CatalogError::Busy)??;
             }
             let entry = inner.state.collections[&id].clone();
             drop(inner);
@@ -55,7 +56,8 @@ impl Catalog {
             if !inner.is_healthy() { return Err(CatalogError::RecoveryRequired); }
             let mut next = inner.state.clone();
             next.collections.remove(&id);
-            inner.replace_reclamation(next)?;
+            crate::resources::file_transaction(|| inner.replace_reclamation(next))
+                    .await.map_err(|_| CatalogError::Busy)??;
             log::info!("collection reclamation complete: {id}");
             Ok(true)
         }).await.map_err(|e| CatalogError::OutcomeUnknown(e.to_string()))?

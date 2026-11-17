@@ -4,6 +4,7 @@ use super::*;
 use futures::FutureExt;
 mod planning;
 mod persistence;
+pub(super) use persistence::{RemoteUpload, UploadedBatch};
 use planning::PlanningView;
 
 /// Only the completed prefix has definite outcomes. Busy and uncertain
@@ -354,8 +355,13 @@ impl RecordPartition {
                 if !inner.healthy {
                     return Err(RecordError::RecoveryRequired);
                 }
+                if inner.state.groups.as_ref().is_some_and(|g|g.owners.contains_key(&request.record_id) || g.receipts.iter().any(|r|r.operation_id==request.operation_id)) {
+                    return Err(RecordError::Conflict("record or operation belongs to a group".into()));
+                }
+                let group_operations=inner.state.groups.as_ref().map_or(0,|g|g.receipts.len());
                 let (previous, operation) = candidate.read(&inner.state, &request);
-                let input = candidate.input(previous.as_deref(), operation.as_deref());
+                let mut input = candidate.input(previous.as_deref(), operation.as_deref());
+                input.group_operation_count=group_operations;
                 if input.operation.is_none() {
                     if inner.maintenance_requested.is_some() {
                         return Err(RecordError::Busy);

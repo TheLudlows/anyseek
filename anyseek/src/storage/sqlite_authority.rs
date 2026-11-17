@@ -2,43 +2,18 @@
 //!
 //! This database stores coordination metadata only. Record bodies, vectors, WAL
 //! blocks and immutable index segments remain in external immutable objects.
-use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
+use rusqlite::{params, Connection, OpenFlags, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{path::{Path, PathBuf}, time::Duration};
 
 mod index_build;
 mod reclamation;
-pub(crate) use index_build::IndexBuild;
+#[cfg(test)]
+mod connection_tests;
+use super::authority::{IndexBuild, ObjectRef, PartitionHead, PublishOutcome};
 
 const SCHEMA_VERSION: i64 = 3;
-
-/// Immutable object identity; payload bytes are never stored in SQLite.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct ObjectRef {
-    pub key: String,
-    pub sha256: [u8; 32],
-    pub length: u64,
-}
-
-/// Authoritative partition watermarks and immutable object references.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct PartitionHead {
-    pub partition_id: String,
-    pub head_version: u64,
-    pub owner_epoch: u64,
-    pub committed_seq: u64,
-    pub wal_tip: Option<ObjectRef>,
-    pub manifest: Option<ObjectRef>,
-    /// Immutable Record configuration + initial empty checkpoint for object-backed recovery.
-    pub bootstrap: Option<ObjectRef>,
-    pub indexed_seq: u64,
-    pub log_base_seq: u64,
-    pub log_anchor: Option<ObjectRef>,
-}
-
 
 /// Logical snapshot of the SQLite authority and the caller-verified object closure.
 /// The payload bytes live in object storage; this snapshot contains metadata only.
@@ -99,14 +74,6 @@ pub(crate) struct RetiredSnapshot {
     pub retired_at_ms: i64,
 }
 
-/// Publication result. Uncertain I/O errors must be resolved with the same operation ID.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum PublishOutcome {
-    Published(PartitionHead),
-    AlreadyPublished(PartitionHead),
-    Conflict,
-}
-
 /// One local SQLite authority. Never share its database/WAL files between hosts.
 pub(crate) struct SqliteAuthority {
     path: PathBuf,
@@ -114,22 +81,83 @@ pub(crate) struct SqliteAuthority {
 }
 
 impl SqliteAuthority {
-    /// Open a durable SQLite database and enforce WAL plus FULL synchronization.
+    /// Initialize a fresh coordination store, or validate an existing one.
+    /// Record bodies and derived indexes never enter this database.
     pub(crate) fn open(path: &Path, busy_timeout: Duration) -> rusqlite::Result<Self> {
-        let connection = Connection::open(path)?;
+        let authority = Self::connect(path, busy_timeout, true)?;
+        let present: bool = authority.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name IN
+             ('authority_schema','partition_heads','operation_receipts','object_uploads',
+              'object_edges','object_pins','index_builds','backup_exports','restore_receipts','retired_objects'))",
+            [], |row| row.get(0),
+        )?;
+        if !present {
+            authority.initialize()?;
+        }
+        authority.validate_existing()?;
+        Ok(authority)
+    }
+
+    /// Open a known authority without creating its database or changing schema/mode.
+    /// Used by upload and background workers after startup established the store.
+    pub(crate) fn open_existing(path: &Path, busy_timeout: Duration) -> rusqlite::Result<Self> {
+        let authority = Self::connect(path, busy_timeout, false)?;
+        authority.validate_existing()?;
+        Ok(authority)
+    }
+
+    fn connect(path: &Path, busy_timeout: Duration, create: bool) -> rusqlite::Result<Self> {
+        let mut flags = OpenFlags::default();
+        if !create {
+            flags.remove(OpenFlags::SQLITE_OPEN_CREATE);
+        }
+        let connection = Connection::open_with_flags(path, flags)?;
         connection.busy_timeout(busy_timeout)?;
-        connection.pragma_update(None, "journal_mode", "WAL")?;
+        let mode: String = connection.pragma_query_value(None, "journal_mode", |row| row.get(0))?;
+        if !mode.eq_ignore_ascii_case("wal") {
+            if !create {
+                return Err(rusqlite::Error::InvalidQuery);
+            }
+            connection.pragma_update(None, "journal_mode", "WAL")?;
+        }
         connection.pragma_update(None, "synchronous", "FULL")?;
         connection.pragma_update(None, "foreign_keys", "ON")?;
         let synchronous: i64 = connection.query_row("PRAGMA synchronous", [], |row| row.get(0))?;
         if synchronous != 2 {
             return Err(rusqlite::Error::InvalidQuery);
         }
-        let authority = Self { path: path.to_path_buf(), connection };
-        authority.initialize()?;
-        Ok(authority)
+        Ok(Self {
+            path: path.to_path_buf(),
+            connection,
+        })
     }
 
+    fn validate_existing(&self) -> rusqlite::Result<()> {
+        let version: i64 = self.connection.query_row(
+            "SELECT version FROM authority_schema WHERE singleton=1",
+            [],
+            |row| row.get(0),
+        )?;
+        if version != SCHEMA_VERSION {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        // Prepare only: reject incomplete stores without silently recreating tables.
+        // Each statement inspects one relation and never takes the writer lock.
+        for query in [
+            "SELECT partition_id,retired,head_version,owner_epoch,committed_seq,wal_tip_json,manifest_json,bootstrap_json,indexed_seq,log_base_seq,log_anchor_json FROM partition_heads LIMIT 0",
+            "SELECT partition_id,operation_id,request_sha256,committed_seq,result_json FROM operation_receipts LIMIT 0",
+            "SELECT object_key,sha256,byte_length,state,created_at_ms FROM object_uploads LIMIT 0",
+            "SELECT parent_key,child_key FROM object_edges LIMIT 0",
+            "SELECT pin_id,partition_id,object_key,pin_kind,expires_at_ms,backup_id FROM object_pins LIMIT 0",
+            "SELECT partition_id,build_epoch,binding_json,active FROM index_builds LIMIT 0",
+            "SELECT backup_id,snapshot FROM backup_exports LIMIT 0",
+            "SELECT partition_id,snapshot_sha256 FROM restore_receipts LIMIT 0",
+            "SELECT object_key,retired_generation,retired_at_ms FROM retired_objects LIMIT 0",
+        ] {
+            self.connection.prepare(query)?;
+        }
+        Ok(())
+    }
     fn initialize(&self) -> rusqlite::Result<()> {
         self.connection.execute_batch(
             "BEGIN IMMEDIATE;
@@ -202,12 +230,6 @@ impl SqliteAuthority {
              );
              COMMIT;"
         )?;
-        let version: i64 = self.connection.query_row(
-            "SELECT version FROM authority_schema WHERE singleton=1", [], |row| row.get(0)
-        )?;
-        if version != SCHEMA_VERSION {
-            return Err(rusqlite::Error::InvalidQuery);
-        }
         Ok(())
     }
 
@@ -331,6 +353,7 @@ impl SqliteAuthority {
         Ok((count as u64,bytes as u64))
     }
 
+    #[cfg(test)]
     pub(crate) fn is_durable_object(&self, object: &ObjectRef) -> rusqlite::Result<bool> {
         let row: Option<(Vec<u8>, i64, i64)> = self.connection.query_row(
             "SELECT sha256,byte_length,state FROM object_uploads WHERE object_key=?1",
@@ -349,23 +372,18 @@ impl SqliteAuthority {
         created_at_ms: i64,
     ) -> rusqlite::Result<()> {
         let tx = self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let existing: Option<(Vec<u8>, i64)> = tx.query_row(
-            "SELECT sha256,byte_length FROM object_uploads WHERE object_key=?1",
+        let existing: Option<(Vec<u8>, i64, i64)> = tx.query_row(
+            "SELECT sha256,byte_length,state FROM object_uploads WHERE object_key=?1",
             [&object.key],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         ).optional()?;
         match existing {
-            Some((digest, length)) => {
+            Some((digest, length, state)) => {
                 if digest.as_slice() != &object.sha256[..] || length < 0 || length as u64 != object.length {
                     return Err(rusqlite::Error::InvalidParameterName(
                         "immutable object key reused with different bytes".into()
                     ));
                 }
-                let state: i64 = tx.query_row(
-                    "SELECT state FROM object_uploads WHERE object_key=?1",
-                    [&object.key],
-                    |row| row.get(0),
-                )?;
                 if !matches!(state,0|1) {
                     return Err(rusqlite::Error::InvalidParameterName(
                         "retired immutable object key cannot be reactivated".into()
@@ -586,17 +604,20 @@ impl SqliteAuthority {
 
     /// Inventory before PUT: even a response-lost or cancelled upload has a
     /// durable identity for later collection. Registration never publishes it.
-    pub(crate) fn reserve_upload(&mut self,object:&ObjectRef,at:i64)->rusqlite::Result<()> {
+    /// Returns whether these immutable bytes were already durable at reservation.
+    pub(crate) fn reserve_upload(&mut self,object:&ObjectRef,at:i64)->rusqlite::Result<bool> {
         self.reserve_backup_upload(object,at,None)
     }
     /// Pin inventory before PUT, including backup-control objects which do not
     /// exist in the snapshot they describe. Reservation and pin are atomic.
-    pub(crate) fn reserve_backup_upload(&mut self, object:&ObjectRef,at:i64,backup_id:Option<&str>)->rusqlite::Result<()> {
+    /// The returned durable observation never replaces the post-I/O recheck.
+    pub(crate) fn reserve_backup_upload(&mut self, object:&ObjectRef,at:i64,backup_id:Option<&str>)->rusqlite::Result<bool> {
         let tx = self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let row: Option<(Vec<u8>,i64,i64)> = tx.query_row(
             "SELECT sha256,byte_length,state FROM object_uploads WHERE object_key=?1",
             [&object.key], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)),
         ).optional()?;
+        let durable = matches!(&row, Some((_, _, 1)));
         if let Some((digest,length,state)) = row {
             if digest.as_slice()!=object.sha256 || length!=to_i64(object.length)? || !matches!(state,0|1) {
                 return Err(rusqlite::Error::InvalidQuery);
@@ -609,7 +630,8 @@ impl SqliteAuthority {
             tx.execute("INSERT OR IGNORE INTO object_pins(pin_id,partition_id,object_key,pin_kind,expires_at_ms,backup_id)
                 VALUES(?1,'*',?2,'backup',NULL,?3)",params![backup_pin_id(id,&object.key),object.key,id])?;
         }
-        tx.commit()
+        tx.commit()?;
+        Ok(durable)
     }
 
     pub(crate) fn unreferenced_objects(&self) -> rusqlite::Result<Vec<ObjectRef>> {

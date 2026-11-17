@@ -1,4 +1,4 @@
-//! Request classification never substitutes for catalog authorization.
+//! Service authentication precedes namespace routing and resource admission.
 use super::*;
 use anyseek::resources::Lane;
 use axum::{extract::{FromRequestParts, MatchedPath}, http::Method};
@@ -40,8 +40,7 @@ fn classify(path: &str, method: &Method) -> Lane {
         ("/api/v1/index", &Method::POST) | ("/api/v1/restore" | "/api/v1/service-restores", &Method::POST) => Lane::Recovery,
         ("/api/v1/service-backups" | "/api/v1/index/{id}/backup", &Method::POST)
             | ("/api/v1/index/{id}", &Method::PATCH) | ("/api/v1/backups/{id}", &Method::DELETE) => Lane::Background,
-        ("/api/v1/apikey", &Method::POST | &Method::DELETE) | ("/api/v1/index/{id}", &Method::DELETE)
-            | ("/api/v1/tenants", &Method::POST | &Method::GET) | ("/api/v1/backups", &Method::GET)
+        ("/api/v1/index/{id}", &Method::DELETE) | ("/api/v1/backups", &Method::GET)
             | ("/api/v1/catalog/operation/{epoch}/{nonce}", &Method::GET) => Lane::Control,
         _ => Lane::Foreground,
     }
@@ -53,15 +52,14 @@ pub(super) async fn request(service: &Service, request: axum::extract::Request) 
     let preflight = if lane == Lane::Control { &service.control_preflight } else { &service.preflight };
     let _preflight = preflight.clone().try_acquire_owned().map_err(|_| Error::from(CatalogError::Busy))?;
     let mut tenant=None;
-    if lane != Lane::Public {
+    if lane != Lane::Public || (path == "/api/v1/live" && parts.headers.contains_key("apikey")) {
         let principal=service.authenticate_credentials(&parts.headers).await?;
-        let admin=matches!((path.as_str(),&parts.method),
-            ("/api/v1/apikey",&Method::POST|&Method::DELETE)
-            |("/api/v1/tenants",_)|("/api/v1/backups",&Method::GET)
-            |("/api/v1/backups/{id}",&Method::DELETE)
-            |("/api/v1/service-backups"|"/api/v1/service-restores",_)
-            |("/api/v1/catalog/operation/{epoch}/{nonce}",_));
-        if admin != (principal==MASTER) {return Err(Error(StatusCode::FORBIDDEN,"unauthorized","credential is not valid for this management/data endpoint".into()));}
+        let global = matches!(path.as_str(), "/api/v1/live" | "/api/v1/backups" | "/api/v1/backups/{id}"
+            | "/api/v1/service-backups" | "/api/v1/service-restores"
+            | "/api/v1/catalog/operation/{epoch}/{nonce}");
+        if !global && principal == MASTER {
+            return Err(bad("X-AnySeek-Tenant is required for tenant data requests"));
+        }
         parts.extensions.insert(Principal(principal.clone()));
         if principal!=MASTER {tenant=Some(principal);}
     }
@@ -70,7 +68,7 @@ pub(super) async fn request(service: &Service, request: axum::extract::Request) 
         let Path(params) = Path::<BTreeMap<String, String>>::from_request_parts(&mut parts, &()).await.map_err(bad)?;
         if let Some(id) = params.get("id") {
             anyseek::catalog::validate_name(id)?;
-            let id=format!("{}/{id}",tenant.as_deref().ok_or_else(||Error(StatusCode::FORBIDDEN,"unauthorized","Tenant credential required".into()))?);
+            let id=format!("{}/{id}",tenant.as_deref().ok_or_else(||Error(StatusCode::FORBIDDEN,"unauthorized","X-AnySeek-Tenant required".into()))?);
             // Axum performs exactly the same percent decoding used by handlers.
             // Unknown/user supplied identities do not grow the resource registry.
             if let Some((id, _)) = service.records.read().await.range(format!("{id}/")..format!("{id}0")).next_back() { subject = format!("collection:{id}"); }

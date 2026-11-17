@@ -18,7 +18,7 @@ import type { Collection, Mode, Json } from "./types.ts";
 
 type Props = {
   collections: Collection[];
-  apiKey: string;
+  tenant: string;
   owner: string;
   select: (id: string, page?: "data" | "search") => void;
   refresh: () => Promise<void>;
@@ -221,7 +221,7 @@ export function Collections(props: Props) {
           <span>{t("创建集合 → 导入记录 → 调试关键词、向量与混合检索")}</span>
         </p>
       </div>
-      {deleting && <DeleteCollection owner={props.owner} apiKey={props.apiKey} collection={deleting}
+      {deleting && <DeleteCollection owner={props.owner} tenant={props.tenant} collection={deleting}
         close={() => { setDeleting(null); setPendingDelete(storage.get<PendingDelete>("pendingDelete")); }}
         deleted={async () => { setDeletedNotice(t("集合 {0} 已删除。", deleting)); setDetail(null); await props.refresh(); }} />}
       {creating && (
@@ -233,14 +233,14 @@ export function Collections(props: Props) {
           close={() => setDetail(null)}
         >
           <SchemaTable fields={detail.schema} dimensions={detail.vector_dimensions} />
-          <RuntimeStatus collection={detail} apiKey={props.apiKey} showStatistics />
+          <RuntimeStatus collection={detail} tenant={props.tenant} showStatistics />
         </Modal>
       )}
     </>
   );
 }
 function CreateCollection({
-  apiKey,
+  tenant,
   owner,
   refresh,
   select,
@@ -275,7 +275,7 @@ function CreateCollection({
     setBusy(true);
     try {
       if (foreign)
-        throw new Error(t("保留的创建请求属于另一连接，请用原 API Key 处理。"));
+        throw new Error(t("保留的创建请求属于另一连接，请切回原租户处理。"));
       let request = pending;
       if (!request) {
         if (!/^[a-z][a-z0-9_-]{0,62}$/.test(name))
@@ -313,7 +313,7 @@ function CreateCollection({
         storage.set("pendingCreate", request);
         setPending(request);
       }
-      const result = await api(apiKey, "index", request.body);
+      const result = await api(tenant, "index", request.body);
       storage.remove("pendingCreate");
       setPending(null);
       await refresh();

@@ -6,9 +6,9 @@ import { createHash, randomBytes } from "node:crypto";
 
 export default async function setup() {
   const root = await mkdtemp(join(tmpdir(), "anyseek-console-"));
-  const secret = randomBytes(32).toString("hex");
+  const secret = process.env.ANYSEEK_TEST_SECRET!;
   const master = createHash("sha256").update(secret).digest("base64");
-  const key = randomBytes(32).toString("base64");
+  const key = master;
   const processEnv: NodeJS.ProcessEnv = {
     ...process.env,
     MASTER_KEY_SECRET: secret,
@@ -71,7 +71,7 @@ export default async function setup() {
     const post = async (path: string, body: object, auth = key) => {
       const response = await fetch("http://127.0.0.1:18180/api/v1/" + path, {
         method: "POST",
-        headers: { apikey: auth, "Content-Type": "application/json" },
+        headers: { apikey: auth, "X-AnySeek-Tenant": "console_test", "Content-Type": "application/json" },
         body: JSON.stringify(body),
       });
       if (!response.ok)
@@ -81,21 +81,6 @@ export default async function setup() {
         throw new Error("Fixture batch failed: " + JSON.stringify(result));
       return result;
     };
-    await post(
-      "tenants",
-      { operation_id: operation(), tenant_id: "console_test" },
-      master,
-    );
-    await post(
-      "apikey",
-      {
-        operation_id: operation(),
-        tenant_id: "console_test",
-        key_id: "console_key",
-        apikey_base64: key,
-      },
-      master,
-    );
     for (const [id, mode] of [
       ["knowledge_base", "Hybrid"],
       ["product_docs", "Lexical"],
@@ -161,6 +146,7 @@ export default async function setup() {
         },
       }] });
     process.env.ANYSEEK_TEST_KEY = key;
+    process.env.ANYSEEK_TEST_TENANT = "console_test";
     process.env.ANYSEEK_TEST_MASTER = master;
     return stop;
   } catch (error) {

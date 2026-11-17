@@ -306,10 +306,7 @@ mod tests {
             Err(storage("injected private cache candidate failure")));
         {let inner=p.inner.lock().await;assert!(inner.healthy);assert!(inner.background.is_none());assert!(inner.anchor.is_none());assert_eq!(inner.index.components().await.len(),3);}
         assert_eq!(p.search("alpha".into(),None,SearchMode::Lexical,vec![],10).await.unwrap().count_total,3);
-        // Live materializers retain the owner lock even after the public handle
-        // drops. Join them before testing recovery of the failed candidate.
-        p.finish_service_shutdown().await.unwrap();
-        drop(p);
+        p.finish_service_shutdown().await.unwrap();drop(p);
         let p=RecordPartition::open(&root,config().max_journal_bytes).await.unwrap();
         assert_eq!(p.search("alpha".into(),None,SearchMode::Lexical,vec![],10).await.unwrap().count_total,3);
     }

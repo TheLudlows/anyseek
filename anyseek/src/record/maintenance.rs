@@ -619,6 +619,7 @@ impl SourceProof {
             state.admit_replay_frame(checkpoint_codec::json_length(&entry)?)?;
             match entry {
                 Entry::Applied(op)=>apply(state,&op)?,
+                Entry::GroupApplied(d)=>group_plan::apply(state,&d)?,
                 Entry::Expired(event)=>temporal::apply(state,&event)?,
                 Entry::HistoryTrim(event)=>history::apply_trim(state,&config.history,&event)?,
                 _=>return Err(storage("unexpected captured source authority")),
@@ -710,7 +711,7 @@ fn expired_operation(op:&Applied,history_floor:u64,epoch:u64)->bool {
 pub(super) fn has_expired_operations(state:&State,epoch:u64)->Result<bool,RecordError> {
     let epoch=epoch.max(state.epoch_watermark);
     Ok(state.operations.iter().take_while(|op|op.receipt.seq<=state.history.floor)
-        .any(|op|expired_operation(op,state.history.floor,epoch)))
+        .any(|op|expired_operation(op,state.history.floor,epoch)) || state.groups.iter().flat_map(|g|g.receipts.iter()).any(|r|r.receipt.seq<=state.history.floor&&r.operation_id.epoch.saturating_add(1)<epoch))
 }
 struct OperationGc {
     epoch:u64,
@@ -721,13 +722,15 @@ struct OperationGc {
 impl OperationGc {
     fn capture(state:&State,epoch:u64,floor:u64)->Result<Self,RecordError> {
         let epoch=epoch.max(state.epoch_watermark);
-        let memory=crate::storage::build_budget::reserve_memory((state.operations.len() as u64)
+        let memory=crate::storage::build_budget::reserve_memory((state.operations.len().saturating_add(state.groups.as_ref().map_or(0,|g|g.receipts.len())) as u64)
             .checked_mul(512).ok_or_else(||storage("receipt GC inventory overflow"))?).map_err(storage)?;
         let selected:std::collections::BTreeSet<_>=state.operations.iter()
             .filter(|op|expired_operation(op,floor,epoch))
-            .map(|op|op.receipt.seq).collect();
-        let prefix=state.operations.iter().filter(|op|selected.contains(&op.receipt.seq))
-            .max_by_key(|op|op.receipt.seq).map(|last|temporal::RetiredPrefix {seq:last.receipt.seq,time_ms:last.observed_time_ms});
+            .map(|op|op.receipt.seq)
+            .chain(state.groups.iter().flat_map(|g|g.receipts.iter()).filter(|r|r.receipt.seq<=floor&&r.operation_id.epoch.saturating_add(1)<epoch).map(|r|r.receipt.seq)).collect();
+        let prefix=state.operations.iter().filter(|op|selected.contains(&op.receipt.seq)).map(|op|(op.receipt.seq,op.observed_time_ms))
+            .chain(state.groups.iter().flat_map(|g|g.receipts.iter()).filter(|r|selected.contains(&r.receipt.seq)).map(|r|(r.receipt.seq,r.observed_time_ms)))
+            .max_by_key(|(seq,_)|*seq).map(|(seq,time_ms)|temporal::RetiredPrefix {seq,time_ms});
         Ok(Self{epoch,selected,prefix,_memory:memory})
     }
     fn apply(&self,state:&mut State)->Result<(),RecordError> {
@@ -739,6 +742,7 @@ impl OperationGc {
         state.retired_operation_prefix=Some(prefix.clone());
     }
     state.operations.retain(|op|!self.selected.contains(&op.receipt.seq));
+    if let Some(groups)=state.groups.as_mut(){groups.receipts.retain(|r|!self.selected.contains(&r.receipt.seq));}
     // The fixed floor travels in the selected checkpoint. Recovery never uses
     // its own wall clock; rollback cannot admit a forgotten operation again.
     state.epoch_watermark=state.epoch_watermark.max(self.epoch);
