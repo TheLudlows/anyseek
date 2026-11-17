@@ -200,6 +200,28 @@ curl "$BASE/api/v1/index/demo/doc/welcome" -H "apikey: $API_KEY"
 
 写入返回 `receipt`、`operation_id`、`expires_at`。查询返回 `hits[].record`（包含 record_id、version、document）、score、visible_seq、statistics 和 count_total；按 ID 读取返回 Record envelope。更多条件更新、删除、授权、向量、备份示例见 [test_api.rest](test_api.rest)。
 
+## 配置与查询诊断
+
+Collection info 返回 `analysis`：版本化 format、完整配置 fingerprint、tokenizer 及实现/
+字典身份、stop_words 模式及摘要。fingerprint 是原生包校验使用的 index/schema/tokenizer
+身份 tuple 的 SHA-256；自定义词表内容不返回。展示它以便调用方核对并固定配置，
+不代表已验证检索质量。现有 version、limits、embedding_space_id 同时保留。
+
+所有 HTTP 响应携带服务端生成的 `x-anyseek-request-id`，不复用客户端传入值；
+服务错误另有安全的 `x-anyseek-error-code`。查询成功增加格式 v2 的 `diagnostics`，包含同一个 ID、
+引擎版本、browse/lexical/vector/hybrid 模式、elapsed_us、分析摘要、embedding_space_sha256
+和 index_progress。空间摘要是当前集合 embedding_space_id UTF-8 字节的 SHA256，未配置为 null；
+调用方可逐次核对，原始空间标识不进入诊断。分析摘要只描述 index/schema/tokenizer，
+不能替代空间身份核对，也不证明向量实际由该模型生成。
+进度复用 committed/lexical/vector 序号及恢复状态，index_failed 只表示有错误，不复制
+原始错误诊断。它在查询后另行采样，sampling 明确为 after_query_not_atomic_with_result；
+不能作为结果的原子快照、跨系统事务或已交付证明。既有 score/channels 保持原语义。
+
+服务端耗时覆盖查询准备、执行及进度采样，排除外层准入和完整响应交付；调用方往返
+耗时另测。调试日志 response_prepared 可用该 ID 关联状态/耗时，body_delivery 始终
+标为 unconfirmed。诊断不附带查询、向量、过滤值、正文或凭据。错误/取消路径可能没有
+查询诊断正文，调用方应保留缺口，不能补造进度。
+
 ## 查询与遍历
 
 文本选择 Lexical，单向量选择 Vector，文本加向量选择 Hybrid；`rrf` 提供加权融合和独立候选预算。空对象 `{}` 浏览活动记录，包括纯向量 collection；`length:0` 可仅统计词法/浏览结果。`count:false` 返回 `count_total:null`。默认返回 10 条，支持 offset、stored 字段投影、过滤和排序。查询字段投影只输出 schema 中 `store:true` 的字段；按 ID 读取和 iterator 可读取完整权威原始数据，并可显式投影。
