@@ -2,6 +2,23 @@
 
 核对基线：2026-11-07 主干 `a810b19`（#204）；本轮写入简化与验证见下表。本文集中维护剩余工作和证据入口；当前能力见[功能与边界](features.md)，实现见[架构](architecture.md)，接口与资源限制见[服务指南](../anyseek/src/server/README.md)。合入不等于发布或完成性能验收。
 
+## 检索配置与诊断切片（2026-11-17）
+
+基于 master `6614bbf`，为 Origence 接入补齐 analysis 配置摘要与查询诊断。
+保留已有版本、容量、embedding_space_id、消费进度及排名贡献；新增关联 ID、明确的
+模式/时间边界和内容无关的错误标记，不修改检索排序、持久格式或授权规则。
+服务端新回归验证请求/正文关联、错误响应、独立请求 ID 和自定义词表脱敏，并加入
+core 服务检查。Linux / Rust 1.99.1 本地验证：
+
+- `cargo check --locked --no-default-features --bin anyseek_server` 通过。
+- `cargo test --locked --no-default-features --bin anyseek_server -- --test-threads=1`：34 项通过。
+- 默认特性 `cargo test --locked --bin anyseek_server diagnostic_tests -- --test-threads=1`：2 项通过。
+- 无默认特性服务构建通过；脚本 UT 1 项通过。新模块使用已安装的 Rust 1.98 rustfmt 格式化。
+- 与 Origence `dcde761` 上的诊断切片真实联调：8 项合同、HTTP/stdio MCP、Run 关联/重试/重开通过。
+
+以上为本地检查，既有编译告警保留；未执行 Windows、真实 S3、生产容量或断电验收，
+不作为检索效果或吞吐改善证明。
+
 ## 当前优先项
 
 ### 写入流程简化（2026-11-07）

@@ -18,6 +18,8 @@ use std::{
 use tokio::sync::{Mutex, Semaphore};
 
 mod visibility;
+mod analysis;
+pub use analysis::AnalysisContract;
 pub use visibility::RecordVisibility;
 mod enrichment;
 mod temporal;

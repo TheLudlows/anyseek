@@ -1,6 +1,10 @@
 //! Tenant-scoped Record service with durable catalog and collection lifecycle ordering.
 mod admission;
 mod shutdown;
+mod diagnostics;
+#[cfg(test)]
+#[path = "record_service/diagnostic_tests.rs"]
+mod diagnostic_tests;
 use crate::api_types::{CreateIndexRequest, FieldRequest, GetDocumentRequest, SearchRequestObject};
 use axum::{
     Json, Router,
@@ -47,7 +51,9 @@ const MAX_RESPONSE: usize = 16 * 1024 * 1024;
 struct Error(StatusCode, &'static str, String);
 impl IntoResponse for Error {
     fn into_response(self) -> Response {
-        (self.0, Json(json!({"code":self.1,"message":self.2}))).into_response()
+        let mut response = (self.0, Json(json!({"code":self.1,"message":self.2}))).into_response();
+        response.headers_mut().insert("x-anyseek-error-code", self.1.parse().expect("static error code"));
+        response
     }
 }
 impl From<CatalogError> for Error {
@@ -784,14 +790,14 @@ fn record_config(
         max_candidates: 10_000,
     })
 }
-fn index_info(entry: &CollectionEntry, stats: anyseek::record::RecordStatistics) -> Value {
+fn index_info(entry: &CollectionEntry, stats: anyseek::record::RecordStatistics) -> Result<Value, anyseek::record::RecordError> {
     let schema: Vec<FieldRequest> = entry.config.schema.iter().map(FieldRequest::from).collect();
-    json!({"id":entry.collection_id,"name":entry.config.index.name,"schema":schema,
+    Ok(json!({"id":entry.collection_id,"name":entry.config.index.name,"schema":schema,
         "text_normalization":entry.config.index.text_normalization,"field_length_normalization":entry.config.index.field_length_normalization,
         "version":crate::VERSION,"statistics":stats,
         "limits":{"max_records":entry.config.max_records,"max_operations":entry.config.max_operations,"max_journal_bytes":entry.config.max_journal_bytes,"max_candidates":entry.config.max_candidates},
         "vector_dimensions":match &entry.config.index.inference { Inference::External {dimensions,..} => Some(*dimensions), _ => None },
-        "embedding_space_id":entry.config.embedding_space_id})
+        "embedding_space_id":entry.config.embedding_space_id,"analysis":entry.config.analysis_contract()?}))
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -931,7 +937,7 @@ async fn list_collections(
             )
             .await?;
         match value {
-            Ok(stats) => info.push(index_info(&entry, stats)),
+            Ok(stats) => info.push(index_info(&entry, stats)?),
             Err(e) => return protected_data::<Value>(Err(e.into()), Some(DataOutputPermit::combine(data))),
         }
     }
@@ -948,7 +954,7 @@ async fn info(
     let value = s
         .catalog
         .authorized_generation(key, id, p.generation, move |entry| async move {
-            p.statistics().await.map(|stats| index_info(&entry, stats))
+            p.statistics().await.and_then(|stats| index_info(&entry, stats))
         })
         .await?;
     protected_data(value.map_err(Into::into), Some(data))
@@ -1747,11 +1753,18 @@ async fn query(
     Path(id): Path<String>,
     bytes: Bytes,
 ) -> Result<Response, Error> {
+    let request_id = diagnostics::REQUEST_ID.try_with(Clone::clone).unwrap_or_else(|_| diagnostics::new_id());
     let request: SearchRequestObject = parse(&bytes)?;
     let key = s.authenticate(&headers).await?;
     let p = s.record(&key, &id).await?;
     let data = p.output_permit_after_publication().await?;
     let mode = request.search_mode(s.default_nprobe).map_err(bad)?;
+    let diagnostic_mode = match &mode {
+        anyseek::search::SearchMode::Lexical if request.query_string.trim().is_empty() => "browse",
+        anyseek::search::SearchMode::Lexical => "lexical",
+        anyseek::search::SearchMode::Vector { .. } => "vector",
+        anyseek::search::SearchMode::Hybrid { .. } => "hybrid",
+    };
     if request.query_vector.is_none() && request.similarity_threshold.is_some() {
         return Err(bad("similarity_threshold requires query_vector"));
     }
@@ -1763,6 +1776,9 @@ async fn query(
             (request.fields.is_empty() || request.fields.contains(&f.field)))
             .map(|f| f.field.clone()).collect();
         let result=anyseek::server::query_records(&p,query,fields).await?;
+        let analysis = entry.config.analysis_contract()?;
+        let progress = p.committed_progress().await;
+        let diagnostics = diagnostics::QueryDiagnostics::new(request_id, diagnostic_mode, start.elapsed(), analysis.fingerprint, progress);
         // Serialize directly from the admitted result. A serde_json::Value here
         // would duplicate every selected field before response encoding.
         Ok::<_,Error>(QueryResponse {
@@ -1771,6 +1787,7 @@ async fn query(
             count:result.hits.len(), count_total:request.count.then_some(result.count_total),
             query_terms:result.query_terms, hits:result.hits, visible_seq:result.visible_seq,
             evaluation_time_ms:result.evaluation_time_ms, statistics:result.statistics,
+            diagnostics,
         })
     }).await?;
     let response = encode_data_response(result, Some(data.clone()))?;
@@ -1779,6 +1796,7 @@ async fn query(
 
 #[derive(Serialize)]
 struct QueryResponse {
+    diagnostics: diagnostics::QueryDiagnostics,
     original_query: String,
     query: String,
     time: u128,
@@ -1948,6 +1966,7 @@ fn service_layers(app: Router<Arc<Service>>, service: Arc<Service>) -> Router {
             service.clone(),
             request_guard,
         ))
+        .layer(axum::middleware::from_fn(diagnostics::request_id))
         .with_state(service)
 }
 
@@ -2032,7 +2051,7 @@ mod tests {
     fn master_headers()->HeaderMap{
         let mut headers=HeaderMap::new();headers.insert("apikey",STANDARD.encode(Sha256::digest(crate::MASTER_KEY_SECRET.as_bytes())).parse().unwrap());headers
     }
-    async fn setup() -> (Arc<Service>,PathBuf,HeaderMap) {
+    pub(super) async fn setup() -> (Arc<Service>,PathBuf,HeaderMap) {
         let path=path();let service=Service::open(&path,std::num::NonZeroUsize::new(200).unwrap()).await.unwrap();
         service.catalog.execute(CatalogRequest{operation_id:OperationId::new("tenant".into()),command:CatalogCommand::AddTenant{tenant_id:"tenant".into()}}).await.unwrap();
         service.catalog.execute(CatalogRequest{operation_id:OperationId::new("key".into()),command:CatalogCommand::AddKey{key_id:"a".into(),tenant_id:"tenant".into(),verifier:verifier(&[7;32])}}).await.unwrap();
@@ -3293,6 +3312,7 @@ fn openapi_document() -> Value {
         paths.entry(path).or_insert(json!({}))[method] = operation;
     }
     doc["paths"] = Value::Object(paths);
+    diagnostics::describe_openapi(&mut doc);
     doc
 }
 
