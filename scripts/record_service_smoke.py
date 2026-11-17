@@ -352,16 +352,29 @@ def main():
                         expected={'before_append':'rejected','after_append_unknown':'outcome_unknown','after_durable':'durable_pending'}[stage]
                         assert result[0]['code']==expected,result
                         if stage=='before_append':
-                            assert result[1]['code']=='applied'
+                            assert result[1]['code']=='applied',(stage,result)
                         else:
-                            assert result[1]['code']=='not_attempted'
+                            # Both tiny writes belong to the same planned WAL
+                            # prefix. An uncertain/pending prefix applies to both;
+                            # not_attempted is reserved for an unplanned suffix.
+                            assert result[1]['code']==expected,(stage,result)
                             call('POST','/api/v1/index/after-source-delete/query',{},status=503)
                     restart()
                     oid=w['operation_id'];status=call('GET',f'/api/v1/index/after-source-delete/operation/{oid["epoch"]}/{oid["nonce"]}')
                     assert bool(status['receipt']) == (stage!='before_append'),(stage,status)
                     first=write_one(call, '/api/v1/index/after-source-delete', w)['receipt']
                     assert first['version']==1 and write_one(call, '/api/v1/index/after-source-delete', w)['receipt']==first
-                    if stage!='before_append':call('GET','/api/v1/index/after-source-delete/doc/'+later['record_id'],status=404)
+                    if stage.startswith('crash_'):
+                        # The crashing request submitted only w, never later.
+                        call('GET','/api/v1/index/after-source-delete/doc/'+later['record_id'],status=404)
+                    else:
+                        oid=later['operation_id']
+                        status=call('GET',f'/api/v1/index/after-source-delete/operation/{oid["epoch"]}/{oid["nonce"]}')
+                        assert status['receipt'],(stage,status)
+                        receipt=write_one(call,'/api/v1/index/after-source-delete',later)['receipt']
+                        assert receipt==status['receipt'] and receipt['version']==1
+                        if stage!='before_append':assert receipt['seq']==first['seq']+1
+                        assert call('GET','/api/v1/index/after-source-delete/doc/'+later['record_id'])['document']==later['document']
                 # Independent snapshots are fully certified in a private root.
                 # Exercise both sides of its final atomic publication. Initial
                 # root publication/repair crashes remain covered at startup.
