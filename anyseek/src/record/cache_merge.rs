@@ -302,7 +302,8 @@ mod tests {
         let temporary=tempfile::tempdir().unwrap();let root=temporary.path().join("records");
         let p=fixture(&root).await;
         std::fs::write(root.join(".test-cache-merge-fail-before-install"),b"failure").unwrap();
-        assert!(p.start_cache_merge_job(Duration::from_secs(20)).unwrap().finish().await.is_err());
+        assert_eq!(p.start_cache_merge_job(Duration::from_secs(20)).unwrap().finish().await,
+            Err(storage("injected private cache candidate failure")));
         {let inner=p.inner.lock().await;assert!(inner.healthy);assert!(inner.background.is_none());assert!(inner.anchor.is_none());assert_eq!(inner.index.components().await.len(),3);}
         assert_eq!(p.search("alpha".into(),None,SearchMode::Lexical,vec![],10).await.unwrap().count_total,3);
         p.finish_service_shutdown().await.unwrap();drop(p);
