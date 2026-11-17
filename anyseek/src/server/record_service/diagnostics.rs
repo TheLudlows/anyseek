@@ -34,6 +34,7 @@ pub(super) struct QueryDiagnostics {
     pub mode: &'static str,
     pub elapsed_us: u64,
     pub analysis_fingerprint: String,
+    pub embedding_space_sha256: Option<String>,
     pub index_progress: Progress,
 }
 
@@ -54,15 +55,22 @@ impl QueryDiagnostics {
         mode: &'static str,
         elapsed: std::time::Duration,
         analysis_fingerprint: String,
+        embedding_space_id: Option<&str>,
         progress: anyseek::record::CommittedProgress,
     ) -> Self {
         Self {
-            format_version: 1,
+            format_version: 2,
             request_id,
             engine_version: crate::VERSION,
             mode,
             elapsed_us: elapsed.as_micros().min(u64::MAX as u128) as u64,
             analysis_fingerprint,
+            embedding_space_sha256: embedding_space_id.map(|value| {
+                Sha256::digest(value.as_bytes())
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect()
+            }),
             index_progress: Progress {
                 committed_seq: progress.committed_seq,
                 lexical_seq: progress.lexical_seq,
@@ -83,10 +91,11 @@ pub(super) fn describe_openapi(doc: &mut Value) {
             "tokenizer":{"type":"string"},"tokenizer_identity":{"type":"string"},
             "stop_words":{"enum":["None","English","German","French","Spanish","Custom"]},"stop_words_fingerprint":hash}});
     doc["components"]["schemas"]["QueryDiagnostics"] = json!({"type":"object",
-        "required":["format_version","request_id","engine_version","mode","elapsed_us","analysis_fingerprint","index_progress"],
-        "properties":{"format_version":{"const":1},"request_id":{"type":"string","pattern":"^[a-f0-9]{32}$"},
+        "required":["format_version","request_id","engine_version","mode","elapsed_us","analysis_fingerprint","embedding_space_sha256","index_progress"],
+        "properties":{"format_version":{"const":2},"request_id":{"type":"string","pattern":"^[a-f0-9]{32}$"},
             "engine_version":{"type":"string"},"mode":{"enum":["browse","lexical","vector","hybrid"]},
             "elapsed_us":{"type":"integer","minimum":0},"analysis_fingerprint":hash,
+            "embedding_space_sha256":{"type":["string","null"],"pattern":"^[a-f0-9]{64}$"},
             "index_progress":{"type":"object","required":["committed_seq","lexical_seq","vector_seq","index_failed","recovery_required","sampling"],
                 "properties":{"committed_seq":{"type":["integer","null"],"minimum":0},
                     "lexical_seq":{"type":"integer","minimum":0},"vector_seq":{"type":"integer","minimum":0},

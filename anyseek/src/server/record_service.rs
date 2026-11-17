@@ -1778,7 +1778,7 @@ async fn query(
         let result=anyseek::server::query_records(&p,query,fields).await?;
         let analysis = entry.config.analysis_contract()?;
         let progress = p.committed_progress().await;
-        let diagnostics = diagnostics::QueryDiagnostics::new(request_id, diagnostic_mode, start.elapsed(), analysis.fingerprint, progress);
+        let diagnostics = diagnostics::QueryDiagnostics::new(request_id, diagnostic_mode, start.elapsed(), analysis.fingerprint, entry.config.embedding_space_id.as_deref(), progress);
         // Serialize directly from the admitted result. A serde_json::Value here
         // would duplicate every selected field before response encoding.
         Ok::<_,Error>(QueryResponse {

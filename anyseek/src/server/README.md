@@ -208,8 +208,11 @@ Collection info 返回 `analysis`：版本化 format、完整配置 fingerprint�
 不代表已验证检索质量。现有 version、limits、embedding_space_id 同时保留。
 
 所有 HTTP 响应携带服务端生成的 `x-anyseek-request-id`，不复用客户端传入值；
-服务错误另有安全的 `x-anyseek-error-code`。查询成功增加 `diagnostics`，包含同一个 ID、
-引擎版本、browse/lexical/vector/hybrid 模式、elapsed_us、分析摘要和 index_progress。
+服务错误另有安全的 `x-anyseek-error-code`。查询成功增加格式 v2 的 `diagnostics`，包含同一个 ID、
+引擎版本、browse/lexical/vector/hybrid 模式、elapsed_us、分析摘要、embedding_space_sha256
+和 index_progress。空间摘要是当前集合 embedding_space_id UTF-8 字节的 SHA256，未配置为 null；
+调用方可逐次核对，原始空间标识不进入诊断。分析摘要只描述 index/schema/tokenizer，
+不能替代空间身份核对，也不证明向量实际由该模型生成。
 进度复用 committed/lexical/vector 序号及恢复状态，index_failed 只表示有错误，不复制
 原始错误诊断。它在查询后另行采样，sampling 明确为 after_query_not_atomic_with_result；
 不能作为结果的原子快照、跨系统事务或已交付证明。既有 score/channels 保持原语义。
