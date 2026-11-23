@@ -691,7 +691,7 @@ mod tests {
     async fn compact_native_capture_isolated_from_same_version_patch_and_concurrent_delete() {
         let root=path();let p=RecordPartition::create(&root,config()).await.unwrap();
         let mut initial=write("a","a","alpha",ExpectedVersion::Absent);
-        initial.document.as_mut().unwrap().remove("vector");
+        initial.document.as_mut().unwrap().shift_remove("vector");
         p.write(initial).await.unwrap();p.write(write("b","b","alpha",ExpectedVersion::Absent)).await.unwrap();
         p.compact_journal().await.unwrap();
         let selected=p.inner.lock().await.anchor.as_ref().unwrap().retained_packages()[0].id.clone();

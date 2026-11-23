@@ -2144,7 +2144,7 @@ mod tests {
         }
         let path = path();
         let child = std::process::Command::new(std::env::current_exe().unwrap())
-            .arg("record_service::tests::shutdown_failed_owner_keeps_root_until_process_exit")
+            .arg("server::record_service::tests::shutdown_failed_owner_keeps_root_until_process_exit")
             .arg("--exact").arg("--nocapture")
             .env("ANYSEEK_TEST_SHUTDOWN_FAILED_ROOT", &path).output().unwrap();
         assert!(child.status.success(), "{}\n{}", String::from_utf8_lossy(&child.stdout),String::from_utf8_lossy(&child.stderr));
@@ -2283,7 +2283,7 @@ mod tests {
             let temporary=tempfile::tempdir().unwrap();let pause=temporary.path().join("accepted.pause");
             std::fs::write(&pause,b"pause").unwrap();
             let status=std::process::Command::new(std::env::current_exe().unwrap())
-                .args(["--exact","record_service::tests::cancelled_group_http_waiter_keeps_backup_and_generation_guards","--nocapture"])
+                .args(["--exact","server::record_service::tests::cancelled_group_http_waiter_keeps_backup_and_generation_guards","--nocapture"])
                 .env("ANYSEEK_GROUP_HTTP_CANCEL_CHILD","1")
                 .env("ANYSEEK_AUTHORIZED_PAUSE_COLLECTION","c")
                 .env("ANYSEEK_AUTHORIZED_PAUSE_FILE",&pause).status().unwrap();
@@ -2676,7 +2676,7 @@ mod tests {
         if std::env::var_os("ANYSEEK_SERVICE_FENCE_CHILD").is_none() {
             for count in [1,2] {
                 let output=std::process::Command::new(std::env::current_exe().unwrap())
-                    .args(["--exact","record_service::tests::service_data_fence_preserves_persistence_errors","--nocapture"])
+                    .args(["--exact","server::record_service::tests::service_data_fence_preserves_persistence_errors","--nocapture"])
                     .env("ANYSEEK_SERVICE_FENCE_CHILD",count.to_string())
                     .env("ANYSEEK_RECORD_FAULT_NONCE","service-fence-failure")
                     .env("ANYSEEK_RECORD_FAULT","after_durable")

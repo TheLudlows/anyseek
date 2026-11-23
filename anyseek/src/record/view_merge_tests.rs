@@ -176,7 +176,7 @@ async fn same_version_vector_patch_retires_premerge_reader_row() {
     let root = temporary.path().join("records");
     let p = RecordPartition::create(&root, config()).await.unwrap();
     let mut initial = write("a", "a", "alpha", ExpectedVersion::Absent);
-    initial.document.as_mut().unwrap().remove("vector");
+    initial.document.as_mut().unwrap().shift_remove("vector");
     p.write(initial).await.unwrap(); freeze(&p).await;
     p.write(write("b", "b", "alpha", ExpectedVersion::Absent)).await.unwrap(); freeze(&p).await;
     let gate = ".test-query-scoring-pause";

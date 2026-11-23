@@ -1632,7 +1632,7 @@ mod tests {
     async fn multisegment_delete_and_corrupt_selected_object_fail_closed() {
         let root=path();let settings=config();let p=RecordPartition::create(&root,settings.clone()).await.unwrap();
         for mut request in [write("s","s","alpha",ExpectedVersion::Absent),write("d","d","alpha",ExpectedVersion::Absent),write("e","e","alpha",ExpectedVersion::Absent)] {
-            if request.record_id=="d" {request.document.as_mut().unwrap().remove("vector");}
+            if request.record_id=="d" {request.document.as_mut().unwrap().shift_remove("vector");}
             p.write(request).await.unwrap();p.compact_journal().await.unwrap();
         }
         assert_eq!(p.inner.lock().await.anchor.as_ref().unwrap().segments.len(),3);
