@@ -1,5 +1,7 @@
 # 当前功能与边界
 
+**简体中文** · [English](features.en.md)
+
 HTTP/Web UI 数据请求统一由服务内部的 Record/catalog 处理；旧低层全文 Rust API 已删除。职责边界见[Record 契约](record-model.md)；系统断电与长期持续运行容量仍未验收。[服务使用](../anyseek/src/server/README.md) · [架构](architecture.md) · [路线与验收证据](roadmap.md)
 
 ## 检索和数据

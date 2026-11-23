@@ -1,5 +1,7 @@
 # AnySeek
 
+**简体中文** · [English](README.en.md)
+
 **可靠、可更新的全文与向量检索引擎。** 保存原文、向量和元数据，通过 HTTP API 或独立控制台写入、检索、更新和删除。当前为有界单机实现，模型推理由调用方提供。
 
 ## 快速开始
@@ -28,17 +30,10 @@ npm run dev
 
 [HTTP API 与示例](anyseek/src/server/README.md) · [控制台与部署](console/README.md) · [文档索引](docs/README.md)
 
-## Embedded Rust SDK
+## 嵌入式 Rust SDK
 
-Depend on the `anyseek` library and open the local Catalog with `anyseek::sdk::LocalEngine`.
-The caller supplies the authorized tenant and collection on each operation. Create a collection,
-atomically replace Record groups with a stable operation ID, query its text or vectors, and await
-`shutdown()` before reopening the directory. The SDK uses local disk and takes an exclusive root lock.
+依赖 `anyseek` 库，使用 `anyseek::sdk::LocalEngine` 打开本地 Catalog。调用方为每次操作提供已授权的租户和集合。可以创建集合、用稳定的操作 ID 原子替换一组 Record，并按文本或向量查询。重新打开目录之前，等待 `shutdown()` 完成。SDK 使用本地磁盘，并对根目录加独占锁。
 
-Use `default-features = false` when the host needs the standard `serde_json` object ordering.
-The snapshot codec retains stored field order independently of the host JSON map.
-The default standalone build enables `ordered-json`. A standalone build that disables default features
-can select `--features ordered-json` to retain the same JSON ordering. Keep the selected build features
-with the catalog version when reopening or restoring a catalog.
+如果宿主需要标准的 `serde_json` 对象字段顺序，请使用 `default-features = false`。快照编解码器独立保留已存储的字段顺序，不受宿主 JSON map 的影响。独立服务默认构建启用 `ordered-json`。禁用默认 feature 的独立服务仍可加上 `--features ordered-json`，保留相同的 JSON 字段顺序。重新打开或恢复 Catalog 时，请保持所用的构建 feature 与 Catalog 版本相匹配。
 
-[Public SDK usage test](anyseek/tests/local_sdk.rs)
+[公开 SDK 用法测试](anyseek/tests/local_sdk.rs)

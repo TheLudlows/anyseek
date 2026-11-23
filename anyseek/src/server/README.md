@@ -1,5 +1,7 @@
 # anyseek Record HTTP 服务
 
+**简体中文** · [English](README.en.md)
+
 通过 HTTP API 按租户命名空间管理集合和记录，提供全文、向量与混合检索。同步 `/batch` 成功项持久且可见；`/ingest` 返回持久业务回执，索引异步推进，详见[写入与重试](#稳定身份写入和重试)。Web 控制台为独立进程。
 
 [Record 契约](../../../docs/record-model.md)说明职责与一致性边界；[路线与验收证据](../../../docs/roadmap.md)记录剩余工作与验证范围。
@@ -133,7 +135,7 @@ UI 在发送前将原请求和未确认状态保存到 sessionStorage；丢响�
 
 成功返回 `atomic: true`、原 operation ID 和 `receipt`（`seq`、`group_id`、`group_version`、`record_count`）。超时或结果未知时，重用同一 operation ID 与完整原请求取得原回执，不能生成新 ID 猜测重试结果。`GET /api/v1/index/{id}/group?group_id=guide` 返回当前组版本；从未存在的组返回 404。group ID 是不透明业务值，请按 URL 查询参数编码。当前版本查询不是某次操作的结果查询。
 
-两个接口都使用 Tenant API Key，权限限制在该 Tenant 的当前 collection 代次。普通 `/batch` 与 `/ingest` 仍是独立 Record 写入，`atomic: false`，不能用它们绕过已有组成员的归属约束。
+两个接口都使用 `apikey` 服务凭据和 `X-AnySeek-Tenant` 命名空间，请求作用于该租户的当前集合代次。普通 `/batch` 与 `/ingest` 仍是独立 Record 写入，`atomic: false`，不能用它们绕过已有组成员的归属约束。
 
 ## 异步索引写入
 

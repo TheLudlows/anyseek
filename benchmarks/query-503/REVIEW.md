@@ -1,5 +1,7 @@
 # Independent review and deadline follow-up
 
+**English** · [简体中文](REVIEW.zh-CN.md)
+
 An independent agent (`/root/independent_review`) reviewed `bba809f` without editing
 the implementation or running performance loads. It checked fence/revision checks,
 publication failure, cancellation, slow clients, old responses, lifecycle ownership,

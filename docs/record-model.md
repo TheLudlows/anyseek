@@ -1,5 +1,7 @@
 # Record 语义与一致性
 
+**简体中文** · [English](record-model.en.md)
+
 HTTP 请求、字段、配额和操作示例以[服务指南](../anyseek/src/server/README.md)为准；本文保留实现必须维持的不变量。当前交付状态见 [路线与验收证据](roadmap.md)，持久化见[存储协议](storage.md)。
 
 ## 身份、版本与重试

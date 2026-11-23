@@ -1,8 +1,10 @@
 # 当前架构
 
+**简体中文** · [English](architecture.en.md)
+
 本文按当前主干 `3e0a9a4`（#203）核对模块和运行边界。业务不变量见[Record 契约](record-model.md)，持久格式与恢复见[存储协议](storage.md)，验收缺口和性能证据见[路线](roadmap.md)。
 
-AnySeek 是通过 HTTP API 和独立 Web 控制台使用的 Rust 存储与检索服务。资源模型为 Tenant → Collection → Partition → Segment；每个 collection 一个持久 partition，数据请求统一交给 RecordPartition。
+AnySeek 是 Rust 存储与检索引擎，提供独立 HTTP 服务和进程内 Rust SDK。Web 控制台访问独立 HTTP 服务。嵌入式 SDK 使用本地磁盘，由宿主管理生命周期。资源模型为 Tenant → Collection → Partition → Segment；每个 collection 一个持久 partition，数据请求统一交给 RecordPartition。
 
 ## 模块边界
 
@@ -81,7 +83,7 @@ VectorIndex 的 schema、距离和量化配置是逻辑查询配置；组件中�
 
 `record/lexical/directory_gate.rs` 按同一物理索引目录共享 I/O mutex，不再让不同目录共用进程级文件操作锁。Unix 以 canonical 路径对应的 device/inode 为键；其他平台使用 canonical 路径。全局 registry 只存弱引用，在打开目录时短持锁，不在该锁内做文件 I/O 或等待容量。
 
-Directory/Writer 克隆与固定读者通过原有 owner 保留目录锁。内存、服务级/集合级 I/O 额度、OS writer/owner lock、取消和包 pin 继续生效；不允许外部替换仍在使用的目录。该改动消除了无关目录间的 mutex 等待，端到端吞吐与 Windows 别名行为仍需独立验收，见[原生 I/O 证据](../benchmarks/native-io/README.md)。
+Directory/Writer 克隆与固定读者通过原有 owner 保留目录锁。内存、服务级/集合级 I/O 额度、OS writer/owner lock、取消和包 pin 继续生效；不允许外部替换仍在使用的目录。该改动消除了无关目录间的 mutex 等待，端到端吞吐与 Windows 别名行为仍需独立验收，见[原生 I/O 证据](../benchmarks/native-io/README.zh-CN.md)。
 
 独立快照按文件阶段借用一份 I/O 额度，内部文件操作共享该额度；与后台物化竞争时等待既有容量，不重复申请或放宽上限。原生构建和网络操作在该文件事务之外进行。独立输出完整认证后不缓存供 live 增量证明使用的 State 容器。
 

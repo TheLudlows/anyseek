@@ -1,5 +1,7 @@
 # 检索配置与排序
 
+**简体中文** · [English](search.en.md)
+
 HTTP 查询用法见[服务指南](../anyseek/src/server/README.md#查询与遍历)。本文集中说明文本分析、评分、候选排序与融合契约。
 
 ## 文本归一化
@@ -66,7 +68,7 @@ TTL 在 Top-K 前排除过期候选；后台回收退休其索引行之前，这
 
 ANN 和有界融合可能遗漏候选，稳定平分排序不保证精确召回。Vector/Hybrid 的候选内字段排序不等同全库字段 Top-K。并发写入或 TTL 可在最终重验时缩短页，确定排序不提供跨请求持久分页快照。
 
-## Weighted RRF
+## 加权 RRF
 
 Hybrid 在每个通道跨组件形成全局排名后做一次加权 RRF。省略 `rrf`（内部 `RrfOptions::default()`）时，零基 rank 常数为 0.6，两路权重均为 1，每路默认候选窗口为 `offset + length`；这些默认值未重新调优，不是质量或延迟保证。
 

@@ -1,5 +1,7 @@
 # Lexical token reuse: local evidence
 
+**English** · [简体中文](README.zh-CN.md)
+
 Baseline production source: `ed3052f2afdbcf18392a76a4bd3816e4e96275a1`.
 Candidate: the lexical reuse implementation accompanying this report. Binary SHA256 values are in every row of [results.csv](results.csv).
 
