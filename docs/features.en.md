@@ -2,7 +2,7 @@
 
 **English** · [简体中文](features.md)
 
-HTTP and web UI data requests share the service's Record/catalog implementation. The old low-level Rust full-text API has been removed. The [Record contract](record-model.en.md) defines responsibilities. System power loss and long-running sustained capacity are still awaiting acceptance. [Service usage](../anyseek/src/server/README.en.md) · [Architecture](architecture.en.md) · [Roadmap and acceptance evidence](roadmap.md)
+HTTP and web UI data requests share the service's Record/catalog implementation. The old low-level Rust full-text API has been removed. The [Record contract](record-model.en.md) defines responsibilities. System power loss and long-running sustained capacity are still awaiting acceptance. [Service usage](../anyseek/src/server/README.en.md) · [Architecture](architecture.en.md) · [Roadmap and acceptance evidence](roadmap.en.md)
 
 ## Search and data
 
@@ -27,7 +27,7 @@ The derived full-text index uses Tantivy and WAL-backed queryable deltas. Backgr
 - [Service guide](../anyseek/src/server/README.en.md) covers startup, authentication, HTTP examples, queries, backup, and restoration.
 - [Console guide](../console/README.en.md) covers tenant connections, import, embedding services, search, and deployment.
 - [Resource and acceptance boundaries](../anyseek/src/server/README.en.md#current-resource-and-acceptance-boundaries) covers capacity profiles, requests and responses, concurrency, bytes, and I/O budgets.
-- [Roadmap and acceptance evidence](roadmap.md) covers pending work, measurement scope, and unverified environments.
+- [Roadmap and acceptance evidence](roadmap.en.md) covers pending work, measurement scope, and unverified environments.
 
 The default limits are 10,000 each for identities (including tombstones) and retained operations. The bounded 100,000 profile can be selected explicitly. The candidate cap remains 10,000. The complete logical State is resident in memory. Unlimited writes, stable disk use, and a hard cap on whole-process RSS are beyond the guarantee. Receipts become eligible for reclamation after at least two days, subject to the safe cut and protection conditions.
 

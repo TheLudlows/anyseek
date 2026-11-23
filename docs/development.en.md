@@ -82,7 +82,7 @@ python3 scripts/s3_acceptance.py --backend real --suite all \
 
 Tests create and delete objects. The end-to-end matrix leaves that run's objects for the test bucket administrator to destroy after acceptance. Low-level contracts delete only explicitly recorded keys, with no LIST or bulk prefix deletion. Contracts cover conditional creation races, immutable retry, readback and HEAD, hash and length, missing and oversized objects, old ownership, original-cut backup, and deletion.
 
-Check `backend=real`, `real_endpoint_exercised=true`, `all_requested_checks_passed=true`, and the suite in the report. A passing fixture, empty-config refusal, or a contract-only run does not certify a complete real backend. See the [roadmap](roadmap.md) for gaps.
+Check `backend=real`, `real_endpoint_exercised=true`, `all_requested_checks_passed=true`, and the suite in the report. A passing fixture, empty-config refusal, or a contract-only run does not certify a complete real backend. See the [roadmap](roadmap.en.md) for gaps.
 
 ## Fast CI feedback
 
@@ -161,4 +161,4 @@ Linux and Windows both require native reliability acceptance. Cross-compilation 
 
 Collect separate evidence for a real S3 endpoint, OS/filesystem failure, hard power loss, cross-AES operation, and sustained long-running operation. Process kill/exit, fixtures, fsync calls, and compilation do not substitute. Power-loss verification requires an isolated environment, durable hardware, and external acknowledged write evidence. Do not reboot shared environments.
 
-Record commands for the final source, results, failures and ignored cases, and checks not run. Historical counts, measurements on other versions, and PR records are not current retest results. The [roadmap](roadmap.md) tracks pending acceptance and evidence.
+Record commands for the final source, results, failures and ignored cases, and checks not run. Historical counts, measurements on other versions, and PR records are not current retest results. The [roadmap](roadmap.en.md) tracks pending acceptance and evidence.

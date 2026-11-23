@@ -11,9 +11,9 @@
 | Search configuration and ranking | [Text normalization, N-grams, field length, stable ordering, and Weighted RRF](search.en.md) |
 | Architecture, failures, and shutdown | [Current architecture](architecture.en.md) covers modules, queryable tails, Segment ownership, fencing after failures, and service draining. |
 | Consistency and write proofs | [Record contract](record-model.en.md) covers identity, retries, TTL, authorization, and the commit anchor for ordinary writes. |
-| Persistence and recovery | [Storage protocol](storage.md) covers local and SQLite/S3 authority, checkpoints, backups, and reclamation. |
+| Persistence and recovery | [Storage protocol](storage.en.md) covers local and SQLite/S3 authority, checkpoints, backups, and reclamation. |
 | Development and verification | [Development guide](development.en.md) covers local builds, fault tests, S3 acceptance, CI responsibilities, and the full matrix. |
-| Future work and performance evidence | [Roadmap and evidence index](roadmap.md). Raw data and reproduction commands are in the corresponding benchmarks directories. |
+| Future work and performance evidence | [Roadmap and evidence index](roadmap.en.md). Raw data and reproduction commands are in the corresponding benchmarks directories. |
 | Corpus and license | [MIRACL corpus](../miracl-corpus-v1.0-zh/README.en.md) and [license](../LICENSE) |
 
 Update the service guide and runnable examples together when an interface changes. Describe design invariants in their protocol documents and keep verification commands in the development guide. Performance reports retain their pinned revisions, raw evidence, and reproduction steps. The roadmap indexes these reports. Consult Git history, PRs, and CI for historical plans, completed work logs, and test organization history.

@@ -2,7 +2,7 @@
 
 **English** · [简体中文](record-model.md)
 
-The [service guide](../anyseek/src/server/README.en.md) defines HTTP requests, fields, quotas, and examples. This page records invariants implementations must preserve. See the [roadmap and acceptance evidence](roadmap.md) for delivery status and the [storage protocol](storage.md) for persistence.
+The [service guide](../anyseek/src/server/README.en.md) defines HTTP requests, fields, quotas, and examples. This page records invariants implementations must preserve. See the [roadmap and acceptance evidence](roadmap.en.md) for delivery status and the [storage protocol](storage.en.md) for persistence.
 
 ## Identity, versions, and retries
 
@@ -38,7 +38,7 @@ Advance after definitive refusal. For Busy, only items known not attempted use s
 
 Source versions, chunking, sections, evidence dependencies, and relationships belong to upstream applications and can be stored as ordinary document fields. AnySeek provides no source/derived write, historical text excerpt, locator verification, graph traversal, or graph fusion endpoints. General full-text/vector hybrid retrieval, conditional updates, and late vectors for exact text versions remain available.
 
-See the [ordinary-write commit anchor](#commit-anchor-for-ordinary-writes) for commit ownership and batch-local incremental planning. See the [roadmap and acceptance evidence](roadmap.md) for implementation and verification scope.
+See the [ordinary-write commit anchor](#commit-anchor-for-ordinary-writes) for commit ownership and batch-local incremental planning. See the [roadmap and acceptance evidence](roadmap.en.md) for implementation and verification scope.
 
 ## Time, TTL, and query views
 

@@ -1,5 +1,7 @@
 # 持久化、对象存储与恢复
 
+**简体中文** · [English](storage.en.md)
+
 本文集中说明本地 WAL/Segment 与 SQLite/S3 的持久化、checkpoint、备份和回收协议。请求语义见[Record 契约](record-model.md)，配置见[服务指南](../anyseek/src/server/README.md)，实现与剩余验收见[路线](roadmap.md)。
 
 Catalog 格式为 7，使用 SQLite；S3 authority schema 为 3，authority 备份快照为 2。

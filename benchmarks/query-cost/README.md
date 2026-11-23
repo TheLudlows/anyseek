@@ -1,8 +1,10 @@
 # Remaining query cost: measured, scoped changes
 
+**English** · [简体中文](README.zh-CN.md)
+
 Baseline: master `768a18eb0ccb25d23d1f2b5bf9a09ec071afc857` (2026-11-03).
 No repository `AGENTS.md` exists at that revision. Current development and CI
-instructions are consolidated in [the development guide](../../docs/development.md).
+instructions are consolidated in [the development guide](../../docs/development.en.md).
 
 ## State verified before implementation
 

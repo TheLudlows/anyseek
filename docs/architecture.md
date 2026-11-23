@@ -83,7 +83,7 @@ VectorIndex 的 schema、距离和量化配置是逻辑查询配置；组件中�
 
 `record/lexical/directory_gate.rs` 按同一物理索引目录共享 I/O mutex，不再让不同目录共用进程级文件操作锁。Unix 以 canonical 路径对应的 device/inode 为键；其他平台使用 canonical 路径。全局 registry 只存弱引用，在打开目录时短持锁，不在该锁内做文件 I/O 或等待容量。
 
-Directory/Writer 克隆与固定读者通过原有 owner 保留目录锁。内存、服务级/集合级 I/O 额度、OS writer/owner lock、取消和包 pin 继续生效；不允许外部替换仍在使用的目录。该改动消除了无关目录间的 mutex 等待，端到端吞吐与 Windows 别名行为仍需独立验收，见[原生 I/O 证据](../benchmarks/native-io/README.md)。
+Directory/Writer 克隆与固定读者通过原有 owner 保留目录锁。内存、服务级/集合级 I/O 额度、OS writer/owner lock、取消和包 pin 继续生效；不允许外部替换仍在使用的目录。该改动消除了无关目录间的 mutex 等待，端到端吞吐与 Windows 别名行为仍需独立验收，见[原生 I/O 证据](../benchmarks/native-io/README.zh-CN.md)。
 
 独立快照按文件阶段借用一份 I/O 额度，内部文件操作共享该额度；与后台物化竞争时等待既有容量，不重复申请或放宽上限。原生构建和网络操作在该文件事务之外进行。独立输出完整认证后不缓存供 live 增量证明使用的 State 容器。
 

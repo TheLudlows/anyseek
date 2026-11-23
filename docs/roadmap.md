@@ -1,5 +1,7 @@
 # 后续路线与验收证据
 
+**简体中文** · [English](roadmap.en.md)
+
 核对基线：2026-11-17 主干 `bb53b80`；本轮分支的 Catalog 持久化调整与验证见下表。本文集中维护剩余工作和证据入口；当前能力见[功能与边界](features.md)，实现见[架构](architecture.md)，接口与资源限制见[服务指南](../anyseek/src/server/README.md)。合入不等于发布或完成性能验收。
 
 ## Origence workspace 自动路由（2026-11-17）
@@ -130,7 +132,7 @@ W5 对照：Windows/default debug、local 新库、相同请求与临时数据�
 | 5 | 组合资源隔离 | 验证热点集合、冷恢复、慢 I/O/慢输出及 Busy 时其他集合与控制入口仍可服务；同时观测 State、派生索引、对象缓存和备份占用 |
 | 6 | 发布验收 | 固定候选 SHA 跑 Linux/Windows 完整矩阵；真实 S3、系统/文件系统崩溃、断电及跨 AES 分别记录执行结果，快速 CI 不能替代 |
 
-正文已在候选评分及身份重验后按输出字段复制，暂不重写远端读取层或更换向量算法。最低索引水位等待是辅助能力，不改变 `/ingest` 的异步合同。部署与进度展示见[服务指南](../anyseek/src/server/README.md#构建与启动)和[控制台](../console/README.md#运行状态与容量)，关闭所有权见[架构](architecture.md#服务关闭)。
+正文已在候选评分及身份重验后按输出字段复制，暂不重写远端读取层或更换向量算法。最低索引水位等待是辅助能力，不改变 `/ingest` 的异步合同。部署见[服务指南](../anyseek/src/server/README.md#构建与启动)和[控制台](../console/README.md#构建与部署)，关闭所有权见[架构](architecture.md#服务关闭)。
 
 ## 验收证据
 
@@ -138,11 +140,11 @@ W5 对照：Windows/default debug、local 新库、相同请求与临时数据�
 | --- | --- | --- |
 | 全文有界候选 / #153 | [候选对照](../benchmarks/lexical-candidates/README.md) | #190 验收材料已合入，比较 #178 精确前后版本；历史语义测试、本次定向复核与性能证据分别记录。历史分配摘要缺起止计数器，不能完全还原当时原始计数，不代表当前主干整体性能 |
 | 写入成本 / #191 | [复现](../benchmarks/write-cost/README.md)、[报告](../benchmarks/write-cost/REPORT.md) | #197 的 tmpfs 矩阵覆盖同步/异步、新增/补向量/替换/删除、切段、CPU/分配及重开回执；真实磁盘因共享空间耗尽中断。报告中“当前主干”仅指其固定测量 SHA，早于 #198/#200/#201，剩余瓶颈须重新核对 |
-| 查询辅助工作 | [查询成本](../benchmarks/query-cost/README.md) | 保留 CPU/分配、退化样本与持续读写测量，未因此完成 #155 全部验收 |
-| 查询并发发布 | [发布等待与尾延迟](../benchmarks/query-503/README.md)、[期限复核](../benchmarks/query-503/REVIEW.md) | #199 已合入发布交接等待与原请求期限保护；报告按版本、负载模式区分，服务响应头后超时可能表现为传输错误 |
-| 原生目录 I/O / #203 | [目录隔离实验](../benchmarks/native-io/README.md) | 固定前后版本、真实 atomic write/sync 的诊断负载；支持消除无关目录间的 mutex 等待，不证明端到端吞吐、Busy 或 P99 改善。Windows、release 与代表性持久设备仍需独立验收 |
+| 查询辅助工作 | [查询成本](../benchmarks/query-cost/README.zh-CN.md) | 保留 CPU/分配、退化样本与持续读写测量，未因此完成 #155 全部验收 |
+| 查询并发发布 | [发布等待与尾延迟](../benchmarks/query-503/README.zh-CN.md)、[期限复核](../benchmarks/query-503/REVIEW.zh-CN.md) | #199 已合入发布交接等待与原请求期限保护；报告按版本、负载模式区分，服务响应头后超时可能表现为传输错误 |
+| 原生目录 I/O / #203 | [目录隔离实验](../benchmarks/native-io/README.zh-CN.md) | 固定前后版本、真实 atomic write/sync 的诊断负载；支持消除无关目录间的 mutex 等待，不证明端到端吞吐、Busy 或 P99 改善。Windows、release 与代表性持久设备仍需独立验收 |
 | 向量 Segment 所有权 | [前后对照](../benchmarks/vector-segments/README.md) | #111 的结构整理与行为证据，不宣称性能收益 |
-| 容量及异步对比工具 | [容量探针](../benchmarks/capacity/README.md)、[异步协议](../benchmarks/capacity/ASYNC-PROTOCOL.md) | 有限负载与固定语料；不是 100k 容量或全库相关性承诺 |
+| 容量及异步对比工具 | [容量探针](../benchmarks/capacity/README.zh-CN.md)、[异步协议](../benchmarks/capacity/ASYNC-PROTOCOL.zh-CN.md) | 有限负载与固定语料；不是 100k 容量或全库相关性承诺 |
 | 文件库存 / #183 | [#184](https://github.com/TheLudlows/anyseek/pull/184)、[存储协议](storage.md#本地-segment-与共同视图) | 私有构建先有界合并、引用感知 GC 再收集库存，保留 1,024 文件上限。历史 4,000 条约 8 KiB 正文的 8 项回归及原故障库续写到 5,000 条不算当前提交重测，也不等于完整容量或真实 S3 验收 |
 
 每份报告以自己的源码 SHA、二进制指纹、语料和环境为准，不汇总不同版本冒充当前性能。历史阶段计划、累计用例数和合入流水账通过 Git 历史、PR 与 CI 查阅。本地命令、真实 S3 与[完整矩阵](development.md#完整验收)统一见[开发与验证](development.md)。
@@ -151,7 +153,7 @@ W5 对照：Windows/default debug、local 新库、相同请求与临时数据�
 
 ## 容量与架构边界
 
-完整逻辑 State 仍驻内存；10 万档是准入上界，不是任意数据形态的容量承诺。有限准入和显式缓冲预算不是全进程 RSS 或全磁盘硬上限。默认服务共用 SQLite authority 及其校验对象缓存；多 authority、物化索引和独立备份仍需整体评估。
+完整逻辑 State 仍驻内存；100,000 档是准入上界，不是任意数据形态的容量承诺。有限准入和显式缓冲预算不是全进程 RSS 或全磁盘硬上限。默认服务共用 SQLite authority 及其校验对象缓存；多 authority、物化索引和独立备份仍需整体评估。
 
 回执默认最早两日后具备回收资格，另受重试窗口、认证 history floor、epoch、读者与备份保护约束，不是固定清理期限。不能通过删除窗口内回执解除容量限制。S3 模式必须同时保留 metadata.sqlite、SQLite WAL 与 owner 锁文件，不能只凭 bucket 重建权威；SQLite 首版不提供跨主机 HA 或权威卷丢失零 RPO。
 

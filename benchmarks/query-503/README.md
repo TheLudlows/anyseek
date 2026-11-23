@@ -1,5 +1,7 @@
 # Concurrent-query publication fence
 
+**English** · [简体中文](README.zh-CN.md)
+
 Baseline: `5976daa1efb932043503298fce941a5dec03dc05` (latest master at task start, includes #198).
 No open PR duplicated this work at inspection time. This is an isolated local-storage
 experiment, separate from the #162 capacity investigation.
@@ -32,14 +34,7 @@ do not get a fresh budget. Expired publication waits discard undelivered bytes a
 return TimedOut; normal unconsumed responses retain their existing transport-owner
 quota/lifecycle semantics. The production request budget remains 30 seconds.
 
-Every load-probe HTTP error body is retained. All measured 503s were exactly
-`{"code":"recovery_required","message":"RecoveryRequired"}`. There were no measured
-429s, storage errors, unknown outcomes or connection errors. All final-matrix write receipts,
-final indexed counts and terminal health checks succeeded. Deterministic paused
-publication tests exercise the old fast rejection and the new wait, while consumer
-failure tests retain rejection and replay recovery. There is no per-request internal
-trace splitting the baseline 503s among capture, response construction and header
-handoff; those sites share the error code. Do not claim that site-level breakdown.
+Every load-probe HTTP error body is retained. All measured HTTP 503 responses were exactly `{"code":"recovery_required","message":"RecoveryRequired"}`. There were no measured HTTP 429 responses, storage errors, unknown outcomes or connection errors. All final-matrix write receipts, final indexed counts and terminal health checks succeeded. Deterministic paused publication tests exercise the old fast rejection and the new wait, while consumer failure tests retain rejection and replay recovery. There is no per-request internal trace splitting the baseline HTTP 503 responses among capture, response construction and header handoff. Those sites share the error code, so the data cannot establish that site-level breakdown.
 
 ## Fixed-total results
 

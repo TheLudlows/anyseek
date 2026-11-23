@@ -2,7 +2,7 @@
 
 **English** · [简体中文](architecture.md)
 
-This page checks module and runtime boundaries against main `3e0a9a4` (#203). See the [Record contract](record-model.en.md) for business invariants, the [storage protocol](storage.md) for durable formats and recovery, and the [roadmap](roadmap.md) for acceptance gaps and performance evidence.
+This page checks module and runtime boundaries against main `3e0a9a4` (#203). See the [Record contract](record-model.en.md) for business invariants, the [storage protocol](storage.en.md) for durable formats and recovery, and the [roadmap](roadmap.en.md) for acceptance gaps and performance evidence.
 
 AnySeek is a Rust storage and retrieval engine with a standalone HTTP service and an in-process Rust SDK. The web console uses the standalone HTTP service. The SDK runs on local disk and the host manages its lifecycle. The resource model is Tenant → Collection → Partition → Segment. Each collection has one durable partition and RecordPartition handles all data requests.
 
@@ -72,7 +72,7 @@ VectorIndex schema, distance, and quantization are logical query configuration. 
 
 A physical address uses `local_ordinal * segments.len() + slot` within the captured topology only. Rotation, merge, and recovery can remap the current layout. Pinned readers retain the original topology and revalidate by stable identity, revision/fingerprint, and retirement token. A topology position is not written to a shared Segment's `meta.id`.
 
-Canonical payloads store original text and vectors. A full-text package records exact Tantivy version, schema, and analysis contract without storing a separate authoritative copy of text. S3 files are materialized and verified in full before use. There is no direct random remote Directory read. Certified packages verify the full immutable closure. Readers, native workers, builds, and backups protect files and partition ownership until release. See the [storage protocol](storage.md#本地-segment-与共同视图) for format tags, checkpoints, and reclamation.
+Canonical payloads store original text and vectors. A full-text package records exact Tantivy version, schema, and analysis contract without storing a separate authoritative copy of text. S3 files are materialized and verified in full before use. There is no direct random remote Directory read. Certified packages verify the full immutable closure. Readers, native workers, builds, and backups protect files and partition ownership until release. See the [storage protocol](storage.en.md#local-segments-and-combined-views) for format tags, checkpoints, and reclamation.
 
 ### Native-directory I/O isolation
 
@@ -90,7 +90,7 @@ Origence or the gateway handles user authentication and permissions. AnySeek che
 
 Lock order is global snapshot barrier → collection lifecycle barrier → short Catalog metadata lock. Record futures run outside the metadata lock. Create, activate, and delete take the exclusive collection barrier, and full-service snapshots take the exclusive global barrier. Accepted owned tasks, output buffers, and subtasks retain capacity until they actually finish. Caller cancellation does not release ownership early.
 
-Creation uses durable Prepare → partition initialization → Activate. Reusing a deleted name allocates a fresh internal generation. Old handles, receipts, uploads, and GC stay bound to the old generation. See the [Record contract](record-model.en.md#authorization-and-recovery) for business rules on names, authentication, and restore scope, and the [storage protocol](storage.md#已删除集合代次的最终回收) for physical reclamation.
+Creation uses durable Prepare → partition initialization → Activate. Reusing a deleted name allocates a fresh internal generation. Old handles, receipts, uploads, and GC stay bound to the old generation. See the [Record contract](record-model.en.md#authorization-and-recovery) for business rules on names, authentication, and restore scope, and the [storage protocol](storage.en.md#final-reclamation-of-deleted-collection-generations) for physical reclamation.
 
 ## Failure boundaries
 

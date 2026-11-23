@@ -1,5 +1,7 @@
 # Final-build asynchronous comparison
 
+**English** · [简体中文](ASYNC-PROTOCOL.zh-CN.md)
+
 This harness compares one fixed AnySeek release with Meilisearch; it is not the
 before/after AnySeek optimization experiment described in the project roadmap.
 Run `async_compare.py` after the selected implementation's checks pass, recording

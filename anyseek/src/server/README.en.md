@@ -4,7 +4,7 @@
 
 Manage collections and records by tenant namespace through the HTTP API. The service provides full-text, vector, and hybrid retrieval. Successful items in synchronous `/batch` are durable and visible. `/ingest` returns durable business receipts and advances indexes asynchronously. See [writes and retries](#stable-identities-writes-and-retries). The web console is a separate process.
 
-The [Record contract](../../../docs/record-model.en.md) defines responsibilities and consistency boundaries. See the [roadmap and acceptance evidence](../../../docs/roadmap.md) for pending work and verification scope.
+The [Record contract](../../../docs/record-model.en.md) defines responsibilities and consistency boundaries. See the [roadmap and acceptance evidence](../../../docs/roadmap.en.md) for pending work and verification scope.
 
 ## Build and start
 
@@ -64,11 +64,11 @@ export ANYSEEK_S3_SECRET_ACCESS_KEY='your-secret-key'
 
 Set `ANYSEEK_S3_ALLOW_HTTP=1` only for an explicitly configured development HTTP endpoint. Optional `ANYSEEK_S3_MAX_OBJECT_BYTES` defaults to 64 MiB and `ANYSEEK_S3_MAX_TAIL_BLOCKS` to 1,000,000. A single tail's byte budget is bounded by both the collection log budget and the 1 GiB cap. Credentials are used only at runtime.
 
-The Catalog stores collections, backup ownership, and control receipts in `metadata.sqlite` at the root. Both local and S3 modes retain this database, SQLite WAL, and owner lock. Catalog 7 has no tenant registration or key table and does not store the service credential. In S3 mode, the same database also holds Record coordination state. Standalone services use different buckets. Configure a separate target bucket before starting a restored full service. Objects live in `anyseek/{tenant_id}/{collection_id}/`. No automatic namespace or bucket ownership marker is created. SQLite metadata is authoritative, so use the backup API and never copy live database files. The collection's local S3 cache can be reconstructed from authoritative checkpoints and tails. See [storage design](../../../docs/storage.md) for object cache and lock protection.
+The Catalog stores collections, backup ownership, and control receipts in `metadata.sqlite` at the root. Both local and S3 modes retain this database, SQLite WAL, and owner lock. Catalog 7 has no tenant registration or key table and does not store the service credential. In S3 mode, the same database also holds Record coordination state. Standalone services use different buckets. Configure a separate target bucket before starting a restored full service. Objects live in `anyseek/{tenant_id}/{collection_id}/`. No automatic namespace or bucket ownership marker is created. SQLite metadata is authoritative, so use the backup API and never copy live database files. The collection's local S3 cache can be reconstructed from authoritative checkpoints and tails. See [storage design](../../../docs/storage.en.md) for object cache and lock protection.
 
 PATCH collection publishes a full remote checkpoint before reclaiming covered, unpinned objects. Retrying the same collection backup after interruption resumes the original cut. Restore creates a new collection and copies to the target collection's new generation without service credentials. A full service backup uses the existing standalone local archive format, with the catalog and full data. In S3 mode, starting the restore publishes into the separate target bucket.
 
-The S3 backend has merged. Conditional writes and read-after-write visibility against the target service, and auditing remaining maintenance paths, still require acceptance. See the [storage protocol](../../../docs/storage.md). The initial SQLite implementation coordinates one host and provides no cross-host HA.
+The S3 backend has merged. Conditional writes and read-after-write visibility against the target service, and auditing remaining maintenance paths, still require acceptance. See the [storage protocol](../../../docs/storage.en.md). The initial SQLite implementation coordinates one host and provides no cross-host HA.
 
 ## Field types and numeric values
 
@@ -302,7 +302,7 @@ Observed time within a process is monotonic. Restarts preserve only persisted wr
 
 Search filters TTL at capture time and revalidates candidates using the latest time after scoring, so expiration can shorten a page. count_total is the observed count from the captured index and not an exact count at final time. Expired index rows can affect BM25 corpus statistics until background reclamation. Crossing the earliest TTL during pagination conflicts on continuation and requires restarting iteration.
 
-`/doc/{record_id}/status` retains the current technical version, visible/deleted/expired state, and pending_vector_fields. See the [Record contract](../../../docs/record-model.en.md) for all boundaries and the [roadmap and acceptance evidence](../../../docs/roadmap.md) for verification status.
+`/doc/{record_id}/status` retains the current technical version, visible/deleted/expired state, and pending_vector_fields. See the [Record contract](../../../docs/record-model.en.md) for all boundaries and the [roadmap and acceptance evidence](../../../docs/roadmap.en.md) for verification status.
 
 ### Receipt retention boundaries
 
