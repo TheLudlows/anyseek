@@ -36,6 +36,7 @@ atomically replace Record groups with a stable operation ID, query its text or v
 `shutdown()` before reopening the directory. The SDK uses local disk and takes an exclusive root lock.
 
 Use `default-features = false` when the host needs the standard `serde_json` object ordering.
+The snapshot codec retains stored field order independently of the host JSON map.
 The default standalone build enables `ordered-json`. A standalone build that disables default features
 can select `--features ordered-json` to retain the same JSON ordering. Keep the selected build features
 with the catalog version when reopening or restoring a catalog.

@@ -49,6 +49,9 @@ xxhash-rust = { version = "=0.8.15", default-features = false, features = ["xxh6
 log = "0.4"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.154", features = ["raw_value"] }
+# Snapshot proofs depend on record field order. Use a distinct Cargo source
+# so the snapshot's features do not change the host's serde_json::Value.
+snapshot-json = { package = "serde_json", git = "https://github.com/serde-rs/json.git", rev = "0cdc1074e3572470ca0b294d1f8cdf083b6b8d81", features = ["preserve_order", "raw_value", "float_roundtrip"] }
 tokio = { version = "1.53.2", features = ["full"] }
 base64 = "0.23.1"
 ahash ={ version = "0.8.12", features = ["serde"]}

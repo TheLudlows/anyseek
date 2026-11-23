@@ -135,6 +135,11 @@ jobs:
       - name: Retrieval configuration and request diagnostics
         if: matrix.lane == 'core'
         run: cargo test -p anyseek --locked --lib server::record_service::diagnostic_tests -- --test-threads=1
+      - name: Embedded SDK and ordered snapshot recovery
+        if: matrix.lane == 'core' && runner.os == 'Linux'
+        run: |
+          cargo test -p anyseek --locked --no-default-features --test local_sdk
+          cargo test -p anyseek --locked --no-default-features --lib record::state_chunks::tests::chunks_preserve_records_receipts_opaque_json_and_owned_residency -- --exact
       - name: Service persistence fences and shutdown ownership
         if: matrix.lane == 'core'
         shell: bash

@@ -5,7 +5,7 @@ use crate::storage::{
     build_budget::reserve_memory,
     payload_pool::{PoolBuilder, PoolReader},
 };
-use serde_json::Value;
+use snapshot_json::Value;
 use std::io::{Read, Write};
 
 const FRAME: usize = 16 * 1024 * 1024;
@@ -67,7 +67,7 @@ impl Delta {
         let mut failure = None;
         let visited = visit(&mut |bytes| {
             let result = (|| -> Result<(), RecordError> {
-                let entry: Entry = serde_json::from_slice(bytes).map_err(storage)?;
+                let entry: Entry = snapshot_json::from_slice(bytes).map_err(storage)?;
                 if first {
                     first = false;
                     let Entry::Anchor(selected) = entry else { return Err(invalid("delta requires an anchor certificate")); };
@@ -136,9 +136,9 @@ impl Delta {
             let entry = if let Some(mut operations) = object.remove("operations") {
                 let values = operations.as_array_mut().filter(|v| v.len() == 1)
                     .ok_or_else(|| invalid("invalid delta operation count"))?;
-                Entry::Applied(serde_json::from_value(values.pop().unwrap()).map_err(storage)?)
+                Entry::Applied(snapshot_json::from_value(values.pop().unwrap()).map_err(storage)?)
             } else {
-                let entry: Entry = serde_json::from_value(object.remove("event")
+                let entry: Entry = snapshot_json::from_value(object.remove("event")
                     .ok_or_else(|| invalid("missing delta event"))?).map_err(storage)?;
                 if !(matches!(entry, Entry::Expired(_) | Entry::HistoryTrim(_))
                     || self.frames.format == 9 && matches!(entry, Entry::GroupApplied(_))) {
@@ -209,16 +209,16 @@ impl Writer<'_> {
                 .ok_or_else(|| invalid("state entry estimate overflow"))?,
         )
         .map_err(storage)?;
-        let mut wire = serde_json::to_value(raw).map_err(storage)?;
+        let mut wire = snapshot_json::to_value(raw).map_err(storage)?;
         segment_state::visit(&mut wire, |body| {
-            let bytes = serde_json::to_vec(body).map_err(storage)?;
+            let bytes = snapshot_json::to_vec(body).map_err(storage)?;
             if bytes.len() > self.config.max_record_bytes {
                 return Err(invalid("payload body budget exceeded"));
             }
-            *body = serde_json::json!({"$payload": self.pool.intern(&bytes).map_err(storage)?});
+            *body = snapshot_json::json!({"$payload": self.pool.intern(&bytes).map_err(storage)?});
             Ok(())
         })?;
-        let bytes = serde_json::to_vec(&wire).map_err(storage)?;
+        let bytes = snapshot_json::to_vec(&wire).map_err(storage)?;
         if bytes.len() > FRAME {
             return Err(invalid("referenced state entry exceeds frame budget"));
         }
@@ -315,7 +315,7 @@ impl Pieces for PieceDigest {
         let bytes=checkpoint_codec::json_length(raw)? as u64;
         if bytes > FRAME as u64 { return Err(invalid("state metadata entry exceeds frame budget")); }
         let _lease=reserve_memory(bytes.checked_mul(32).ok_or_else(||invalid("state entry estimate overflow"))?).map_err(storage)?;
-        self.value(&serde_json::to_value(raw).map_err(storage)?,bytes)
+        self.value(&snapshot_json::to_value(raw).map_err(storage)?,bytes)
     }
 }
 impl Descriptor {
@@ -423,14 +423,14 @@ impl Descriptor {
                 .map_err(storage)?;
                 let mut buffer = vec![0; bytes as usize];
                 file.read_exact(&mut buffer).map_err(storage)?;
-                let mut wire: Value = serde_json::from_slice(&buffer).map_err(storage)?;
+                let mut wire: Value = snapshot_json::from_slice(&buffer).map_err(storage)?;
                 let mut body_bytes = 0usize;
                 segment_state::visit(&mut wire, |body| {
                     let object = body
                         .as_object()
                         .filter(|o| o.len() == 1)
                         .ok_or_else(|| invalid("invalid state payload reference"))?;
-                    let reference = serde_json::from_value(
+                    let reference = snapshot_json::from_value(
                         object
                             .get("$payload")
                             .ok_or_else(|| invalid("missing state payload reference"))?
@@ -449,7 +449,7 @@ impl Descriptor {
                         .checked_add(raw.len())
                         .filter(|n| *n <= expanded as usize)
                         .ok_or_else(|| invalid("state body expansion exceeded"))?;
-                    *body = serde_json::from_slice(&raw).map_err(storage)?;
+                    *body = snapshot_json::from_slice(&raw).map_err(storage)?;
                     Ok(())
                 })?;
                 if checkpoint_codec::json_length(&wire)? != expanded as usize {
@@ -546,7 +546,7 @@ fn apply_piece(
         if object.len() != 1 {
             return Err(invalid("invalid state header"));
         }
-        let header: State = serde_json::from_value(
+        let header: State = snapshot_json::from_value(
             object
                 .remove("header")
                 .ok_or_else(|| invalid("missing state header"))?,
@@ -584,7 +584,7 @@ fn apply_piece(
     }
     macro_rules! one {
         ($ty:ty) => {{
-            let mut values: Vec<$ty> = serde_json::from_value(value.take()).map_err(storage)?;
+            let mut values: Vec<$ty> = snapshot_json::from_value(value.take()).map_err(storage)?;
             if values.len() != 1 {
                 return Err(invalid("invalid state piece cardinality"));
             }
@@ -594,7 +594,7 @@ fn apply_piece(
     match kind.as_str() {
         "records" => {
             let records: BTreeMap<String, Record> =
-                serde_json::from_value(value.take()).map_err(storage)?;
+                snapshot_json::from_value(value.take()).map_err(storage)?;
             if records.len() != 1 {
                 return Err(invalid("invalid record piece cardinality"));
             }
@@ -609,13 +609,13 @@ fn apply_piece(
             state.operations.push(one!(Applied))?;
         },
         "group_heads" => {
-            let mut values:BTreeMap<String,group_plan::Head>=serde_json::from_value(value.take()).map_err(storage)?;
+            let mut values:BTreeMap<String,group_plan::Head>=snapshot_json::from_value(value.take()).map_err(storage)?;
             if values.len()!=1 { return Err(invalid("invalid group head cardinality")); }
             let (id,head)=values.pop_first().unwrap();
             if state.groups.as_mut().ok_or_else(||invalid("missing group header"))?.heads.insert(id,head).is_some() { return Err(invalid("duplicate group head")); }
         },
         "group_owners" => {
-            let mut values:BTreeMap<String,String>=serde_json::from_value(value.take()).map_err(storage)?;
+            let mut values:BTreeMap<String,String>=snapshot_json::from_value(value.take()).map_err(storage)?;
             if values.len()!=1 { return Err(invalid("invalid group owner cardinality")); }
             let (id,owner)=values.pop_first().unwrap();
             if state.groups.as_mut().ok_or_else(||invalid("missing group header"))?.owners.insert(id,owner).is_some() { return Err(invalid("duplicate group owner")); }
@@ -639,7 +639,7 @@ mod tests {
         struct Collected(Vec<Value>);
         impl Pieces for Collected {
             fn push(&mut self, raw:&impl Serialize)->Result<(),RecordError> {
-                self.0.push(serde_json::to_value(raw).map_err(storage)?);Ok(())
+                self.0.push(snapshot_json::to_value(raw).map_err(storage)?);Ok(())
             }
         }
         let config=super::super::tests::config();
@@ -659,7 +659,7 @@ mod tests {
         let mut recovered=None;
         for (i,piece) in pieces.0.iter().cloned().enumerate() {apply_piece(&mut recovered,piece,i as u64,&config).unwrap();}
         let recovered=recovered.unwrap();
-        assert_eq!(serde_json::to_value(&state).unwrap(),serde_json::to_value(&recovered).unwrap());
+        assert_eq!(snapshot_json::to_value(&state).unwrap(),snapshot_json::to_value(&recovered).unwrap());
         assert_eq!(state_proof::length(&state).unwrap(),checkpoint_codec::json_length(&state).unwrap());
         let mut duplicate=Some(recovered);
         assert!(apply_piece(&mut duplicate,pieces.0[1].clone(),5,&config).is_err());
@@ -718,14 +718,14 @@ mod tests {
         let mut first = super::super::tests::write("initial","s","plain original",ExpectedVersion::Absent);
         first.document.as_mut().unwrap().insert(
             "opaque".into(),
-            serde_json::json!({"$payload":123,"document":"unchanged", "float":1.23456789}),
+            ::serde_json::json!({"$payload":123,"document":"unchanged", "float":1.23456789}),
         );
         partition.write(first).await.unwrap();
         let mut revision = super::super::tests::write("revision","s","plain original",ExpectedVersion::Absent);
         revision.expected = ExpectedVersion::Match(1);
         revision.document.as_mut().unwrap().insert(
             "body".into(),
-            serde_json::json!("繁體 unicode \\\" revised"),
+            ::serde_json::json!("繁體 unicode \\\" revised"),
         );
         partition.write(revision).await.unwrap();
         let state = partition.inner.lock().await.state.try_clone().unwrap();
@@ -770,8 +770,8 @@ mod tests {
             .read(&directory, &pool, config.max_journal_bytes)
             .unwrap();
         assert_eq!(
-            serde_json::to_vec(&decoded.state).unwrap(),
-            serde_json::to_vec(&state).unwrap()
+            snapshot_json::to_vec(&decoded.state).unwrap(),
+            snapshot_json::to_vec(&state).unwrap()
         );
         assert_eq!(decoded.state.operation_lookup.len(), state.operations.len());
         let owner = Arc::downgrade(decoded.state.residency.as_ref().unwrap());

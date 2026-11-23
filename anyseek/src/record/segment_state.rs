@@ -1,7 +1,7 @@
 //! Canonical state references for authenticated payload pools. An anchor
 //! selects the complete closure; isolated blocks never publish authority.
 use super::*;
-use serde_json::Value;
+use snapshot_json::Value;
 
 // Enumerate only engine-owned payload positions. Never recurse into user JSON:
 // a user field called document/generation/$payload has no special meaning.
@@ -34,7 +34,7 @@ fn encoded_length(value:&Value,limit:u64)->Result<u64,RecordError> {
         fn flush(&mut self)->std::io::Result<()>{Ok(())}
     }
     let mut counter=Counter{bytes:0,limit};
-    serde_json::to_writer(&mut counter,value).map_err(storage)?;Ok(counter.bytes)
+    snapshot_json::to_writer(&mut counter,value).map_err(storage)?;Ok(counter.bytes)
 }
 // A full State has at most max_records current bodies. Each retained
 // operation has either a document or a vector patch.
@@ -57,9 +57,9 @@ fn hydrate(config:RecordConfig,mut wire:Value,max_bytes:u64,mut read:impl FnMut(
         if bytes.len()>config.max_record_bytes{return Err(storage("payload body budget exceeded"));}
         expanded=expanded.checked_sub(encoded_length(value,max_bytes)?).and_then(|n|n.checked_add(bytes.len() as u64))
             .filter(|n|*n<=max_bytes).ok_or_else(||storage("expanded payload budget exceeded"))?;
-        *value=serde_json::from_slice(&bytes).map_err(storage)?;Ok(())
+        *value=snapshot_json::from_slice(&bytes).map_err(storage)?;Ok(())
     })?;
-    let mut state=serde_json::from_value(wire).map_err(storage)?;
+    let mut state=snapshot_json::from_value(wire).map_err(storage)?;
     restore_operation_lookup(&mut state)?;validate_restored_state(&config,&state)?;
     Ok((config,state))
 }
@@ -74,12 +74,12 @@ pub(super) struct ReferencedState {config:RecordConfig,state:Value}
 impl ReferencedState {
     pub(super) fn write(config:&RecordConfig,state:&State,pool:&mut crate::storage::payload_pool::PoolBuilder)->Result<Self,RecordError>{
         validate_config(config)?;
-        let mut wire=serde_json::to_value(state).map_err(storage)?;
+        let mut wire=snapshot_json::to_value(state).map_err(storage)?;
         encoded_length(&wire,config.max_journal_bytes)?;
         visit(&mut wire,|value|{
-            let bytes=serde_json::to_vec(value).map_err(storage)?;
+            let bytes=snapshot_json::to_vec(value).map_err(storage)?;
             if bytes.len()>config.max_record_bytes{return Err(storage("payload body budget exceeded"));}
-            *value=serde_json::json!({"$payload":pool.intern(&bytes).map_err(storage)?});Ok(())
+            *value=snapshot_json::json!({"$payload":pool.intern(&bytes).map_err(storage)?});Ok(())
         })?;
         encoded_length(&wire,config.max_journal_bytes)?;
         Ok(Self{config:config.clone(),state:wire})
@@ -87,7 +87,7 @@ impl ReferencedState {
     pub(super) fn read(self,pool:&crate::storage::payload_pool::PoolReader,max_bytes:u64)->Result<(RecordConfig,State),RecordError>{
         let limit=self.config.max_record_bytes.min(usize::try_from(max_bytes.min(self.config.max_journal_bytes)).map_err(storage)?);
         hydrate(self.config,self.state,max_bytes,|value|{
-            let reference=serde_json::from_value(value.clone()).map_err(storage)?;
+            let reference=snapshot_json::from_value(value.clone()).map_err(storage)?;
             pool.read_limited(&reference,limit).map_err(storage)
         })
     }
@@ -102,7 +102,7 @@ mod tests {
     fn full_state_payload_bound_counts_records_and_vector_patches() {
         let mut config=super::super::tests::config();
         config.max_records=2;config.max_operations=2;
-        let mut state=serde_json::json!({
+        let mut state=snapshot_json::json!({
             "records":{"a":{"document":{}},"b":{"document":{"body":"current"}}},
             "operations":[{"request":{"document":{"body":"write"}}},
                 {"request":{"document":null,"vector_patch":{"vector":[1,2]}}}]
@@ -140,19 +140,19 @@ mod tests {
         assert!(narrow.read(&reader,config.max_journal_bytes).unwrap_err().to_string().contains("payload read budget exceeded"));
         first.read(&reader,config.max_journal_bytes).unwrap();drop(reader);
         let mut update=super::super::tests::write("revision","r","plain original",ExpectedVersion::Absent);update.expected=ExpectedVersion::Match(1);
-        update.document.as_mut().unwrap().insert("body".into(),serde_json::json!("revised alpha"));
+        update.document.as_mut().unwrap().insert("body".into(),::serde_json::json!("revised alpha"));
         partition.write(update).await.unwrap();
         let mut pool=PoolBuilder::begin(&objects,closure,budget,format!("{:032x}",2)).unwrap();
-        let inner=partition.inner.lock().await;let expected=serde_json::to_vec(&inner.state).unwrap();
+        let inner=partition.inner.lock().await;let expected=snapshot_json::to_vec(&inner.state).unwrap();
         let second=ReferencedState::write(&inner.config,&inner.state,&mut pool).unwrap();drop(inner);
         let closure=pool.finish().unwrap();assert_eq!(closure.objects.len(),2);
         for (id,descriptor) in old {assert_eq!(closure.objects[&id],descriptor);}
         assert_eq!(closure.objects.values().map(|d|d.payloads.len()).sum::<usize>(),2);
         let reader=PoolReader::open(&objects,closure,budget).unwrap();
-        let encoded=serde_json::to_vec(&second).unwrap();
-        let second:ReferencedState=serde_json::from_slice(&encoded).unwrap();
+        let encoded=snapshot_json::to_vec(&second).unwrap();
+        let second:ReferencedState=snapshot_json::from_slice(&encoded).unwrap();
         let (_,state)=second.read(&reader,config.max_journal_bytes).unwrap();
-        assert_eq!(serde_json::to_vec(&state).unwrap(),expected);
+        assert_eq!(snapshot_json::to_vec(&state).unwrap(),expected);
         assert_eq!(state.operation_lookup.len(),2);
         drop(reader);partition.finish_service_shutdown().await.unwrap();drop(partition);std::fs::remove_dir_all(root).unwrap();
     }
@@ -164,17 +164,17 @@ mod tests {
         let config=super::super::tests::config();
         let partition=RecordPartition::create(&root,config.clone()).await.unwrap();
         let mut request=super::super::tests::write("payload", "a", "alpha", ExpectedVersion::Absent);
-        request.document.as_mut().unwrap().insert("document".into(),serde_json::json!({"$payload":999}));
+        request.document.as_mut().unwrap().insert("document".into(),::serde_json::json!({"$payload":999}));
         partition.write(request).await.unwrap();
         let inner=partition.inner.lock().await;
-        let expected=serde_json::to_vec(&inner.state).unwrap();
+        let expected=snapshot_json::to_vec(&inner.state).unwrap();
         let (prepared,pool,closure,_)=prepare(&root,&inner.config,&inner.state);
         // The same exact Document in current Record and retry request shares bytes.
         assert_eq!(closure.objects.values().map(|d|d.payloads.len()).sum::<usize>(),1);
-        let encoded=serde_json::to_vec(&prepared).unwrap();
-        let prepared=serde_json::from_slice::<ReferencedState>(&encoded).unwrap();
+        let encoded=snapshot_json::to_vec(&prepared).unwrap();
+        let prepared=snapshot_json::from_slice::<ReferencedState>(&encoded).unwrap();
         let (_,state)=prepared.read(&pool,config.max_journal_bytes).unwrap();
-        assert_eq!(serde_json::to_vec(&state).unwrap(),expected);
+        assert_eq!(snapshot_json::to_vec(&state).unwrap(),expected);
         drop(pool);drop(inner);partition.finish_service_shutdown().await.unwrap();drop(partition);
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -189,21 +189,21 @@ mod tests {
         partition.write(initial.clone()).await.unwrap();
         let mut patch=write("patch","s","ignored",ExpectedVersion::Match(1));
         patch.document=None;
-        patch.vector_patch=Some(serde_json::from_value(serde_json::json!({"vector":[7.0,0.0]})).unwrap());
+        patch.vector_patch=Some(::serde_json::from_value(::serde_json::json!({"vector":[7.0,0.0]})).unwrap());
         assert_eq!(partition.write(patch.clone()).await.unwrap().version,1);
         let mut revision=write("revision","s","changed",ExpectedVersion::Match(1));
         revision.document.as_mut().unwrap().shift_remove("vector");
         partition.write(revision).await.unwrap();
         let inner=partition.inner.lock().await;
-        let expected=serde_json::to_vec(&inner.state).unwrap();
+        let expected=snapshot_json::to_vec(&inner.state).unwrap();
         let (prepared,pool,closure,_)=prepare(&root,&settings,&inner.state);
         let mut references=0; let mut wire=prepared.state.clone();
         visit(&mut wire,|_|{references+=1;Ok(())}).unwrap();
         assert!(closure.objects.values().map(|d|d.payloads.len()).sum::<usize>()<references);
         let (_,state)=prepared.read(&pool,settings.max_journal_bytes).unwrap();
-        assert_eq!(serde_json::to_vec(&state).unwrap(),expected);
+        assert_eq!(snapshot_json::to_vec(&state).unwrap(),expected);
         assert_eq!(state.operations[0].request.document,original);
-        assert_eq!(state.operations[1].request.vector_patch.as_ref().unwrap()["vector"],serde_json::json!([7.0,0.0]));
+        assert_eq!(state.operations[1].request.vector_patch.as_ref().unwrap()["vector"],::serde_json::json!([7.0,0.0]));
         assert_eq!(state.records["s"].version,2);
         drop(pool);drop(inner);partition.finish_service_shutdown().await.unwrap();drop(partition);std::fs::remove_dir_all(root).unwrap();
     }
@@ -216,12 +216,12 @@ mod tests {
         partition.write(write("op","a","alpha",ExpectedVersion::Absent)).await.unwrap();
         let inner=partition.inner.lock().await;
         let (prepared,pool,_,file)=prepare(&root,&settings,&inner.state);
-        let encoded=serde_json::to_vec(&prepared).unwrap();
-        let mut invalid:ReferencedState=serde_json::from_slice(&encoded).unwrap();
-        invalid.state["records"]["a"]["document"]=serde_json::json!({"$payload":{"object":prepared.state["records"]["a"]["document"]["$payload"]["object"],"position":u64::MAX}});
+        let encoded=snapshot_json::to_vec(&prepared).unwrap();
+        let mut invalid:ReferencedState=snapshot_json::from_slice(&encoded).unwrap();
+        invalid.state["records"]["a"]["document"]=snapshot_json::json!({"$payload":{"object":prepared.state["records"]["a"]["document"]["$payload"]["object"],"position":u64::MAX}});
         assert!(invalid.read(&pool,settings.max_journal_bytes).is_err());
-        let mut invalid:ReferencedState=serde_json::from_slice(&encoded).unwrap();
-        invalid.state["records"]["a"]["document"]=serde_json::json!({"$payload":0,"extra":true});
+        let mut invalid:ReferencedState=snapshot_json::from_slice(&encoded).unwrap();
+        invalid.state["records"]["a"]["document"]=snapshot_json::json!({"$payload":0,"extra":true});
         assert!(invalid.read(&pool,settings.max_journal_bytes).is_err());
         std::fs::OpenOptions::new().write(true).open(&file).unwrap().set_len(16).unwrap();
         assert!(prepared.read(&pool,settings.max_journal_bytes).is_err());

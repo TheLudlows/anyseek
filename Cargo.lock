@@ -121,7 +121,8 @@ dependencies = [
  "regex-syntax",
  "rusqlite",
  "serde",
- "serde_json",
+ "serde_json 1.0.154 (registry+https://github.com/rust-lang/crates.io-index)",
+ "serde_json 1.0.154 (git+https://github.com/serde-rs/json.git?rev=0cdc1074e3572470ca0b294d1f8cdf083b6b8d81)",
  "sha2",
  "tantivy",
  "tantivy-jieba",
@@ -187,7 +188,7 @@ dependencies = [
  "percent-encoding",
  "pin-project-lite",
  "serde_core",
- "serde_json",
+ "serde_json 1.0.154 (registry+https://github.com/rust-lang/crates.io-index)",
  "serde_path_to_error",
  "serde_urlencoded",
  "sync_wrapper",
@@ -1670,7 +1671,7 @@ dependencies = [
  "reqwest",
  "ring",
  "serde",
- "serde_json",
+ "serde_json 1.0.154 (registry+https://github.com/rust-lang/crates.io-index)",
  "serde_urlencoded",
  "thiserror",
  "tokio",
@@ -2069,7 +2070,7 @@ dependencies = [
  "rustls-native-certs",
  "rustls-pki-types",
  "serde",
- "serde_json",
+ "serde_json 1.0.154 (registry+https://github.com/rust-lang/crates.io-index)",
  "serde_urlencoded",
  "sync_wrapper",
  "tokio",
@@ -2300,6 +2301,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "serde_json"
+version = "1.0.154"
+source = "git+https://github.com/serde-rs/json.git?rev=0cdc1074e3572470ca0b294d1f8cdf083b6b8d81#20572a6d066958542d79cdd6cf1a7cd9f0c8e1f8"
+dependencies = [
+ "foldhash",
+ "indexmap",
+ "itoa",
+ "memchr",
+ "serde",
+ "serde_core",
+ "zmij",
+]
+
+[[package]]
 name = "serde_path_to_error"
 version = "0.1.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2485,7 +2500,7 @@ dependencies = [
  "rustc-hash",
  "serde",
  "serde-tuple-vec-map",
- "serde_json",
+ "serde_json 1.0.154 (registry+https://github.com/rust-lang/crates.io-index)",
  "sketches-ddsketch",
  "smallvec",
  "tantivy-bitpacker",
@@ -2575,7 +2590,7 @@ dependencies = [
  "nom",
  "ordered-float",
  "serde",
- "serde_json",
+ "serde_json 1.0.154 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[package]]
@@ -2924,7 +2939,7 @@ checksum = "8765fe27aeff71012a3f90fa474cf1df863a7d0dd81ed25de4e63fff2544994f"
 dependencies = [
  "indexmap",
  "serde",
- "serde_json",
+ "serde_json 1.0.154 (registry+https://github.com/rust-lang/crates.io-index)",
  "utoipa-gen",
  "yaml_serde",
 ]
