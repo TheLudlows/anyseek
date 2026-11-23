@@ -591,7 +591,7 @@ mod tests {
         let root = temporary.path().join("records");
         let p = RecordPartition::create(&root, config()).await.unwrap();
         let mut initial = write("initial", "a", "alpha", ExpectedVersion::Absent);
-        initial.document.as_mut().unwrap().shift_remove("vector");
+        initial.document.as_mut().unwrap().remove("vector");
         p.write(initial).await.unwrap();
         let gate = ".test-query-candidates-pause";
         std::fs::write(root.join(gate), b"pause").unwrap();

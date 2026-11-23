@@ -2202,7 +2202,7 @@ mod tests {
     #[tokio::test]
     async fn ttl_extension_before_deadline_and_competing_late_updates() {
         let root=path();let p=RecordPartition::create(&root,config()).await.unwrap();let(clock,now)=test_clock(&p).await;
-        let mut request=write("s","s","alpha",ExpectedVersion::Absent);request.document.as_mut().unwrap().shift_remove("vector");
+        let mut request=write("s","s","alpha",ExpectedVersion::Absent);request.document.as_mut().unwrap().remove("vector");
         request.temporal=Some(TemporalMetadata {expire_at_ms:Some(now+100),..Default::default()});p.write(request.clone()).await.unwrap();
         clock.set(now+99);request.operation_id=OperationId::new("extend".into());request.expected=ExpectedVersion::Match(1);
         request.temporal.as_mut().unwrap().expire_at_ms=Some(now+200);p.write(request.clone()).await.unwrap();

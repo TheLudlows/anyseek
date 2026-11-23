@@ -184,7 +184,7 @@ mod tests {
         let root=path(); let settings=config();
         let partition=RecordPartition::create(&root,settings.clone()).await.unwrap();
         let mut initial=write("initial","s","plain original",ExpectedVersion::Absent);
-        initial.document.as_mut().unwrap().shift_remove("vector");
+        initial.document.as_mut().unwrap().remove("vector");
         let original=initial.document.clone();
         partition.write(initial.clone()).await.unwrap();
         let mut patch=write("patch","s","ignored",ExpectedVersion::Match(1));
@@ -192,7 +192,7 @@ mod tests {
         patch.vector_patch=Some(serde_json::from_value(serde_json::json!({"vector":[7.0,0.0]})).unwrap());
         assert_eq!(partition.write(patch.clone()).await.unwrap().version,1);
         let mut revision=write("revision","s","changed",ExpectedVersion::Match(1));
-        revision.document.as_mut().unwrap().shift_remove("vector");
+        revision.document.as_mut().unwrap().remove("vector");
         partition.write(revision).await.unwrap();
         let inner=partition.inner.lock().await;
         let expected=serde_json::to_vec(&inner.state).unwrap();

@@ -130,19 +130,19 @@ jobs:
       - name: Committed asynchronous-index HTTP and authorization regressions
         if: matrix.lane == 'core'
         run: |
-          cargo test -p anyseek --locked --bin anyseek_server committed_ingest_
-          cargo test -p anyseek --locked --bin anyseek_server record_service::tests::synchronous_http_batch_keeps_100_limit_rejections_and_visibility -- --exact
+          cargo test -p anyseek --locked --lib committed_ingest_
+          cargo test -p anyseek --locked --lib server::record_service::tests::synchronous_http_batch_keeps_100_limit_rejections_and_visibility -- --exact
       - name: Retrieval configuration and request diagnostics
         if: matrix.lane == 'core'
-        run: cargo test -p anyseek --locked --bin anyseek_server record_service::diagnostic_tests -- --test-threads=1
+        run: cargo test -p anyseek --locked --lib server::record_service::diagnostic_tests -- --test-threads=1
       - name: Service persistence fences and shutdown ownership
         if: matrix.lane == 'core'
         shell: bash
         run: |
-          cargo test -p anyseek --locked --features fault-injection --bin anyseek_server record_service::tests::service_data_fence_preserves_persistence_errors -- --exact
-          cargo test -p anyseek --locked --features fault-injection --bin anyseek_server record_service::tests::service_query_headers_and_body_wait_for_publication -- --exact
-          cargo test -p anyseek --locked --features fault-injection --bin anyseek_server record_service::tests::service_publication_waits_share_original_request_deadline -- --exact
-          cargo test -p anyseek --locked --features fault-injection --bin anyseek_server record_service::tests::shutdown_
+          cargo test -p anyseek --locked --features fault-injection --lib server::record_service::tests::service_data_fence_preserves_persistence_errors -- --exact
+          cargo test -p anyseek --locked --features fault-injection --lib server::record_service::tests::service_query_headers_and_body_wait_for_publication -- --exact
+          cargo test -p anyseek --locked --features fault-injection --lib server::record_service::tests::service_publication_waits_share_original_request_deadline -- --exact
+          cargo test -p anyseek --locked --features fault-injection --lib server::record_service::tests::shutdown_
       - name: Real SIGTERM drains owned work and releases the root
         if: matrix.lane == 'core' && runner.os == 'Linux'
         run: |
@@ -183,7 +183,7 @@ jobs:
         if: matrix.lane == 'core'
         shell: bash
         run: |
-          cargo test -p anyseek --bin anyseek_server record_service::tests::reclamation_waits_for_service_backup_before_catalog_lifecycle -- --exact --nocapture
+          cargo test -p anyseek --lib server::record_service::tests::reclamation_waits_for_service_backup_before_catalog_lifecycle -- --exact --nocapture
           server_binary=target/debug/anyseek_server
           if [ "${{ runner.os }}" = "Windows" ]; then
             server_binary=target/debug/anyseek_server.exe

@@ -2,10 +2,12 @@
 //! service here. Cancelling a waiter never cancels this shutdown coordinator.
 use super::*;
 
+/// A handle to the service shutdown result.
 #[derive(Clone)]
-pub(crate) struct Shutdown(tokio::sync::watch::Receiver<Option<Result<(), String>>>);
+pub struct Shutdown(tokio::sync::watch::Receiver<Option<Result<(), String>>>);
 impl Shutdown {
-    pub(crate) async fn wait(&mut self) -> Result<(), String> {
+    /// Wait for all admitted work and storage owners to close.
+    pub async fn wait(&mut self) -> Result<(), String> {
         loop {
             if let Some(result) = self.0.borrow().clone() { return result; }
             self.0.changed().await.map_err(|_| "shutdown coordinator exited without completion".to_owned())?;
@@ -14,12 +16,13 @@ impl Shutdown {
 }
 
 impl Service {
-    pub(crate) fn stop_accepting(&self) { self.lifecycle.stop(); }
+    /// Refuse new work while admitted operations finish.
+    pub fn stop_accepting(&self) { self.lifecycle.stop(); }
 
     /// Transfer the transport owner after HTTP graceful shutdown. Old routers
     /// may finish dropping just after the server future; wait for those owners.
     /// Repeated calls share the same cancellation-safe completion.
-    pub(crate) fn shutdown(self: Arc<Self>) -> Shutdown {
+    pub fn shutdown(self: Arc<Self>) -> Shutdown {
         self.stop_accepting();
         let mut slot = self.shutdown.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(shutdown) = &*slot { return shutdown.clone(); }

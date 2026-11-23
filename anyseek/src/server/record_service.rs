@@ -1,12 +1,15 @@
+#![allow(clippy::approx_constant)]
+
 //! Tenant-scoped storage service. Upstream authenticates users; one configured
 //! service credential protects requests and the gateway supplies the namespace.
 mod admission;
 mod shutdown;
 mod diagnostics;
+pub(crate) mod local;
 #[cfg(test)]
 #[path = "record_service/diagnostic_tests.rs"]
 mod diagnostic_tests;
-use crate::api_types::{CreateIndexRequest, FieldRequest, GetDocumentRequest, SearchRequestObject};
+use super::api_types::{CreateIndexRequest, FieldRequest, GetDocumentRequest, SearchRequestObject};
 use axum::{
     Json, Router,
     body::{Body, Bytes},
@@ -126,9 +129,6 @@ fn key_bytes(text: &str) -> Result<Vec<u8>, Error> {
         return Err(bad("API key must contain 32 random bytes"));
     }
     Ok(bytes)
-}
-fn master_verifier() -> String {
-    verifier(&Sha256::digest(crate::MASTER_KEY_SECRET.as_bytes()))
 }
 fn control_id(id: &OperationId) -> Result<(), Error> {
     if id.nonce.is_empty() || id.nonce.len() > 256 {
@@ -294,7 +294,9 @@ fn encode_data_response<T: Serialize>(
     Ok(response)
 }
 
-pub(crate) struct Service {
+/// Internal service owner shared by the binary and the local SDK.
+pub struct Service {
+    master_verifier: Option<String>,
     root: PathBuf,
     catalog: Catalog,
     records: RwLock<BTreeMap<String, RecordPartition>>,
@@ -392,38 +394,61 @@ impl Service {
         }).await.map_err(Into::into)
     }
 
-    pub(crate) async fn open(
+    /// Open the configured server backend and authenticate HTTP with this secret.
+    pub async fn open_http(
         root: &FsPath,
         default_nprobe: std::num::NonZeroUsize,
+        secret: &str,
+    ) -> Result<Arc<Self>, String> {
+        if secret.trim().is_empty() {
+            return Err("empty service secret".into());
+        }
+        let verifier = verifier(&Sha256::digest(secret.as_bytes()));
+        Self::open(root, default_nprobe, Some(verifier), true).await
+    }
+    async fn open(
+        root: &FsPath,
+        default_nprobe: std::num::NonZeroUsize,
+        master_verifier: Option<String>,
+        allow_create: bool,
     ) -> Result<Arc<Self>, String> {
         let root = root.to_owned();
-        tokio::spawn(async move { Self::open_owned(&root, default_nprobe).await })
-            .await
-            .map_err(|e| e.to_string())?
+        tokio::spawn(async move {
+            Self::open_owned(&root, default_nprobe, master_verifier, allow_create).await
+        })
+        .await
+        .map_err(|e| e.to_string())?
     }
     async fn open_owned(
         root: &FsPath,
         default_nprobe: std::num::NonZeroUsize,
+        master_verifier: Option<String>,
+        allow_create: bool,
     ) -> Result<Arc<Self>, String> {
         let parent = root.parent().ok_or("service root requires parent")?;
         let name = root
             .file_name()
             .and_then(|name| name.to_str())
             .ok_or("invalid root name")?;
-        let root_owner = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(parent.join(format!(".seekpower-service-{name}.lock")))
-            .map_err(|e| e.to_string())?;
-        root_owner
-            .try_lock()
-            .map_err(|e| format!("service root is already owned: {e}"))?;
+        let lock_path = parent.join(format!(".seekpower-service-{name}.lock"));
+        let root_owner = tokio::task::spawn_blocking(move || {
+            let owner = std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .read(true)
+                .write(true)
+                .open(lock_path)
+                .map_err(|e| e.to_string())?;
+            owner.try_lock().map_err(|e| format!("service root is already owned: {e}"))?;
+            Ok::<_, String>(owner)
+        }).await.map_err(|e| e.to_string())??;
+        if !allow_create && !tokio::fs::try_exists(root).await.map_err(|e| e.to_string())? {
+            return Err("existing local Catalog directory is missing".into());
+        }
         Catalog::resume_initialization(root)
             .await
             .map_err(|e| e.to_string())?;
-        let existed = root.exists();
+        let existed = tokio::fs::try_exists(root).await.map_err(|e| e.to_string())?;
         let catalog = if existed {
             Catalog::open(root).await
         } else {
@@ -435,6 +460,7 @@ impl Service {
             .await
             .map_err(|e| e.to_string())?;
         let service = Arc::new(Self {
+            master_verifier,
             root: root.into(),
             catalog,
             records: RwLock::new(BTreeMap::new()),
@@ -458,23 +484,26 @@ impl Service {
         for entry in &entries {
             parents.insert(root.join(entry.directory()).parent().unwrap().to_path_buf());
         }
-        for parent in parents {
-            if !parent.exists() { continue; }
-            for row in std::fs::read_dir(&parent).map_err(|e| e.to_string())? {
-                let row = row.map_err(|e| e.to_string())?;
-                let name = row.file_name().to_string_lossy().into_owned();
-                if name
-                    .strip_prefix(".partition-prepare-")
-                    .or_else(|| name.strip_prefix(".s3-service-export-"))
-                    .is_some_and(|suffix| {
-                        suffix.len() == 32 && suffix.bytes().all(|b| b.is_ascii_hexdigit())
-                    })
-                    && row.file_type().map_err(|e| e.to_string())?.is_dir()
-                {
-                    std::fs::remove_dir_all(row.path()).map_err(|e| e.to_string())?;
+        tokio::task::spawn_blocking(move || {
+            for parent in parents {
+                if !parent.exists() { continue; }
+                for row in std::fs::read_dir(&parent).map_err(|e| e.to_string())? {
+                    let row = row.map_err(|e| e.to_string())?;
+                    let name = row.file_name().to_string_lossy().into_owned();
+                    if name
+                        .strip_prefix(".partition-prepare-")
+                        .or_else(|| name.strip_prefix(".s3-service-export-"))
+                        .is_some_and(|suffix| {
+                            suffix.len() == 32 && suffix.bytes().all(|b| b.is_ascii_hexdigit())
+                        })
+                        && row.file_type().map_err(|e| e.to_string())?.is_dir()
+                    {
+                        std::fs::remove_dir_all(row.path()).map_err(|e| e.to_string())?;
+                    }
                 }
             }
-        }
+            Ok::<_, String>(())
+        }).await.map_err(|e| e.to_string())??;
         for id in service
             .catalog
             .retired_backups()
@@ -498,6 +527,7 @@ impl Service {
         self.s3_config(entry.scope(), entry.config.max_journal_bytes)
     }
     fn s3_config(&self, partition_id: String, journal_bytes: u64) -> Result<Option<S3CompatibleRecordConfig>, Error> {
+        if self.master_verifier.is_none() { return Ok(None); }
         let backend = std::env::var("ANYSEEK_STORAGE_BACKEND").unwrap_or_else(|_| "local".into());
         if backend == "local" { return Ok(None); }
         if backend != "s3" {
@@ -648,7 +678,7 @@ impl Service {
     async fn authenticate_credentials(&self, headers: &HeaderMap) -> Result<String, Error> {
         let value = headers.get("apikey").and_then(|v| v.to_str().ok())
             .ok_or_else(|| Error(StatusCode::UNAUTHORIZED, "unauthorized", "service API key required".into()))?;
-        if verifier(&key_bytes(value)?) != master_verifier() {
+        if self.master_verifier.as_deref() != Some(verifier(&key_bytes(value)?).as_str()) {
             return Err(Error(StatusCode::UNAUTHORIZED, "unauthorized", "invalid service API key".into()));
         }
         let mut tenants = headers.get_all(TENANT_HEADER).iter();
@@ -788,38 +818,42 @@ async fn create_collection(
         let _control = s.control.lock().await;
         let _writes = s.write_gate.write().await;
         let key = s.authenticate(&headers).await?;
-        // The authenticated tenant owns the new collection independently of this key.
-        let operation_id = request.operation_id.clone();
-        let id = request.collection_id.clone();
-        let config = record_config(request.config, request.embedding_space_id, request.capacity_profile)
-            .map_err(|e| Error(e.0, "creation_rejected", e.2))?;
-        anyseek::record::validate_config(&config)
-            .map_err(|e| Error(StatusCode::BAD_REQUEST, "creation_rejected", e.to_string()))?;
-        let receipt = s.catalog
-            .execute(CatalogRequest {
-                operation_id: request.operation_id,
-                command: CatalogCommand::PrepareCollection {
-                    collection_id: id.clone(),
-                    tenant_id: key.clone(),
-                    config,
-                },
-            })
-            .await?;
-        let entry = s
-            .catalog
-            .collections()
-            .await?
-            .into_iter()
-            .find(|e| e.tenant_id == key && e.collection_id == id && e.generation == receipt.seq)
-            .ok_or_else(not_found)?;
-        if entry.deleted { return Err(bad("collection creation was deleted")); }
-        s.finish_collection(entry).await?;
-        response(
-            json!({"collection_id":id,"operation_id":operation_id}),
-        )
+        response(create_collection_locked(&s, key, request).await?)
     })
     .await
 }
+
+async fn create_collection_locked(
+    s: &Service, tenant: String, request: CollectionCreate,
+) -> Result<Value, Error> {
+    let operation_id = request.operation_id.clone();
+    let id = request.collection_id.clone();
+    let config = record_config(request.config, request.embedding_space_id, request.capacity_profile)
+        .map_err(|e| Error(e.0, "creation_rejected", e.2))?;
+    anyseek::record::validate_config(&config)
+        .map_err(|e| Error(StatusCode::BAD_REQUEST, "creation_rejected", e.to_string()))?;
+    let receipt = s.catalog
+        .execute(CatalogRequest {
+            operation_id: request.operation_id,
+            command: CatalogCommand::PrepareCollection {
+                collection_id: id.clone(),
+                tenant_id: tenant.clone(),
+                config,
+            },
+        })
+        .await?;
+    let entry = s
+        .catalog
+        .collections()
+        .await?
+        .into_iter()
+        .find(|e| e.tenant_id == tenant && e.collection_id == id && e.generation == receipt.seq)
+        .ok_or_else(not_found)?;
+    if entry.deleted { return Err(bad("collection creation was deleted")); }
+    s.finish_collection(entry).await?;
+    Ok(json!({"collection_id":id,"operation_id":operation_id}))
+}
+
 async fn list_collections(
     State(s): State<Arc<Service>>,
     headers: HeaderMap,
@@ -1020,21 +1054,29 @@ async fn replace_group(
     let request: GroupReplace = parse(&bytes)?;
     let key = s.authenticate(&headers).await?;
     owned(async move {
-        let gate = s.write_gate.clone().read_owned().await;
-        let partition = s.record(&key, &id).await?;
         let operation_id = request.operation_id.clone();
-        #[cfg(feature = "fault-injection")]
-        let pause_collection = id.clone();
-        let result = s.catalog.authorized_generation(key, id, partition.generation, move |_| async move {
-            let _gate = gate;
-            #[cfg(feature = "fault-injection")]
-            pause_authorized_for_test(&pause_collection).await?;
-            partition.replace_group(request).await
-        }).await?;
-        response(json!({"atomic":true,"operation_id":operation_id,"receipt":result.map_err(Error::from)?,
+        let receipt = replace_collection_group(&s, key, id, request).await?;
+        response(json!({"atomic":true,"operation_id":operation_id,"receipt":receipt,
             "expires_at":operation_id.expires_at_unix_seconds()}))
     }).await
 }
+
+async fn replace_collection_group(
+    s: &Service, key: String, id: String, request: GroupReplace,
+) -> Result<anyseek::record::GroupReceipt, Error> {
+    let gate = s.write_gate.clone().read_owned().await;
+    let partition = s.record(&key, &id).await?;
+    #[cfg(feature = "fault-injection")]
+    let pause_collection = id.clone();
+    let result = s.catalog.authorized_generation(key, id, partition.generation, move |_| async move {
+        let _gate = gate;
+        #[cfg(feature = "fault-injection")]
+        pause_authorized_for_test(&pause_collection).await?;
+        partition.replace_group(request).await
+    }).await?;
+    result.map_err(Into::into)
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct GroupVersionRequest { group_id: String }
@@ -1665,6 +1707,14 @@ async fn query(
     let request_id = diagnostics::REQUEST_ID.try_with(Clone::clone).unwrap_or_else(|_| diagnostics::new_id());
     let request: SearchRequestObject = parse(&bytes)?;
     let key = s.authenticate(&headers).await?;
+    let (result, data) = query_collection(&s, key, id, request, request_id).await?;
+    let response = encode_data_response(result, Some(data.clone()))?;
+    deliver_after_publication(Some(&data), || response).await
+}
+
+async fn query_collection(
+    s: &Service, key: String, id: String, request: SearchRequestObject, request_id: String,
+) -> Result<(Result<QueryResponse, Error>, DataOutputPermit), Error> {
     let p = s.record(&key, &id).await?;
     let data = p.output_permit_after_publication().await?;
     let mode = request.search_mode(s.default_nprobe).map_err(bad)?;
@@ -1699,12 +1749,12 @@ async fn query(
             diagnostics,
         })
     }).await?;
-    let response = encode_data_response(result, Some(data.clone()))?;
-    deliver_after_publication(Some(&data), || response).await
+    Ok((result, data))
 }
 
+/// Results and index progress for a scoped record query.
 #[derive(Serialize)]
-struct QueryResponse {
+pub struct QueryResponse {
     diagnostics: diagnostics::QueryDiagnostics,
     original_query: String,
     query: String,
@@ -1718,6 +1768,15 @@ struct QueryResponse {
     visible_seq: u64,
     evaluation_time_ms: u64,
     statistics: anyseek::record::RecordStatistics,
+}
+
+impl QueryResponse {
+    /// Correlation ID for this query, generated by AnySeek.
+    pub fn request_id(&self) -> &str { &self.diagnostics.request_id }
+    /// Number of results matching the query, when requested.
+    pub fn count_total(&self) -> Option<usize> { self.count_total }
+    /// Ordered results in the captured index view.
+    pub fn hits(&self) -> &[anyseek::record::RecordHit] { &self.hits }
 }
 
 // Keep source/data validity checks at headers and body handoff; no credential recheck.
@@ -1825,7 +1884,8 @@ async fn request_admitted(
     )
 }
 
-pub(crate) fn router(service: Arc<Service>) -> Router {
+/// Expose the configured HTTP service.
+pub fn router(service: Arc<Service>) -> Router {
     Service::start_reclamation(&service);
     let app = Router::new()
         .route("/api/v1/live", get(|| async { Json(crate::VERSION) }))
@@ -1946,17 +2006,17 @@ mod tests {
         std::fs::write(owned.join("partial-input"),b"incomplete").unwrap();
         std::fs::create_dir(&foreign).unwrap();
         std::fs::write(&file,b"unowned file").unwrap();
-        let service=Service::open(&root,std::num::NonZeroUsize::new(200).unwrap()).await.unwrap();
+        let service=Service::open_http(&root,std::num::NonZeroUsize::new(200).unwrap(), "anyseek-unit-test-secret").await.unwrap();
         assert!(!owned.exists());assert!(foreign.exists());assert!(file.exists());
         assert!(!prepared.exists()); assert!(unrelated.exists());
         assert!(service.record("tenant","c").await.is_ok());
         drop(service);std::fs::remove_dir_all(root).unwrap();
     }
     fn master_headers()->HeaderMap{
-        let mut headers=HeaderMap::new();headers.insert("apikey",STANDARD.encode(Sha256::digest(crate::MASTER_KEY_SECRET.as_bytes())).parse().unwrap());headers
+        let mut headers=HeaderMap::new();headers.insert("apikey",STANDARD.encode(Sha256::digest(b"anyseek-unit-test-secret")).parse().unwrap());headers
     }
     pub(super) async fn setup() -> (Arc<Service>,PathBuf,HeaderMap) {
-        let path=path();let service=Service::open(&path,std::num::NonZeroUsize::new(200).unwrap()).await.unwrap();
+        let path=path();let service=Service::open_http(&path,std::num::NonZeroUsize::new(200).unwrap(), "anyseek-unit-test-secret").await.unwrap();
         let mut headers=master_headers();headers.insert(TENANT_HEADER,"tenant".parse().unwrap());
         let create=json!({"operation_id":OperationId::new("create".into()),"collection_id":"c","config":{"index_name":"test","schema":[{"field":"body","field_type":"Text"}]}});
         create_collection(State(service.clone()),headers.clone(),serde_json::to_vec(&create).unwrap().into()).await.unwrap();
@@ -2007,7 +2067,7 @@ mod tests {
         drop(app);
         let mut shutdown = service.shutdown();
         assert!(tokio::time::timeout(std::time::Duration::from_millis(20),shutdown.wait()).await.is_err());
-        assert!(Service::open(&path,std::num::NonZeroUsize::new(200).unwrap()).await.is_err());
+        assert!(Service::open_http(&path,std::num::NonZeroUsize::new(200).unwrap(), "anyseek-unit-test-secret").await.is_err());
         let body:Value = serde_json::from_slice(&axum::body::to_bytes(response.into_body(),MAX_RESPONSE).await.unwrap()).unwrap();
         assert_eq!(body["results"][0]["code"],"committed");
         #[cfg(feature="fault-injection")]
@@ -2023,7 +2083,7 @@ mod tests {
         let _ = partition_path;
         tokio::time::timeout(std::time::Duration::from_secs(10),shutdown.wait()).await.unwrap().unwrap();
         shutdown.wait().await.unwrap(); // Repeated waits observe the same completion.
-        let reopened = Service::open(&path,std::num::NonZeroUsize::new(200).unwrap()).await.unwrap();
+        let reopened = Service::open_http(&path,std::num::NonZeroUsize::new(200).unwrap(), "anyseek-unit-test-secret").await.unwrap();
         let record = reopened.record("tenant","c").await.unwrap();
         assert_eq!(record.operation(&operation).await.unwrap().unwrap().seq,1);
         assert!(record.get("r").await.unwrap().is_some());
@@ -2050,10 +2110,10 @@ mod tests {
         caller.abort(); let _ = caller.await;
         let mut shutdown = service.shutdown();
         assert!(tokio::time::timeout(std::time::Duration::from_millis(20),shutdown.wait()).await.is_err());
-        assert!(Service::open(&path,std::num::NonZeroUsize::new(200).unwrap()).await.is_err());
+        assert!(Service::open_http(&path,std::num::NonZeroUsize::new(200).unwrap(), "anyseek-unit-test-secret").await.is_err());
         release.send(()).unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(10),shutdown.wait()).await.unwrap().unwrap();
-        let reopened = Service::open(&path,std::num::NonZeroUsize::new(200).unwrap()).await.unwrap();
+        let reopened = Service::open_http(&path,std::num::NonZeroUsize::new(200).unwrap(), "anyseek-unit-test-secret").await.unwrap();
         let record = reopened.record("tenant","c").await.unwrap();
         assert_eq!(record.operation(&operation).await.unwrap().unwrap().seq,1);
         drop(record);
@@ -2067,7 +2127,7 @@ mod tests {
             let path = PathBuf::from(path);
             let first = runtime();
             first.block_on(async {
-                let service = Service::open(&path,std::num::NonZeroUsize::new(200).unwrap()).await.unwrap();
+                let service = Service::open_http(&path,std::num::NonZeroUsize::new(200).unwrap(), "anyseek-unit-test-secret").await.unwrap();
                 let config = record_config(serde_json::from_value(json!({"index_name":"test","schema":[{"field":"body","field_type":"Text"}]})).unwrap(),None,CapacityProfile::default()).unwrap();
                 let partition = RecordPartition::create(&path.join("held-partition"),config).await.unwrap();
                 service.records.write().await.insert("held".into(),partition.clone());
@@ -2078,7 +2138,7 @@ mod tests {
             });
             drop(first);
             runtime().block_on(async {
-                assert!(Service::open(&path,std::num::NonZeroUsize::new(200).unwrap()).await.is_err());
+                assert!(Service::open_http(&path,std::num::NonZeroUsize::new(200).unwrap(), "anyseek-unit-test-secret").await.is_err());
             });
             return;
         }
@@ -2089,7 +2149,7 @@ mod tests {
             .env("ANYSEEK_TEST_SHUTDOWN_FAILED_ROOT", &path).output().unwrap();
         assert!(child.status.success(), "{}\n{}", String::from_utf8_lossy(&child.stdout),String::from_utf8_lossy(&child.stderr));
         runtime().block_on(async {
-            let service = Service::open(&path,std::num::NonZeroUsize::new(200).unwrap()).await.unwrap();
+            let service = Service::open_http(&path,std::num::NonZeroUsize::new(200).unwrap(), "anyseek-unit-test-secret").await.unwrap();
             service.shutdown().wait().await.unwrap();
         });
         std::fs::remove_dir_all(path).unwrap();
@@ -2097,15 +2157,15 @@ mod tests {
     #[tokio::test]
     async fn shutdown_waits_for_transport_owners_and_reuses_completion() {
         let path = path();
-        let service = Service::open(&path,std::num::NonZeroUsize::new(200).unwrap()).await.unwrap();
+        let service = Service::open_http(&path,std::num::NonZeroUsize::new(200).unwrap(), "anyseek-unit-test-secret").await.unwrap();
         let transport = service.clone();
         let mut first = service.shutdown();
         assert!(tokio::time::timeout(std::time::Duration::from_millis(20),first.wait()).await.is_err());
-        assert!(Service::open(&path,std::num::NonZeroUsize::new(200).unwrap()).await.is_err());
+        assert!(Service::open_http(&path,std::num::NonZeroUsize::new(200).unwrap(), "anyseek-unit-test-secret").await.is_err());
         let mut second = transport.shutdown();
         tokio::time::timeout(std::time::Duration::from_secs(5),first.wait()).await.unwrap().unwrap();
         second.wait().await.unwrap();
-        let service = Service::open(&path,std::num::NonZeroUsize::new(200).unwrap()).await.unwrap();
+        let service = Service::open_http(&path,std::num::NonZeroUsize::new(200).unwrap(), "anyseek-unit-test-secret").await.unwrap();
         service.shutdown().wait().await.unwrap();
         std::fs::remove_dir_all(path).unwrap();
     }
@@ -2405,7 +2465,7 @@ mod tests {
         assert_eq!(tenant_api(&app,"POST","/api/v1/index",key,Some(original)).await.0,StatusCode::BAD_REQUEST);
         assert_eq!(old.get("r").await.unwrap().unwrap().document.unwrap()["body"],"old");
         drop(current); drop(old); drop(app); drop(service);
-        let service = Service::open(&path,std::num::NonZeroUsize::new(200).unwrap()).await.unwrap();
+        let service = Service::open_http(&path,std::num::NonZeroUsize::new(200).unwrap(), "anyseek-unit-test-secret").await.unwrap();
         let p = service.record("tenant","c").await.unwrap();
         assert_eq!(p.get("r").await.unwrap().unwrap().document.unwrap()["body"],"new");
         drop(p);
@@ -3004,7 +3064,7 @@ mod tests {
             StatusCode::BAD_REQUEST
         );
         drop(service);
-        let service = Service::open(&path, std::num::NonZeroUsize::new(200).unwrap())
+        let service = Service::open_http(&path, std::num::NonZeroUsize::new(200).unwrap(), "anyseek-unit-test-secret")
             .await
             .unwrap();
         assert_eq!(service.records.read().await.len(), 3);
@@ -3237,7 +3297,8 @@ fn openapi_document() -> Value {
 }
 
 /// Generate the reference for the mounted Tenant/Record router.
-pub(crate) fn generate_openapi() {
+/// Emit the service OpenAPI document.
+pub fn generate_openapi() {
     let text = serde_json::to_string_pretty(&openapi_document()).unwrap();
     println!("{text}");
     let parent = std::env::current_exe()
