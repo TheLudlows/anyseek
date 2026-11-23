@@ -27,3 +27,18 @@ npm run dev
 打开终端显示的地址（默认 `http://127.0.0.1:5173`），选择租户命名空间后创建集合、导入和检索，不需要预注册或签发租户 Key。浏览器不持有服务凭据；生产通过 Origence／网关认证和授权，由网关注入服务间凭据。
 
 [HTTP API 与示例](anyseek/src/server/README.md) · [控制台与部署](console/README.md) · [文档索引](docs/README.md)
+
+## Embedded Rust SDK
+
+Depend on the `anyseek` library and open the local Catalog with `anyseek::sdk::LocalEngine`.
+The caller supplies the authorized tenant and collection on each operation. Create a collection,
+atomically replace Record groups with a stable operation ID, query its text or vectors, and await
+`shutdown()` before reopening the directory. The SDK uses local disk and takes an exclusive root lock.
+
+Use `default-features = false` when the host needs the standard `serde_json` object ordering.
+The snapshot codec retains stored field order independently of the host JSON map.
+The default standalone build enables `ordered-json`. A standalone build that disables default features
+can select `--features ordered-json` to retain the same JSON ordering. Keep the selected build features
+with the catalog version when reopening or restoring a catalog.
+
+[Public SDK usage test](anyseek/tests/local_sdk.rs)

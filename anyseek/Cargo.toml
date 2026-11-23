@@ -18,7 +18,9 @@ default-run = "anyseek_server"
 # Optional features: zh=Chinese word segmentation, vb=result diagnostics.
 # --no-default-features disables Chinese segmentation and result diagnostics.
 # HTTP and local/S3 storage are always part of the service.
-default = ["zh","vb"]
+default = ["zh", "vb", "ordered-json"]
+# Allow embedders to retain their own serde_json map ordering.
+ordered-json = ["serde_json/preserve_order"]
 zh = ["dep:tantivy-jieba", "dep:jieba-rs"]
 vb = []
 # Explicit test binaries only; no remote activation endpoint.
@@ -41,12 +43,15 @@ http-body = "1"
 env_logger = "0.11"
 axum = { version = "0.8", default-features = false, features = ["http1", "http2", "json", "query", "tokio", "matched-path"] }
 utoipa = { version = "6.0.0", features = ["preserve_order", "preserve_path_order", "yaml", "indexmap"] }
-rusqlite = { version = "0.37.0", features = ["bundled"] }
+rusqlite = { version = "=0.43.0", features = ["bundled", "fallible_uint"] }
 object_store = { version = "0.12", default-features = false, features = ["aws"] }
 xxhash-rust = { version = "=0.8.15", default-features = false, features = ["xxh64"] }
 log = "0.4"
 serde = { version = "1.0.229", features = ["derive"] }
-serde_json = { version = "1.0.154", features = ["preserve_order", "raw_value"] }
+serde_json = { version = "1.0.154", features = ["raw_value"] }
+# Snapshot proofs depend on record field order. Use a distinct Cargo source
+# so the snapshot's features do not change the host's serde_json::Value.
+snapshot-json = { package = "serde_json", git = "https://github.com/serde-rs/json.git", rev = "0cdc1074e3572470ca0b294d1f8cdf083b6b8d81", features = ["preserve_order", "raw_value", "float_roundtrip"] }
 tokio = { version = "1.53.2", features = ["full"] }
 base64 = "0.23.1"
 ahash ={ version = "0.8.12", features = ["serde"]}

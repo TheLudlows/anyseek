@@ -3,7 +3,7 @@ use std::{collections::HashMap, env::current_exe, path::Path};
 
 use crate::VERSION;
 
-pub(crate) async fn initialize(params: HashMap<String, String>) {
+pub(crate) async fn initialize(params: HashMap<String, String>, secret: String) {
     let default_nprobe = params
         .get("default_nprobe")
         .map(|n| {
@@ -47,7 +47,7 @@ pub(crate) async fn initialize(params: HashMap<String, String>) {
     );
     log::info!("REST API: http://{local_ip}:{local_port}; Ctrl-C to shut down");
 
-    let service = crate::record_service::Service::open(&index_path, default_nprobe)
+    let service = crate::record_service::Service::open_http(&index_path, default_nprobe, &secret)
         .await
         .unwrap_or_else(|error| {
             log::error!("Recovering reliable service failed: {error}");

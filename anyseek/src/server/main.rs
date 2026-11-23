@@ -10,7 +10,6 @@ use std::collections::HashMap;
 use std::env;
 use std::error::Error;
 use std::str;
-use std::sync::LazyLock;
 #[cfg(target_os = "windows")]
 use winapi::um::{
     processthreadsapi::{GetCurrentProcess, SetPriorityClass},
@@ -19,27 +18,18 @@ use winapi::um::{
 
 use crate::server::initialize;
 
-/// Startup validates this before opening storage or accepting requests.
-#[doc(hidden)]
-#[cfg(not(test))]
-pub static MASTER_KEY_SECRET: LazyLock<String> =
-    LazyLock::new(|| read_master_secret(env::var("MASTER_KEY_SECRET")).expect("validated at startup"));
-
-// Unit routers do not run main; this credential exists only in the test binary.
-#[cfg(test)]
-pub static MASTER_KEY_SECRET: LazyLock<String> = LazyLock::new(|| "anyseek-unit-test-secret".into());
-
 fn read_master_secret(value: Result<String, env::VarError>) -> Result<String, &'static str> {
     let secret = value.map_err(|_| "MASTER_KEY_SECRET must be set to a private UTF-8 secret; see anyseek/src/server/README.md")?;
     if secret.trim().is_empty() {
-        return Err("MASTER_KEY_SECRET must not be empty or whitespace; see anyseek/src/server/README.md");
+        return Err(
+            "MASTER_KEY_SECRET must not be empty or whitespace; see anyseek/src/server/README.md",
+        );
     }
     // Preserve the exact bytes and existing key derivation, including legacy secrets.
     Ok(secret)
 }
 
-use anyseek::server::api_types;
-mod record_service;
+use anyseek::server::{api_types, record_service};
 #[doc(hidden)]
 mod server;
 #[doc(hidden)]
@@ -68,20 +58,26 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         record_service::generate_openapi();
         return Ok(());
     }
-    if let Err(error) = read_master_secret(env::var("MASTER_KEY_SECRET")) {
+    let secret = read_master_secret(env::var("MASTER_KEY_SECRET")).unwrap_or_else(|error| {
         eprintln!("{error}");
         std::process::exit(2);
-    }
-    if params.get("print_master_key").is_some_and(|value| value == "true") {
+    });
+    if params
+        .get("print_master_key")
+        .is_some_and(|value| value == "true")
+    {
         use base64::Engine;
         use sha2::{Digest, Sha256};
-        println!("{}", base64::engine::general_purpose::STANDARD.encode(Sha256::digest(MASTER_KEY_SECRET.as_bytes())));
+        println!(
+            "{}",
+            base64::engine::general_purpose::STANDARD.encode(Sha256::digest(secret.as_bytes()))
+        );
         return Ok(());
     }
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
         .format_timestamp(None)
         .init();
-    initialize(params).await;
+    initialize(params, secret).await;
 
     Ok(())
 }
@@ -108,8 +104,7 @@ fn parse_params(args: impl Iterator<Item = String>) -> Result<HashMap<String, St
             "index_path" if !value.is_empty() => {}
             "local_ip" if value.parse::<std::net::IpAddr>().is_ok() => {}
             "local_port" if value.parse::<u16>().is_ok() => {}
-            "default_nprobe"
-                if value.parse::<usize>().is_ok_and(|n| n > 0) => {}
+            "default_nprobe" if value.parse::<usize>().is_ok_and(|n| n > 0) => {}
             "generate_openapi" | "print_master_key" if value.parse::<bool>().is_ok() => {}
             _ => return Err(format!("unsupported or invalid parameter: {name}")),
         }
@@ -118,7 +113,8 @@ fn parse_params(args: impl Iterator<Item = String>) -> Result<HashMap<String, St
         }
     }
     if params.get("generate_openapi").is_some_and(|v| v == "true")
-        && params.get("print_master_key").is_some_and(|v| v == "true") {
+        && params.get("print_master_key").is_some_and(|v| v == "true")
+    {
         return Err("generate_openapi and print_master_key cannot both be true".into());
     }
     Ok(params)
@@ -146,12 +142,7 @@ mod tests {
             "37"
         );
         assert_eq!(
-            parse(&[
-                "index_path=a=b",
-                "local_port=0",
-                "local_ip=::1"
-            ])
-            .unwrap()["index_path"],
+            parse(&["index_path=a=b", "local_port=0", "local_ip=::1"]).unwrap()["index_path"],
             "a=b"
         );
         assert_eq!(parse(&["local_ip=[::1]"]).unwrap()["local_ip"], "::1");

@@ -2,6 +2,9 @@
 pub mod api_schema;
 pub mod api_types;
 
+#[doc(hidden)]
+pub mod record_service;
+
 /// Service bridge: apply the HTTP stored-field allowlist before result copies.
 /// The core query methods continue returning complete records.
 #[doc(hidden)]

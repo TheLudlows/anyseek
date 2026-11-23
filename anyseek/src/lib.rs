@@ -1,3 +1,4 @@
+#![recursion_limit = "256"]
 #![crate_type = "lib"]
 #![crate_name = "anyseek"]
 
@@ -12,6 +13,10 @@
     trivial_numeric_casts,
     unused_qualifications
 )]
+
+extern crate self as anyseek;
+
+const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 use std::sync::LazyLock;
 
@@ -32,6 +37,7 @@ mod component;
 /// Schema, analysis, scoring and vector configuration for RecordPartition.
 pub mod index;
 // Internal ranking helpers.
+mod metadata_filter;
 pub(crate) mod min_heap;
 pub(crate) mod opencc_t2s;
 /// Query configuration and result types. Execute public queries through RecordPartition.
@@ -44,21 +50,23 @@ pub mod utils;
 pub mod vector;
 /// Vector quantization and similarity measure definitions for vector search.
 pub mod vector_similarity;
-mod metadata_filter;
-
-
-
 
 mod term_hash;
 
 mod storage;
 
-
-pub mod record;
 pub mod catalog;
+pub mod record;
 pub mod resources;
 
 mod active;
 
 /// HTTP request, response and OpenAPI contracts for the service.
 pub mod server;
+
+/// In-process access to a local AnySeek catalog and record collections.
+pub mod sdk {
+    pub use crate::record::{GroupReceipt, GroupReplace, OperationId};
+    pub use crate::server::api_types::{CreateIndexRequest, SearchRequestObject};
+    pub use crate::server::record_service::local::*;
+}
