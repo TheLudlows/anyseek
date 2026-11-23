@@ -1,5 +1,7 @@
 # AnySeek Web 控制台
 
+**简体中文** · [English](README.en.md)
+
 控制台通过同源网关访问 AnySeek，提供集合管理、记录写入、检索调试及服务备份恢复。
 浏览器只选择租户命名空间，不签发或保存租户 Key，也不持有 AnySeek master key。
 用户登录及权限由 Origence／网关处理；网关校验所选租户和管理操作权限后，向 AnySeek

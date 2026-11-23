@@ -1,8 +1,10 @@
 # 当前架构
 
+**简体中文** · [English](architecture.en.md)
+
 本文按当前主干 `3e0a9a4`（#203）核对模块和运行边界。业务不变量见[Record 契约](record-model.md)，持久格式与恢复见[存储协议](storage.md)，验收缺口和性能证据见[路线](roadmap.md)。
 
-AnySeek 是通过 HTTP API 和独立 Web 控制台使用的 Rust 存储与检索服务。资源模型为 Tenant → Collection → Partition → Segment；每个 collection 一个持久 partition，数据请求统一交给 RecordPartition。
+AnySeek 是 Rust 存储与检索引擎，提供独立 HTTP 服务和进程内 Rust SDK。Web 控制台访问独立 HTTP 服务。嵌入式 SDK 使用本地磁盘，由宿主管理生命周期。资源模型为 Tenant → Collection → Partition → Segment；每个 collection 一个持久 partition，数据请求统一交给 RecordPartition。
 
 ## 模块边界
 

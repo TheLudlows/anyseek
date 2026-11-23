@@ -1,5 +1,7 @@
 # Single-collection capacity boundary probes
 
+**English** · [简体中文](README.zh-CN.md)
+
 This staged harness measures finite capacity refusals; it is not a 100k
 benchmark or a Meilisearch ranking. Historical baseline, repair, ownership-audit
 and capacity-plan records are retained in Git history.

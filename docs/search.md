@@ -1,5 +1,7 @@
 # 检索配置与排序
 
+**简体中文** · [English](search.en.md)
+
 HTTP 查询用法见[服务指南](../anyseek/src/server/README.md#查询与遍历)。本文集中说明文本分析、评分、候选排序与融合契约。
 
 ## 文本归一化

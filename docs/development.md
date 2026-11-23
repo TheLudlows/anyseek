@@ -1,6 +1,8 @@
 # 开发与验证
 
-AnySeek 是服务产品，仓库仅有一个 `anyseek` Cargo package；`lib.rs` 用于内部模块组织和集成测试复用，不提供独立库发行入口。存储与检索位于 `anyseek/src/`，HTTP 实现位于 `anyseek/src/server/`，独立 React/TypeScript/Vite 控制台位于 `console/`。仓库为 `TheLudlows/anyseek`。
+**简体中文** · [English](development.en.md)
+
+AnySeek 仓库包含一个 `anyseek` Cargo package，提供独立 HTTP 服务以及进程内 Rust SDK。SDK 的公开入口和生命周期见 [仓库 README](../README.md#嵌入式-rust-sdk)。存储与检索位于 `anyseek/src/`，HTTP 实现位于 `anyseek/src/server/`，独立 React/TypeScript/Vite 控制台位于 `console/`。仓库为 `TheLudlows/anyseek`。
 
 ## 本地运行
 
@@ -27,7 +29,7 @@ npm test --prefix console
 npm run build --prefix console
 ```
 
-默认启用 `zh`（中文分词）与 `vb`（结果诊断）；`--no-default-features` 关闭二者，仍构建完整 HTTP 与本地/S3 服务。`fault-injection` 仅用于显式故障测试。`.cargo/config.toml` 使用本机 CPU 指令，这类产物不能跨不同 CPU runner 复用。
+默认启用 `zh`（中文分词）、`vb`（结果诊断）与 `ordered-json`（保留 JSON 对象字段顺序）。`--no-default-features` 关闭这些可选特性，仍可构建完整 HTTP 与本地/S3 服务。`fault-injection` 仅用于显式故障测试。`.cargo/config.toml` 使用本机 CPU 指令，这类产物不能跨不同 CPU runner 复用。
 
 `ANYSEEK_TEST_SCALE` 缺省为 `small`，只允许 `small` 或 `full`；完整验收显式设为 `full`。本地默认 `cargo test` 不能代替 full 规模运行；数据规模与分工见下文[查询夹具规模](#查询夹具规模)。
 
@@ -151,7 +153,7 @@ target/debug/anyseek_server generate_openapi=true
 
 ### 服务内部模块
 
-[RecordPartition](../anyseek/src/record.rs) 负责记录持久化和检索，[异步索引实现](../anyseek/src/record/committed.rs) 负责持久业务结果与消费进度。`lib.rs` 供服务二进制与集成测试复用；内部类型与方法可用 `cargo doc -p anyseek --no-deps` 查看。语义与重试见[Record 契约](record-model.md)，所有权与故障见[架构](architecture.md)。
+[RecordPartition](../anyseek/src/record.rs) 负责记录持久化和检索，[异步索引实现](../anyseek/src/record/committed.rs) 负责持久业务结果与消费进度。库公开 `anyseek::sdk::LocalEngine`；内部类型与方法可用 `cargo doc -p anyseek --no-deps` 查看。语义与重试见[Record 契约](record-model.md)，所有权与故障见[架构](architecture.md)。
 
 ## 验证边界
 
