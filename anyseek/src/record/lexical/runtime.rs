@@ -11,6 +11,7 @@ use crate::record::build_budget::retained_memory;
 // Bound only queued analysis, not the accepted document size or corpus size.
 const ANALYSIS_BATCH_BYTES: u64 = 32 * 1024 * 1024;
 const ANALYSIS_BATCH_DOCUMENTS: usize = 128;
+pub(super) const MUTABLE_TAIL_UPDATES: usize = 128;
 
 enum RowInput<'a> {
     Document(&'a Document),
@@ -244,7 +245,7 @@ impl Runtime {
     /// Record certifies a replacement before accepting another durable operation.
     /// Bulk rebuilds publish once and do not consume this mutable-tail allowance.
     pub(crate) async fn needs_rotation(&self, incoming: usize) -> bool {
-        self.updates.load(std::sync::atomic::Ordering::Acquire).saturating_add(incoming) > 128
+        self.updates.load(std::sync::atomic::Ordering::Acquire).saturating_add(incoming) > MUTABLE_TAIL_UPDATES
     }
     pub(crate) async fn append(
         self: &Arc<Self>,
@@ -708,7 +709,8 @@ impl Runtime {
         },None=>retained_memory(estimate)?};
         let mut seen = BTreeSet::new();
         let mut addresses = Vec::new();
-        let mut lengths = Vec::new();
+        let mut lengths = vec![Vec::new(); manifest.identities.len()];
+        let mut field_totals = vec![scoring::FieldLengths::default(); fields.len()];
         for segment in searcher.segment_readers() {
             if segment.num_docs() != segment.max_doc() {
                 return Err(storage("native physical deletion unsupported"));
@@ -719,7 +721,6 @@ impl Runtime {
                 .collect::<tantivy::Result<Vec<_>>>()
                 .map_err(storage)?;
             let mut mapping = Vec::new();
-            let mut rows = Vec::new();
             for doc in 0..segment.max_doc() {
                 let ids = column.values_for_doc(doc).collect::<Vec<_>>();
                 if ids.len() != 1 || ids[0] >= manifest.identities.len() as u64 || !seen.insert(ids[0])
@@ -735,10 +736,10 @@ impl Runtime {
                     }
                     row.push(values[0]);
                 }
-                rows.push(row);
+                scoring::FieldLengths::add_document(&mut field_totals, &row);
+                lengths[ids[0] as usize] = row;
             }
             addresses.push(mapping);
-            lengths.push(rows);
         }
         if seen.len() != manifest.identities.len() {
             return Err(storage("native runtime incomplete commit"));
@@ -751,6 +752,7 @@ impl Runtime {
             identities: Arc::new(manifest.identities.clone().into()),identity_id_bytes,overlay:Vec::new(),
             addresses:Arc::new(addresses),
             lengths:Arc::new(lengths),
+            field_totals: Arc::new(field_totals),
             _memory:Arc::new(charge),
             _pin: None,
             _directory_owner: None,

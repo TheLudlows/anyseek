@@ -260,7 +260,7 @@ impl RecordPartition {
                     return Err(storage("injected loaded candidate rejection before certificate"));
                 }
                 let payloads = loaded.payloads;
-                let mut index = view::RetrievalView::single(loaded.index);
+                let mut index = view::RetrievalView::single(loaded.index, &loaded.ordinals);
                 let mut ordinals = loaded.ordinals;
                 let mut locations = loaded.locations;
                 let cache = root.join(format!("segment-{:032x}",rand::random::<u128>()));
@@ -981,6 +981,7 @@ mod tests {
         std::fs::remove_file(root.join(".test-indexer-pause")).unwrap();
         assert!(matches!(job.finish().await,Err(RecordError::Busy)));
         assert_eq!(p.write(request.clone()).await.unwrap(),receipt);
+        p.finish_service_shutdown().await.unwrap();
         drop(p);let p=RecordPartition::open(&root,config().max_journal_bytes).await.unwrap();
         assert_eq!(p.write(request).await.unwrap(),receipt);assert!(p.get("b").await.unwrap().is_some());
         drop(p);std::fs::remove_dir_all(root).unwrap();

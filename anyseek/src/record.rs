@@ -747,7 +747,7 @@ impl Inner {
             },
             retained_identities: self.state.records.len(),
             retained_operations: self.state.operations.len().saturating_add(self.state.groups.as_ref().map_or(0, |g| g.receipts.len())),
-            physical_versions: self.ordinals.iter().filter(|id|!id.is_empty()).count(),
+            physical_versions: self.index.physical_versions,
             checkpoint_bytes: self.snapshot_bytes,
         }
     }
@@ -843,7 +843,7 @@ async fn build(
 ) -> Result<(view::RetrievalView, Vec<String>), RecordError> {
     let cache = path.join(format!("cache-{:032x}", rand::random::<u128>()));
     let (index,ordinals)=build_at(path,&cache,config,state).await?;
-    Ok((view::RetrievalView::single(index),ordinals))
+    Ok((view::RetrievalView::single(index, &ordinals),ordinals))
 }
 async fn build_at(path:&Path,cache:&Path,config:&RecordConfig,state:&State)->Result<(VectorIndexArc,Vec<String>),RecordError>{
     build_at_selected(path,cache,config,state,None).await
@@ -1404,7 +1404,7 @@ impl RecordPartition {
         log::info!("record_recovery stage=validated seq={} elapsed_ms={}",state.seq,recovery_started.elapsed().as_millis());
         let rebuild_in_packages = prepared.is_none() && state.records.len() > capacity::PACKAGE_RECORDS;
         let (mut index,mut ordinals,mut locations)=match prepared {
-            Some((index,ordinals,locations))=>(view::RetrievalView::single(index),ordinals,locations),
+            Some((index,ordinals,locations))=>(view::RetrievalView::single(index, &ordinals),ordinals,locations),
             None if rebuild_in_packages => cache_merge::rebuild_recovery_view(path, &config, &state).await?,
             None=>{let (index,ordinals)=build(path,&config,&state).await?;
                 let locations=ordinals.iter().enumerate().map(|(i,key)|(key.clone(),i)).collect();
@@ -2853,6 +2853,7 @@ mod tests {
             Err(RecordError::Conflict(_))
         ));
         assert_eq!(partition.checkpoint(&snapshot).await.unwrap(), 4);
+        partition.finish_service_shutdown().await.unwrap();
         drop(partition);
         for location in [&path, &snapshot] {
             let recovered = RecordPartition::open(location, 1024 * 1024).await.unwrap();
@@ -3207,7 +3208,7 @@ mod tests {
             inner.locations.insert("a".into(), 65535);
             // Raw fixture rows bypass the view's ordinal reservations. Rebuild
             // that derived view before returning to authoritative publication.
-            inner.index=view::RetrievalView::single(inner.index.test_index().clone());
+            inner.index=view::RetrievalView::single(inner.index.test_index().clone(), &inner.ordinals);
         }
         partition
             .write(write(

@@ -99,11 +99,12 @@ pub(super) async fn rebuild_recovery_view(root:&Path,config:&RecordConfig,state:
                 ordinals[address]=key.clone();locations.insert(key.clone(),address);
             }
         }
+        lexical::visibility::PublishedSegment::publish(&component).await;
         segments.push(component);
     }
     let index=indexes[0].clone();
     {let mut root=index.write().await;root.segments=segments;}
-    let mut view=view::RetrievalView::single(index);view.detached_cache=true;
+    let mut view=view::RetrievalView::single(index, &ordinals);view.detached_cache=true;
     view.retain_address_budget(inventory,inventory_scope);
     Ok((view,ordinals,locations))
 }

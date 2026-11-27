@@ -28,6 +28,7 @@ pub(crate) struct RetrievalSegment {
     pub vector: VectorSegmentArc,
     pub admission: Arc<memory::Admission>,
     pub lexical: Arc<crate::record::lexical::runtime::Runtime>,
+    pub visibility: Arc<crate::record::lexical::visibility::PublishedSegment>,
 }
 
 #[derive(Clone)]
@@ -189,7 +190,7 @@ pub(crate) async fn create_index(path:&Path,meta:IndexMetaObject,schema:&[Schema
     let lexical = crate::record::lexical::runtime::Runtime::create_owned(&path.join("native"), config)
         .await?;
     let admission=vector.read().await.admission.clone();
-    index.segments.push(RetrievalSegment { vector, lexical, admission });
+    index.segments.push(RetrievalSegment { vector, lexical, admission, visibility: Default::default() });
     Ok(Arc::new(RwLock::new(index)))
 }
 // Serial local file construction only: no acquired VectorIndex/VectorSegment locks, native
@@ -207,7 +208,7 @@ pub(crate) async fn open_index(path:&Path,config:&crate::record::RecordConfig)->
     let lexical = crate::record::lexical::runtime::Runtime::open_owned(&path.join("native"), config)
         .await?;
     let admission=vector.read().await.admission.clone();
-    index.segments.push(RetrievalSegment { vector, lexical, admission });
+    index.segments.push(RetrievalSegment { vector, lexical, admission, visibility: Default::default() });
     Ok(Arc::new(RwLock::new(index)))
 }
 

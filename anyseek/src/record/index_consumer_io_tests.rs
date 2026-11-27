@@ -358,7 +358,7 @@ async fn component_admission_without_shard_read_while_real_io_waits() {
     let (_root,index,config,engine,scope)=fixture().await;
     let component=index.read().await.segments[0].vector.clone();
     let admission=index.read().await.segments[0].admission.clone();
-    let view=view::RetrievalView::single(index.clone());
+    let view=view::RetrievalView::single(index.clone(), &[]);
     let record=Record{record_id:"next".into(),version:1,
         document:Some(serde_json::from_value(serde_json::json!({"vector":[2.0,0.0],"number":42,"payload":"not projected"})).unwrap()),
         temporal:Default::default(),ingested_at_ms:123,expired_at_ms:None};
@@ -383,7 +383,7 @@ async fn component_admission_without_shard_read_while_real_io_waits() {
 async fn component_ledger_old_tail_shutdown_and_typed_metadata_pressure() {
     let (root,index,config,_engine,_scope)=fixture().await;
     let admission=index.read().await.segments[0].admission.clone();
-    let mut view=view::RetrievalView::single(index.clone());
+    let mut view=view::RetrievalView::single(index.clone(), &[]);
     let (next,_)=build_at(root.path(),&root.path().join("successor"),&config,&State::default()).await.unwrap();
     let successor=next.read().await.segments[0].admission.clone();
     let mut credit=ComponentCredit::from_estimates(&admission,128,256,"old").unwrap();

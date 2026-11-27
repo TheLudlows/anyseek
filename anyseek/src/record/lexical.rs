@@ -36,6 +36,7 @@ mod directory;
 pub(super) mod package;
 pub(crate) mod runtime;
 pub(crate) mod runtime_query;
+pub(crate) mod visibility;
 mod query;
 mod scoring;
 pub(crate) mod memory;
@@ -364,7 +365,8 @@ impl Candidate {
             .map_err(storage)?;
         let searcher = reader.searcher();
         let mut addresses = Vec::new();
-        let mut lengths = Vec::new();
+        let mut lengths = vec![Vec::new(); manifest.identities.len()];
+        let mut field_totals = vec![scoring::FieldLengths::default(); fields.len()];
         let mut seen = BTreeSet::new();
         let mut identity_id_bytes=0u64;
         for segment in searcher.segment_readers() {
@@ -377,7 +379,6 @@ impl Candidate {
                 .collect::<tantivy::Result<Vec<_>>>()
                 .map_err(storage)?;
             let mut mapping = Vec::new();
-            let mut segment_lengths = Vec::new();
             for doc in 0..segment.max_doc() {
                 let values = identity.values_for_doc(doc).collect::<Vec<_>>();
                 if values.len() != 1
@@ -397,10 +398,10 @@ impl Candidate {
                     }
                     row.push(values[0]);
                 }
-                segment_lengths.push(row);
+                scoring::FieldLengths::add_document(&mut field_totals, &row);
+                lengths[values[0] as usize] = row;
             }
             addresses.push(mapping);
-            lengths.push(segment_lengths);
         }
         if seen.len() != manifest.identities.len() {
             return Err(storage("incomplete lexical address mapping"));
@@ -413,6 +414,7 @@ impl Candidate {
             identities: Arc::new(manifest.identities.into()),identity_id_bytes,overlay:Vec::new(),
             addresses:Arc::new(addresses),
             lengths:Arc::new(lengths),
+            field_totals: Arc::new(field_totals),
             _memory:Arc::new(memory),
             _pin: None,
             _directory_owner: None,
@@ -434,21 +436,51 @@ pub(super) struct Snapshot {
     pub(super) identity_id_bytes:u64,
     pub(super) overlay: Vec<(usize,Arc<memory::Row>)>,
     addresses: Arc<Vec<Vec<usize>>>,
-    lengths: Arc<Vec<Vec<Vec<u64>>>>,
+    lengths: Arc<Vec<Vec<u64>>>,
+    field_totals: Arc<Vec<scoring::FieldLengths>>,
     // Declared after native handles so the charge outlives their destruction.
     _memory: Arc<crate::resources::MemoryReservation>,
     _pin: Option<Arc<super::package_pins::Pin>>,
     _directory_owner: Option<directory::DirectoryOwner>,
 }
 
+enum LiveSelection {
+    Ordinals(BTreeSet<usize>),
+    Published(Arc<visibility::LiveView>),
+}
+impl LiveSelection {
+    fn len(&self) -> usize {
+        match self {
+            Self::Ordinals(ordinals) => ordinals.len(),
+            Self::Published(view) => view.len(),
+        }
+    }
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+    fn contains(&self, ordinal: &usize) -> bool {
+        match self {
+            Self::Ordinals(ordinals) => ordinals.contains(ordinal),
+            Self::Published(view) => view.contains(*ordinal),
+        }
+    }
+}
 pub(super) struct ActiveView<'a> {
     snapshot: &'a Snapshot,
-    live: BTreeSet<usize>,
+    live: LiveSelection,
     #[cfg(test)]
     field_tokens: BTreeMap<Field, u64>,
 }
 
 impl Snapshot {
+    fn lengths_for(&self, ordinal: usize) -> &[u64] {
+        if let Some(lengths) = self.lengths.get(ordinal) {
+            lengths
+        } else {
+            &self.overlay[ordinal - self.lengths.len()].1.lengths
+        }
+    }
+
     #[cfg(test)]
     pub(super) fn native_segment_count(&self)->usize {self.searcher.segment_readers().len()}
     /// Exact revision selection, before both statistics and Top-K. Metadata
@@ -482,25 +514,22 @@ impl Snapshot {
     fn with_live(&self, live: BTreeSet<usize>) -> ActiveView<'_> {
         #[cfg(test)]
         let field_tokens = {
-        let mut field_tokens = BTreeMap::new();
-        for (segment, addresses) in self.addresses.iter().enumerate() {
-            for (doc, ordinal) in addresses.iter().enumerate() {
-                if live.contains(ordinal) {
-                    for (field, length) in self.fields.iter().zip(&self.lengths[segment][doc]) {
-                        *field_tokens.entry(*field).or_default() += length;
-                    }
+            let mut field_tokens = BTreeMap::new();
+            for &ordinal in &live {
+                for (field, length) in self.fields.iter().zip(self.lengths_for(ordinal)) {
+                    *field_tokens.entry(*field).or_default() += length;
                 }
             }
-        }
             field_tokens
         };
         ActiveView {
             snapshot: self,
-            live,
+            live: LiveSelection::Ordinals(live),
             #[cfg(test)]
             field_tokens,
         }
     }
+
 }
 
 #[cfg(test)]
