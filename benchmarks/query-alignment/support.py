@@ -23,11 +23,7 @@ def codeword(n):
 
 def path(c):return '/api/v1/index/'+c
 
-class Server(BaseServer):
- @property
- def last_status(self):return getattr(self.local,'status',None)
- @last_status.setter
- def last_status(self,value):self.local.status=value
+Server = BaseServer
 
 def wait(s,c,cut):
  start=time.perf_counter(); polls=0

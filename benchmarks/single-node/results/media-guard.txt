@@ -1,0 +1,5 @@
+usage: measure.py [-h] --binary BINARY --revision REVISION --out OUT
+                  [--backup-root BACKUP_ROOT] [--mode {smoke,dedicated}]
+                  [--scale {100000,1000000,3000000}] [--cpus CPUS]
+                  [--exclusive-nvme]
+measure.py: error: dedicated acceptance requires a local NVMe data device and independent backup media

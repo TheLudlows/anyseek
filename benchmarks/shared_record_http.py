@@ -78,6 +78,16 @@ class LocalServer:
     # Callers retain their experiment-specific preload location.
     allocation_library = None
     tenant = None
+    log_filter = 'anyseek::record::maintenance=info'
+
+    @property
+    def last_status(self):
+        return getattr(self.local, 'status', None)
+
+    @last_status.setter
+    def last_status(self, value):
+        self.local.status = value
+
     def __init__(self, binary, data, log, cpus, allocation_file=None):
         self.child_usage_before = usage.getrusage(usage.RUSAGE_CHILDREN)
         self.local = threading.local()
@@ -87,7 +97,7 @@ class LocalServer:
         temporary = data.parent/'tmp'
         temporary.mkdir(exist_ok=True)
         env = {**os.environ, 'TMPDIR': str(temporary), 'MASTER_KEY_SECRET': SECRET,
-               'TOKIO_WORKER_THREADS': '2', 'RAYON_NUM_THREADS': '2', 'RUST_LOG': 'anyseek::record::maintenance=info', 'ANYSEEK_STORAGE_BACKEND': 'local'}
+               'TOKIO_WORKER_THREADS': '2', 'RAYON_NUM_THREADS': '2', 'RUST_LOG': self.log_filter, 'ANYSEEK_STORAGE_BACKEND': 'local'}
         if allocation_file:
             env.update(LD_PRELOAD=str(self.allocation_library), ISSUE153_ALLOC_FILE=str(allocation_file))
         self.log = log.open('w')

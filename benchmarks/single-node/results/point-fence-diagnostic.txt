@@ -1,0 +1,216 @@
+01-checkpoint_with_writer
+[INFO  anyseek_229_fence] stage=index_tail_enter output=partition-1 committed_seq=128 healthy=false fenced=true
+[INFO  anyseek_229_fence] stage=index_tail_exit output=partition-1 committed_seq=128 healthy=true fenced=false
+[INFO  anyseek_229_fence] stage=index_tail_enter output=partition-1 committed_seq=256 healthy=false fenced=true
+[INFO  anyseek_229_fence] stage=index_tail_exit output=partition-1 committed_seq=256 healthy=true fenced=false
+[INFO  anyseek_229_fence] stage=index_tail_enter output=partition-1 committed_seq=384 healthy=false fenced=true
+[INFO  anyseek_229_fence] stage=index_tail_exit output=partition-1 committed_seq=384 healthy=true fenced=false
+[INFO  anyseek_229_fence] stage=index_tail_enter output=partition-2 committed_seq=128 healthy=false fenced=true
+[INFO  anyseek_229_fence] stage=index_tail_exit output=partition-2 committed_seq=128 healthy=true fenced=false
+[INFO  anyseek_229_fence] stage=index_tail_enter output=partition-2 committed_seq=256 healthy=false fenced=true
+[INFO  anyseek_229_fence] stage=index_tail_exit output=partition-2 committed_seq=256 healthy=true fenced=false
+[INFO  anyseek_229_fence] stage=index_tail_enter output=partition-2 committed_seq=384 healthy=false fenced=true
+[INFO  anyseek_229_fence] stage=index_tail_exit output=partition-2 committed_seq=384 healthy=true fenced=false
+[INFO  anyseek_229_fence] stage=index_tail_enter output=partition-1 committed_seq=512 healthy=false fenced=true
+[INFO  anyseek_229_fence] stage=index_tail_exit output=partition-1 committed_seq=512 healthy=true fenced=false
+
+01-checkpoint_without_writer
+[INFO  anyseek_229_fence] stage=index_tail_enter output=partition-2 committed_seq=128 healthy=false fenced=true
+[INFO  anyseek_229_fence] stage=index_tail_exit output=partition-2 committed_seq=128 healthy=true fenced=false
+[INFO  anyseek_229_fence] stage=index_tail_enter output=partition-2 committed_seq=256 healthy=false fenced=true
+[INFO  anyseek_229_fence] stage=index_tail_exit output=partition-2 committed_seq=256 healthy=true fenced=false
+[INFO  anyseek_229_fence] stage=index_tail_enter output=partition-2 committed_seq=384 healthy=false fenced=true
+[INFO  anyseek_229_fence] stage=index_tail_exit output=partition-2 committed_seq=384 healthy=true fenced=false
+[INFO  anyseek_229_fence] stage=index_tail_enter output=partition-1 committed_seq=128 healthy=false fenced=true
+[INFO  anyseek_229_fence] stage=index_tail_exit output=partition-1 committed_seq=128 healthy=true fenced=false
+[INFO  anyseek_229_fence] stage=index_tail_enter output=partition-1 committed_seq=256 healthy=false fenced=true
+[INFO  anyseek_229_fence] stage=index_tail_exit output=partition-1 committed_seq=256 healthy=true fenced=false
+[INFO  anyseek_229_fence] stage=index_tail_enter output=partition-1 committed_seq=384 healthy=false fenced=true
+[INFO  anyseek_229_fence] stage=index_tail_exit output=partition-1 committed_seq=384 healthy=true fenced=false
+[INFO  anyseek_229_fence] stage=index_tail_enter output=partition-2 committed_seq=512 healthy=false fenced=true
+[INFO  anyseek_229_fence] stage=index_tail_exit output=partition-2 committed_seq=512 healthy=true fenced=false
+
+01-read_only
+[INFO  anyseek_229_fence] stage=index_tail_enter output=partition-1 committed_seq=128 healthy=false fenced=true
+[INFO  anyseek_229_fence] stage=index_tail_exit output=partition-1 committed_seq=128 healthy=true fenced=false
+[INFO  anyseek_229_fence] stage=index_tail_enter output=partition-1 committed_seq=256 healthy=false fenced=true
+[INFO  anyseek_229_fence] stage=index_tail_exit output=partition-1 committed_seq=256 healthy=true fenced=false
+[INFO  anyseek_229_fence] stage=index_tail_enter output=partition-1 committed_seq=384 healthy=false fenced=true
+[INFO  anyseek_229_fence] stage=index_tail_exit output=partition-1 committed_seq=384 healthy=true fenced=false
+[INFO  anyseek_229_fence] stage=index_tail_enter output=partition-2 committed_seq=128 healthy=false fenced=true
+[INFO  anyseek_229_fence] stage=index_tail_exit output=partition-2 committed_seq=128 healthy=true fenced=false
+[INFO  anyseek_229_fence] stage=index_tail_enter output=partition-2 committed_seq=256 healthy=false fenced=true
+[INFO  anyseek_229_fence] stage=index_tail_exit output=partition-2 committed_seq=256 healthy=true fenced=false
+[INFO  anyseek_229_fence] stage=index_tail_enter output=partition-2 committed_seq=384 healthy=false fenced=true
+[INFO  anyseek_229_fence] stage=index_tail_exit output=partition-2 committed_seq=384 healthy=true fenced=false
+[INFO  anyseek_229_fence] stage=index_tail_enter output=partition-1 committed_seq=512 healthy=false fenced=true
+[INFO  anyseek_229_fence] stage=index_tail_exit output=partition-1 committed_seq=512 healthy=true fenced=false
+
+01-writer_without_checkpoint
+[INFO  anyseek_229_fence] stage=index_tail_enter output=partition-1 committed_seq=128 healthy=false fenced=true
+[INFO  anyseek_229_fence] stage=index_tail_exit output=partition-1 committed_seq=128 healthy=true fenced=false
+[INFO  anyseek_229_fence] stage=index_tail_enter output=partition-1 committed_seq=256 healthy=false fenced=true
+[INFO  anyseek_229_fence] stage=index_tail_exit output=partition-1 committed_seq=256 healthy=true fenced=false
+[INFO  anyseek_229_fence] stage=index_tail_enter output=partition-1 committed_seq=384 healthy=false fenced=true
+[INFO  anyseek_229_fence] stage=index_tail_exit output=partition-1 committed_seq=384 healthy=true fenced=false
+[INFO  anyseek_229_fence] stage=index_tail_enter output=partition-2 committed_seq=128 healthy=false fenced=true
+[INFO  anyseek_229_fence] stage=index_tail_exit output=partition-2 committed_seq=128 healthy=true fenced=false
+[INFO  anyseek_229_fence] stage=index_tail_enter output=partition-2 committed_seq=256 healthy=false fenced=true
+[INFO  anyseek_229_fence] stage=index_tail_exit output=partition-2 committed_seq=256 healthy=true fenced=false
+[INFO  anyseek_229_fence] stage=index_tail_enter output=partition-2 committed_seq=384 healthy=false fenced=true
+[INFO  anyseek_229_fence] stage=index_tail_exit output=partition-2 committed_seq=384 healthy=true fenced=false
+[INFO  anyseek_229_fence] stage=index_tail_enter output=partition-1 committed_seq=512 healthy=false fenced=true
+[INFO  anyseek_229_fence] stage=index_tail_exit output=partition-1 committed_seq=512 healthy=true fenced=false
+[INFO  anyseek_229_fence] stage=capture output=partition-1 revision=0 fenced=true
+[INFO  anyseek_229_fence] stage=capture output=partition-1 revision=0 fenced=true
+[INFO  anyseek_229_fence] stage=capture output=partition-1 revision=0 fenced=true
+[INFO  anyseek_229_fence] stage=capture output=partition-1 revision=0 fenced=true
+[INFO  anyseek_229_fence] stage=capture output=partition-1 revision=0 fenced=true
+[INFO  anyseek_229_fence] stage=capture output=partition-1 revision=0 fenced=true
+
+02-checkpoint_with_writer
+[INFO  anyseek_229_fence] stage=index_tail_enter output=partition-1 committed_seq=128 healthy=false fenced=true
+[INFO  anyseek_229_fence] stage=index_tail_exit output=partition-1 committed_seq=128 healthy=true fenced=false
+[INFO  anyseek_229_fence] stage=index_tail_enter output=partition-1 committed_seq=256 healthy=false fenced=true
+[INFO  anyseek_229_fence] stage=index_tail_exit output=partition-1 committed_seq=256 healthy=true fenced=false
+[INFO  anyseek_229_fence] stage=index_tail_enter output=partition-1 committed_seq=384 healthy=false fenced=true
+[INFO  anyseek_229_fence] stage=index_tail_exit output=partition-1 committed_seq=384 healthy=true fenced=false
+[INFO  anyseek_229_fence] stage=index_tail_enter output=partition-2 committed_seq=128 healthy=false fenced=true
+[INFO  anyseek_229_fence] stage=index_tail_exit output=partition-2 committed_seq=128 healthy=true fenced=false
+[INFO  anyseek_229_fence] stage=index_tail_enter output=partition-2 committed_seq=256 healthy=false fenced=true
+[INFO  anyseek_229_fence] stage=index_tail_exit output=partition-2 committed_seq=256 healthy=true fenced=false
+[INFO  anyseek_229_fence] stage=index_tail_enter output=partition-2 committed_seq=384 healthy=false fenced=true
+[INFO  anyseek_229_fence] stage=index_tail_exit output=partition-2 committed_seq=384 healthy=true fenced=false
+[INFO  anyseek_229_fence] stage=index_tail_enter output=partition-1 committed_seq=512 healthy=false fenced=true
+[INFO  anyseek_229_fence] stage=index_tail_exit output=partition-1 committed_seq=512 healthy=true fenced=false
+[INFO  anyseek_229_fence] stage=capture output=partition-1 revision=0 fenced=true
+[INFO  anyseek_229_fence] stage=capture output=partition-1 revision=0 fenced=true
+
+02-checkpoint_without_writer
+[INFO  anyseek_229_fence] stage=index_tail_enter output=partition-1 committed_seq=128 healthy=false fenced=true
+[INFO  anyseek_229_fence] stage=index_tail_exit output=partition-1 committed_seq=128 healthy=true fenced=false
+[INFO  anyseek_229_fence] stage=index_tail_enter output=partition-1 committed_seq=256 healthy=false fenced=true
+[INFO  anyseek_229_fence] stage=index_tail_exit output=partition-1 committed_seq=256 healthy=true fenced=false
+[INFO  anyseek_229_fence] stage=index_tail_enter output=partition-1 committed_seq=384 healthy=false fenced=true
+[INFO  anyseek_229_fence] stage=index_tail_exit output=partition-1 committed_seq=384 healthy=true fenced=false
+[INFO  anyseek_229_fence] stage=index_tail_enter output=partition-2 committed_seq=128 healthy=false fenced=true
+[INFO  anyseek_229_fence] stage=index_tail_exit output=partition-2 committed_seq=128 healthy=true fenced=false
+[INFO  anyseek_229_fence] stage=index_tail_enter output=partition-2 committed_seq=256 healthy=false fenced=true
+[INFO  anyseek_229_fence] stage=index_tail_exit output=partition-2 committed_seq=256 healthy=true fenced=false
+[INFO  anyseek_229_fence] stage=index_tail_enter output=partition-2 committed_seq=384 healthy=false fenced=true
+[INFO  anyseek_229_fence] stage=index_tail_exit output=partition-2 committed_seq=384 healthy=true fenced=false
+[INFO  anyseek_229_fence] stage=index_tail_enter output=partition-1 committed_seq=512 healthy=false fenced=true
+[INFO  anyseek_229_fence] stage=index_tail_exit output=partition-1 committed_seq=512 healthy=true fenced=false
+
+02-read_only
+[INFO  anyseek_229_fence] stage=index_tail_enter output=partition-1 committed_seq=128 healthy=false fenced=true
+[INFO  anyseek_229_fence] stage=index_tail_exit output=partition-1 committed_seq=128 healthy=true fenced=false
+[INFO  anyseek_229_fence] stage=index_tail_enter output=partition-1 committed_seq=256 healthy=false fenced=true
+[INFO  anyseek_229_fence] stage=index_tail_exit output=partition-1 committed_seq=256 healthy=true fenced=false
+[INFO  anyseek_229_fence] stage=index_tail_enter output=partition-1 committed_seq=384 healthy=false fenced=true
+[INFO  anyseek_229_fence] stage=index_tail_exit output=partition-1 committed_seq=384 healthy=true fenced=false
+[INFO  anyseek_229_fence] stage=index_tail_enter output=partition-2 committed_seq=128 healthy=false fenced=true
+[INFO  anyseek_229_fence] stage=index_tail_exit output=partition-2 committed_seq=128 healthy=true fenced=false
+[INFO  anyseek_229_fence] stage=index_tail_enter output=partition-2 committed_seq=256 healthy=false fenced=true
+[INFO  anyseek_229_fence] stage=index_tail_exit output=partition-2 committed_seq=256 healthy=true fenced=false
+[INFO  anyseek_229_fence] stage=index_tail_enter output=partition-2 committed_seq=384 healthy=false fenced=true
+[INFO  anyseek_229_fence] stage=index_tail_exit output=partition-2 committed_seq=384 healthy=true fenced=false
+[INFO  anyseek_229_fence] stage=index_tail_enter output=partition-1 committed_seq=512 healthy=false fenced=true
+[INFO  anyseek_229_fence] stage=index_tail_exit output=partition-1 committed_seq=512 healthy=true fenced=false
+
+02-writer_without_checkpoint
+[INFO  anyseek_229_fence] stage=index_tail_enter output=partition-1 committed_seq=128 healthy=false fenced=true
+[INFO  anyseek_229_fence] stage=index_tail_exit output=partition-1 committed_seq=128 healthy=true fenced=false
+[INFO  anyseek_229_fence] stage=index_tail_enter output=partition-1 committed_seq=256 healthy=false fenced=true
+[INFO  anyseek_229_fence] stage=index_tail_exit output=partition-1 committed_seq=256 healthy=true fenced=false
+[INFO  anyseek_229_fence] stage=index_tail_enter output=partition-1 committed_seq=384 healthy=false fenced=true
+[INFO  anyseek_229_fence] stage=index_tail_exit output=partition-1 committed_seq=384 healthy=true fenced=false
+[INFO  anyseek_229_fence] stage=index_tail_enter output=partition-2 committed_seq=128 healthy=false fenced=true
+[INFO  anyseek_229_fence] stage=index_tail_exit output=partition-2 committed_seq=128 healthy=true fenced=false
+[INFO  anyseek_229_fence] stage=index_tail_enter output=partition-2 committed_seq=256 healthy=false fenced=true
+[INFO  anyseek_229_fence] stage=index_tail_exit output=partition-2 committed_seq=256 healthy=true fenced=false
+[INFO  anyseek_229_fence] stage=index_tail_enter output=partition-2 committed_seq=384 healthy=false fenced=true
+[INFO  anyseek_229_fence] stage=index_tail_exit output=partition-2 committed_seq=384 healthy=true fenced=false
+[INFO  anyseek_229_fence] stage=index_tail_enter output=partition-1 committed_seq=512 healthy=false fenced=true
+[INFO  anyseek_229_fence] stage=index_tail_exit output=partition-1 committed_seq=512 healthy=true fenced=false
+[INFO  anyseek_229_fence] stage=capture output=partition-1 revision=0 fenced=true
+[INFO  anyseek_229_fence] stage=capture output=partition-1 revision=0 fenced=true
+[INFO  anyseek_229_fence] stage=capture output=partition-1 revision=0 fenced=true
+
+03-checkpoint_with_writer
+[INFO  anyseek_229_fence] stage=index_tail_enter output=partition-1 committed_seq=128 healthy=false fenced=true
+[INFO  anyseek_229_fence] stage=index_tail_exit output=partition-1 committed_seq=128 healthy=true fenced=false
+[INFO  anyseek_229_fence] stage=index_tail_enter output=partition-1 committed_seq=256 healthy=false fenced=true
+[INFO  anyseek_229_fence] stage=index_tail_exit output=partition-1 committed_seq=256 healthy=true fenced=false
+[INFO  anyseek_229_fence] stage=index_tail_enter output=partition-1 committed_seq=384 healthy=false fenced=true
+[INFO  anyseek_229_fence] stage=index_tail_exit output=partition-1 committed_seq=384 healthy=true fenced=false
+[INFO  anyseek_229_fence] stage=index_tail_enter output=partition-2 committed_seq=128 healthy=false fenced=true
+[INFO  anyseek_229_fence] stage=index_tail_exit output=partition-2 committed_seq=128 healthy=true fenced=false
+[INFO  anyseek_229_fence] stage=index_tail_enter output=partition-2 committed_seq=256 healthy=false fenced=true
+[INFO  anyseek_229_fence] stage=index_tail_exit output=partition-2 committed_seq=256 healthy=true fenced=false
+[INFO  anyseek_229_fence] stage=index_tail_enter output=partition-2 committed_seq=384 healthy=false fenced=true
+[INFO  anyseek_229_fence] stage=index_tail_exit output=partition-2 committed_seq=384 healthy=true fenced=false
+[INFO  anyseek_229_fence] stage=index_tail_enter output=partition-1 committed_seq=512 healthy=false fenced=true
+[INFO  anyseek_229_fence] stage=index_tail_exit output=partition-1 committed_seq=512 healthy=true fenced=false
+
+03-checkpoint_without_writer
+[INFO  anyseek_229_fence] stage=index_tail_enter output=partition-2 committed_seq=128 healthy=false fenced=true
+[INFO  anyseek_229_fence] stage=index_tail_exit output=partition-2 committed_seq=128 healthy=true fenced=false
+[INFO  anyseek_229_fence] stage=index_tail_enter output=partition-2 committed_seq=256 healthy=false fenced=true
+[INFO  anyseek_229_fence] stage=index_tail_exit output=partition-2 committed_seq=256 healthy=true fenced=false
+[INFO  anyseek_229_fence] stage=index_tail_enter output=partition-2 committed_seq=384 healthy=false fenced=true
+[INFO  anyseek_229_fence] stage=index_tail_exit output=partition-2 committed_seq=384 healthy=true fenced=false
+[INFO  anyseek_229_fence] stage=index_tail_enter output=partition-1 committed_seq=128 healthy=false fenced=true
+[INFO  anyseek_229_fence] stage=index_tail_exit output=partition-1 committed_seq=128 healthy=true fenced=false
+[INFO  anyseek_229_fence] stage=index_tail_enter output=partition-1 committed_seq=256 healthy=false fenced=true
+[INFO  anyseek_229_fence] stage=index_tail_exit output=partition-1 committed_seq=256 healthy=true fenced=false
+[INFO  anyseek_229_fence] stage=index_tail_enter output=partition-1 committed_seq=384 healthy=false fenced=true
+[INFO  anyseek_229_fence] stage=index_tail_exit output=partition-1 committed_seq=384 healthy=true fenced=false
+[INFO  anyseek_229_fence] stage=index_tail_enter output=partition-2 committed_seq=512 healthy=false fenced=true
+[INFO  anyseek_229_fence] stage=index_tail_exit output=partition-2 committed_seq=512 healthy=true fenced=false
+
+03-read_only
+[INFO  anyseek_229_fence] stage=index_tail_enter output=partition-2 committed_seq=128 healthy=false fenced=true
+[INFO  anyseek_229_fence] stage=index_tail_exit output=partition-2 committed_seq=128 healthy=true fenced=false
+[INFO  anyseek_229_fence] stage=index_tail_enter output=partition-2 committed_seq=256 healthy=false fenced=true
+[INFO  anyseek_229_fence] stage=index_tail_exit output=partition-2 committed_seq=256 healthy=true fenced=false
+[INFO  anyseek_229_fence] stage=index_tail_enter output=partition-2 committed_seq=384 healthy=false fenced=true
+[INFO  anyseek_229_fence] stage=index_tail_exit output=partition-2 committed_seq=384 healthy=true fenced=false
+[INFO  anyseek_229_fence] stage=index_tail_enter output=partition-1 committed_seq=128 healthy=false fenced=true
+[INFO  anyseek_229_fence] stage=index_tail_exit output=partition-1 committed_seq=128 healthy=true fenced=false
+[INFO  anyseek_229_fence] stage=index_tail_enter output=partition-1 committed_seq=256 healthy=false fenced=true
+[INFO  anyseek_229_fence] stage=index_tail_exit output=partition-1 committed_seq=256 healthy=true fenced=false
+[INFO  anyseek_229_fence] stage=index_tail_enter output=partition-1 committed_seq=384 healthy=false fenced=true
+[INFO  anyseek_229_fence] stage=index_tail_exit output=partition-1 committed_seq=384 healthy=true fenced=false
+[INFO  anyseek_229_fence] stage=index_tail_enter output=partition-2 committed_seq=512 healthy=false fenced=true
+[INFO  anyseek_229_fence] stage=index_tail_exit output=partition-2 committed_seq=512 healthy=true fenced=false
+
+03-writer_without_checkpoint
+[INFO  anyseek_229_fence] stage=index_tail_enter output=partition-1 committed_seq=128 healthy=false fenced=true
+[INFO  anyseek_229_fence] stage=index_tail_exit output=partition-1 committed_seq=128 healthy=true fenced=false
+[INFO  anyseek_229_fence] stage=index_tail_enter output=partition-1 committed_seq=256 healthy=false fenced=true
+[INFO  anyseek_229_fence] stage=index_tail_exit output=partition-1 committed_seq=256 healthy=true fenced=false
+[INFO  anyseek_229_fence] stage=index_tail_enter output=partition-1 committed_seq=384 healthy=false fenced=true
+[INFO  anyseek_229_fence] stage=index_tail_exit output=partition-1 committed_seq=384 healthy=true fenced=false
+[INFO  anyseek_229_fence] stage=index_tail_enter output=partition-2 committed_seq=128 healthy=false fenced=true
+[INFO  anyseek_229_fence] stage=index_tail_exit output=partition-2 committed_seq=128 healthy=true fenced=false
+[INFO  anyseek_229_fence] stage=index_tail_enter output=partition-2 committed_seq=256 healthy=false fenced=true
+[INFO  anyseek_229_fence] stage=index_tail_exit output=partition-2 committed_seq=256 healthy=true fenced=false
+[INFO  anyseek_229_fence] stage=index_tail_enter output=partition-2 committed_seq=384 healthy=false fenced=true
+[INFO  anyseek_229_fence] stage=index_tail_exit output=partition-2 committed_seq=384 healthy=true fenced=false
+[INFO  anyseek_229_fence] stage=index_tail_enter output=partition-1 committed_seq=512 healthy=false fenced=true
+[INFO  anyseek_229_fence] stage=index_tail_exit output=partition-1 committed_seq=512 healthy=true fenced=false
+[INFO  anyseek_229_fence] stage=capture output=partition-1 revision=0 fenced=true
+[INFO  anyseek_229_fence] stage=capture output=partition-1 revision=0 fenced=true
+[INFO  anyseek_229_fence] stage=capture output=partition-1 revision=0 fenced=true
+
+running 1 test
+test record::output::tests::transport_output_waits_for_publication_and_cancellation_does_not_cancel_writer ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 528 filtered out; finished in 0.23s
+
+
+running 1 test
+test record::output::tests::transport_output_rejects_failed_publication_and_old_permit_after_recovery ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 528 filtered out; finished in 0.10s
