@@ -38,11 +38,13 @@ An embedded local partition without automatic archival can call `RecordPartition
 
 `RecordPartition::capture_entity_adjacency` pins the base and its bounded canonical suffix. Updates and tombstones shadow older edges by declaring Record ID. A range returns declarations ordered by neighbor and declaring ID, with at most 256 matching keys examined and subject to the collection candidate limit. An additional match beyond the limit rejects the entire read. Old views keep their files pinned until release, after which the existing GC can reclaim the package. Incremental checkpoints reuse the selected base. An ordinary full rebuild can select a new base without a sidecar, which requires an explicit rebuild.
 
-This entry point returns edge declaration candidates at a fixed cut for authorized embedded callers. A future online query still needs seed and target eligibility and a publication and authorization check at delivery.
+This entry point returns edge declaration candidates at a fixed cut for authorized embedded partition callers.
 
 New sidecars also store canonical `entity_ids` membership keys in the same ordered tree. A Record can declare up to 32 namespaced IDs. The authenticated inventory carries a membership capability marker. An older sidecar still supplies edges, and member discovery requires an explicit rebuild.
 
-`candidate_paths` on a pinned view discovers anchor members, directed edges, and neighbor members. It checks member claims and their canonical versions by reading the selected Record. A shared visit limit spans all ranges, and one `QueryWork` accounts for logical work, positioned reads, bytes, and the original deadline. The result holds its memory reservation and exposes read-only borrows through `seeds()` and `neighbors()`. This interface supplies native candidates for an already authorized, isolated collection. Live delivery still requires publication, TTL, and authorization checks on the selected paths.
+`candidate_paths` on a pinned view discovers anchor members, directed edges, and neighbor members. It reads the selected Records to check claims and canonical versions for all three roles. The result holds its memory reservation and exposes read-only borrows through `seeds()` and `neighbors()`.
+
+An embedding host can call `LocalEngine::build_entity_adjacency` and `LocalEngine::query_entity_paths` for an already authorized, isolated local collection. Handoff reacquires authorization for the same Catalog generation and checks the current base, Record cut, group publication, and TTL of the returned roles inside the Record publication barrier. One visit limit spans all ranges. Discovery, canonical validation, and final checks share a single `QueryWork` and the original deadline. A changed publication or reached TTL returns `busy` for the whole read.
 
 ## Authority and data ownership
 
