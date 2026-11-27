@@ -4,6 +4,9 @@ use super::state_memory::Shared;
 use super::*;
 use crate::storage::build_budget::reserve_memory;
 
+mod ttl;
+pub(super) use ttl::PreparedTtl;
+
 impl<T: Serialize> Shared<T> {
     pub(super) fn wire_bytes(&self) -> usize {
         (self.charged_bytes() / 32) as usize
@@ -296,40 +299,17 @@ impl<'de> Deserialize<'de> for Operations {
         Ok(result)
     }
 }
-// Derived admission statistics are never serialized or trusted from a checkpoint.
-// Every replacement (including edit and recovery inserts) passes insert_shared.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-struct AdmissionCounts {
-    ttl: usize,
-}
-impl AdmissionCounts {
-    fn of(record: &Record) -> Self {
-        Self {
-            ttl: usize::from(temporal::live_ttl(record)),
-        }
-    }
-    fn replacing(self, old: Self, next: Self) -> Result<Self, RecordError> {
-        Ok(Self {
-            ttl: self
-                .ttl
-                .checked_sub(old.ttl)
-                .and_then(|n| n.checked_add(next.ttl))
-                .ok_or_else(|| storage("record admission count overflow"))?,
-        })
-    }
-}
-
 /// The previous row's contribution to logical counters. Publication can apply
 /// a prepared replacement without reading (or decoding) the old document.
 #[derive(Clone, Copy)]
 pub(super) struct PreviousRow {
     pub version: u64,
     pub bytes: usize,
-    counts: AdmissionCounts,
+    deadline: Option<u64>,
 }
 impl PreviousRow {
     pub(super) fn has_ttl(self) -> bool {
-        self.counts.ttl != 0
+        self.deadline.is_some()
     }
     pub(super) fn measure(record: &Record) -> Result<Self, RecordError> {
         Ok(Self::from_size(
@@ -341,16 +321,13 @@ impl PreviousRow {
         Self {
             version: record.version,
             bytes,
-            counts: AdmissionCounts::of(record),
+            deadline: ttl::live_deadline(record),
         }
     }
 }
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Default)]
 pub(super) struct Records {
-    counts: AdmissionCounts,
-    // Conservative lower bound, not authority. Removal/extension may leave it
-    // early until the next candidate scan; insertion must never leave it late.
-    ttl_deadline_lower_bound: Option<u64>,
+    deadlines: ttl::Deadlines,
     base: Option<Arc<state_rows::Base>>,
     values: BTreeMap<String, Shared<Record>>,
     bytes: usize,
@@ -410,6 +387,13 @@ impl CurrentRow<'_> {
             Self::Sealed(row) => row.metadata.is_live(),
         }
     }
+    fn deadline(&self) -> Option<u64> {
+        if self.live() {
+            self.temporal().expire_at_ms
+        } else {
+            None
+        }
+    }
     pub(super) fn temporal(&self) -> &TemporalMetadata {
         match self {
             Self::Recent(row) => &row.temporal,
@@ -457,9 +441,7 @@ impl CurrentRow<'_> {
         Ok(PreviousRow {
             version: self.version(),
             bytes,
-            counts: AdmissionCounts {
-                ttl: usize::from(self.live() && self.temporal().expire_at_ms.is_some()),
-            },
+            deadline: self.deadline(),
         })
     }
     pub(super) fn load(self, id: &str) -> Result<Shared<Record>, RecordError> {
@@ -470,7 +452,27 @@ impl CurrentRow<'_> {
     }
 }
 
+#[cfg(test)]
+impl Clone for Records {
+    fn clone(&self) -> Self {
+        self.try_clone().expect("reserve test Record state clone")
+    }
+}
+
 impl Records {
+    pub(super) fn try_clone(&self) -> Result<Self, RecordError> {
+        let deadlines = self.deadlines.try_clone()?;
+        Ok(Self {
+            deadlines,
+            base: self.base.clone(),
+            values: self.values.clone(),
+            bytes: self.bytes,
+            keys_bytes: self.keys_bytes,
+            sealed_keys_bytes: self.sealed_keys_bytes,
+            count: self.count,
+        })
+    }
+
     pub(super) fn has_sealed_base(&self) -> bool {
         self.base.is_some()
     }
@@ -492,11 +494,10 @@ impl Records {
                 .checked_add(Self::key_bytes(id)?)
                 .ok_or(RecordError::Busy)?;
             result.count = result.count.checked_add(1).ok_or(RecordError::Busy)?;
-            result.counts = result
-                .counts
-                .replacing(AdmissionCounts::default(), account.counts)?;
-            if row.live() {
-                result.include_deadline(row.temporal().expire_at_ms);
+            if let Some(at) = account.deadline {
+                result
+                    .deadlines
+                    .insert(PreparedTtl::new(at, id, account.version)?);
             }
             Ok(())
         })?;
@@ -509,14 +510,6 @@ impl Records {
         checkpoint_codec::json_length(&id)?
             .checked_add(1)
             .ok_or(RecordError::Busy)
-    }
-    fn include_deadline(&mut self, next: Option<u64>) {
-        if let Some(next) = next {
-            self.ttl_deadline_lower_bound = Some(
-                self.ttl_deadline_lower_bound
-                    .map_or(next, |old| old.min(next)),
-            );
-        }
     }
     pub(super) fn find(&self, id: &str) -> Result<Option<CurrentRow<'_>>, RecordError> {
         if let Some(record) = self.values.get(id) {
@@ -591,55 +584,49 @@ impl Records {
     }
 
     pub(super) fn may_have_due_ttl(&self, evaluation: u64) -> bool {
-        self.ttl_deadline_lower_bound
-            .is_some_and(|deadline| deadline <= evaluation)
+        self.deadlines.has_due(evaluation)
     }
+
     pub(super) fn visit_due_ttl(
-        &mut self,
+        &self,
         evaluation: u64,
-        mut visit: impl FnMut(&str, u64),
-    ) -> Result<bool, RecordError> {
-        if !self.may_have_due_ttl(evaluation) {
-            return Ok(false);
-        }
-        let mut earliest = None;
-        self.scan(None, |id, row| {
-            if let Some(deadline) = row.temporal().expire_at_ms.filter(|_| row.live()) {
-                earliest = Some(earliest.map_or(deadline, |old: u64| old.min(deadline)));
-                if deadline <= evaluation {
-                    visit(id, row.version());
-                }
+        mut visit: impl FnMut(&str, u64) -> Result<(), RecordError>,
+    ) -> Result<(), RecordError> {
+        for (at, id, version) in self.deadlines.due(evaluation) {
+            // Verify the effective row, including sealed lookups and recent
+            // overrides, before using a derived entry for statistics or WAL.
+            let row = self
+                .find(id)?
+                .ok_or_else(|| storage("TTL identity missing"))?;
+            if row.version() != version || row.deadline() != Some(at) {
+                return Err(storage("stale Record TTL entry"));
             }
-            Ok(true)
-        })?;
-        self.ttl_deadline_lower_bound = earliest;
-        Ok(true)
+            visit(id, version)?;
+        }
+        Ok(())
     }
+
     pub(super) fn live_ttl_count(&self) -> usize {
-        self.counts.ttl
+        self.deadlines.len()
     }
+
     pub(super) fn validate_counts(&self) -> Result<(), RecordError> {
-        let mut counts = AdmissionCounts::default();
-        let mut earliest = None;
-        self.scan(None, |_, row| {
-            if let Some(deadline) = row.temporal().expire_at_ms.filter(|_| row.live()) {
-                earliest = Some(earliest.map_or(deadline, |old: u64| old.min(deadline)));
-                counts =
-                    counts.replacing(AdmissionCounts::default(), AdmissionCounts { ttl: 1 })?;
+        let mut count = 0;
+        self.scan(None, |id, row| {
+            if let Some(at) = row.deadline() {
+                if !self.deadlines.matches(&(at, id.to_owned()), row.version()) {
+                    return Err(storage("Record TTL entry missing or stale"));
+                }
+                count += 1;
             }
             Ok(true)
         })?;
-        if earliest.is_some_and(|deadline| {
-            self.ttl_deadline_lower_bound
-                .is_none_or(|bound| bound > deadline)
-        }) {
-            return Err(storage("record TTL deadline lower bound invalid"));
-        }
-        if counts != self.counts {
+        if count != self.deadlines.len() {
             return Err(storage("record admission counts mismatch"));
         }
         Ok(())
     }
+
     pub(super) fn wire_length(&self) -> Result<usize, RecordError> {
         self.bytes
             .checked_add(self.keys_bytes)
@@ -651,7 +638,10 @@ impl Records {
         self.sealed_keys_bytes
     }
     pub(super) fn same_values(&self, other: &Self) -> Result<bool, RecordError> {
-        if self.len() != other.len() || self.bytes != other.bytes || self.counts != other.counts {
+        if self.len() != other.len()
+            || self.bytes != other.bytes
+            || self.live_ttl_count() != other.live_ttl_count()
+        {
             return Ok(false);
         }
         let same_base = match (&self.base, &other.base) {
@@ -707,13 +697,15 @@ impl Records {
         value: Shared<Record>,
     ) -> Result<Option<Shared<Record>>, RecordError> {
         let previous = self.find(&id)?.map(|row| row.account(&id)).transpose()?;
-        self.replace_prepared(id, value, previous)
+        let ttl = PreparedTtl::for_record(&value)?;
+        self.replace_prepared(id, value, previous, ttl)
     }
     pub(super) fn replace_prepared(
         &mut self,
         id: String,
         value: Shared<Record>,
         previous: Option<PreviousRow>,
+        prepared_ttl: Option<PreparedTtl>,
     ) -> Result<Option<Shared<Record>>, RecordError> {
         if id != value.record_id {
             return Err(storage("record key differs from its identity"));
@@ -723,16 +715,22 @@ impl Records {
             .checked_sub(previous.map_or(0, |row| row.bytes))
             .and_then(|n| n.checked_add(value.wire_bytes()))
             .ok_or_else(|| storage("record replacement overflow"))?;
-        let counts = self.counts.replacing(
-            previous.map_or_else(AdmissionCounts::default, |row| row.counts),
-            AdmissionCounts::of(&value),
-        )?;
-        let next_deadline = temporal::live_ttl(&value)
-            .then_some(value.temporal.expire_at_ms)
-            .flatten();
-        let deadline = match (self.ttl_deadline_lower_bound, next_deadline) {
-            (Some(old), Some(next)) => Some(old.min(next)),
-            (old, next) => old.or(next),
+        if prepared_ttl.as_ref().map(PreparedTtl::metadata)
+            != ttl::live_deadline(&value).map(|at| (at, id.as_str(), value.version))
+        {
+            return Err(storage("Record TTL differs from its prepared entry"));
+        }
+        let id = if let Some((at, version)) =
+            previous.and_then(|row| row.deadline.map(|at| (at, row.version)))
+        {
+            let key = (at, id);
+            if !self.deadlines.matches(&key, version) {
+                return Err(storage("previous Record TTL differs from its entry"));
+            }
+            self.deadlines.remove(&key);
+            key.1
+        } else {
+            id
         };
         if previous.is_none() {
             self.keys_bytes = self
@@ -743,8 +741,9 @@ impl Records {
         }
         let previous = self.values.insert(id, value);
         self.bytes = bytes;
-        self.counts = counts;
-        self.ttl_deadline_lower_bound = deadline;
+        if let Some(prepared) = prepared_ttl {
+            self.deadlines.insert(prepared);
+        }
         Ok(previous)
     }
     #[cfg(test)]
@@ -874,8 +873,7 @@ mod admission_count_tests {
     }
 
     #[test]
-    fn ttl_deadline_bound_skips_scan_and_tracks_early_update_extension_delete_restore() {
-        let mut state = State::default();
+    fn ttl_index_tracks_same_version_updates_extension_delete_and_restore() {
         let mut request =
             super::super::tests::write("deadline", "id", "alpha", ExpectedVersion::Any);
         request.temporal = Some(TemporalMetadata {
@@ -892,109 +890,86 @@ mod admission_count_tests {
             observed_epoch: 1,
             observed_time_ms: 1,
         };
+        let mut state = State::default();
         apply(&mut state, &applied).unwrap();
         let records = &mut state.records;
-        assert!(
-            !records
-                .visit_due_ttl(999, |_, _| panic!("early callback"))
-                .unwrap()
-        );
-        // Same-version changes still lower the bound, independent of identity version.
+        assert!(!records.may_have_due_ttl(999));
+
+        // Deadline replacement is needed even when the technical version stays the same.
         records
-            .edit("id", 0, |r| {
-                r.temporal.expire_at_ms = Some(100);
+            .edit("id", 0, |row| {
+                row.temporal.expire_at_ms = Some(100);
                 Ok(())
             })
             .unwrap();
         check(records);
         let mut due = Vec::new();
-        assert!(
-            records
-                .visit_due_ttl(100, |id, _| due.push(id.to_owned()))
-                .unwrap()
-        );
-        assert_eq!(due, ["id"]);
         records
-            .edit("id", 32, |r| {
-                r.temporal.expire_at_ms = Some(2000);
+            .visit_due_ttl(100, |id, version| {
+                due.push((id.to_owned(), version));
                 Ok(())
             })
             .unwrap();
-        assert_eq!(records.ttl_deadline_lower_bound, Some(100));
+        assert_eq!(due, [("id".to_owned(), 1)]);
+
+        records
+            .edit("id", 32, |row| {
+                row.temporal.expire_at_ms = Some(2000);
+                Ok(())
+            })
+            .unwrap();
+        assert!(!records.may_have_due_ttl(1999));
+        let mut rebuilt: Records =
+            serde_json::from_slice(&serde_json::to_vec(records).unwrap()).unwrap();
+        assert!(records.same_values(&rebuilt).unwrap());
+        check(&rebuilt);
+        let mut n = 0;
+        rebuilt
+            .visit_due_ttl(2000, |_, _| {
+                n += 1;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(n, 1);
+
         assert!(
             records
-                .visit_due_ttl(100, |_, _| panic!("extended record expired"))
-                .unwrap()
-        );
-        assert_eq!(records.ttl_deadline_lower_bound, Some(2000));
-        assert!(
-            !records
-                .visit_due_ttl(1999, |_, _| panic!("unexpected scan"))
-                .unwrap()
-        );
-        let mut jumped = 0;
-        assert!(records.visit_due_ttl(10000, |_, _| jumped += 1).unwrap());
-        assert_eq!(jumped, 1);
-        let before = records.ttl_deadline_lower_bound;
-        assert!(
-            records
-                .edit("id", 0, |r| {
-                    r.temporal.expire_at_ms = Some(1);
+                .edit("id", 0, |row| {
+                    row.temporal.expire_at_ms = Some(1);
                     Err(storage("rollback"))
                 })
                 .is_err()
         );
-        assert_eq!(before, records.ttl_deadline_lower_bound);
+        assert!(!records.may_have_due_ttl(1999));
+        assert!(records.may_have_due_ttl(2000));
         records
-            .edit("id", 0, |r| {
-                r.document = None;
+            .edit("id", 0, |row| {
+                row.document = None;
                 Ok(())
             })
             .unwrap();
         check(records);
-        let restored: Records =
-            serde_json::from_slice(&serde_json::to_vec(records).unwrap()).unwrap();
-        assert_eq!(restored.ttl_deadline_lower_bound, None);
-        assert!(records.same_values(&restored).unwrap());
-        assert!(
-            records
-                .visit_due_ttl(2000, |_, _| panic!("deleted record expired"))
-                .unwrap()
-        );
-        assert!(
-            !records
-                .visit_due_ttl(u64::MAX, |_, _| panic!("empty scan"))
-                .unwrap()
-        );
-        let mut restored = Records::default();
-        // Invalid late/absent watermarks are detected by the recovery oracle.
-        restored
-            .insert(
-                "id".into(),
-                mutation::projected_record(
-                    None,
-                    &applied,
-                    applied.request.document.clone(),
-                    applied.request.temporal.clone().unwrap(),
-                ),
-            )
-            .unwrap();
-        restored.ttl_deadline_lower_bound = Some(1001);
-        assert!(restored.validate_counts().is_err());
-        restored.ttl_deadline_lower_bound = None;
-        assert!(restored.validate_counts().is_err());
-        let mut rebuilt: Records =
-            serde_json::from_slice(&serde_json::to_vec(&restored).unwrap()).unwrap();
-        check(&rebuilt);
-        let mut n = 0;
-        assert!(rebuilt.visit_due_ttl(1000, |_, _| n += 1).unwrap());
-        assert_eq!(n, 1);
+        assert!(!records.may_have_due_ttl(u64::MAX));
+
+        let key = (2000, "id".to_owned());
+        rebuilt.deadlines.remove(&key);
+        assert!(rebuilt.validate_counts().is_err());
+        rebuilt
+            .deadlines
+            .insert(PreparedTtl::new(key.0, &key.1, 2).unwrap());
+        assert!(rebuilt.validate_counts().is_err());
+        assert!(matches!(
+            rebuilt.visit_due_ttl(2000, |_, _| panic!("stale callback")),
+            Err(RecordError::Storage(_))
+        ));
     }
 
     #[test]
     fn restored_admission_counts_reject_corrupt_derived_cache() {
         let mut records = Records::default();
-        records.counts.ttl = 1;
+        records
+            .deadlines
+            .insert(PreparedTtl::new(100, "missing", 1).unwrap());
         assert!(records.validate_counts().is_err());
         // Wire input carries only records; untrusted cached statistics cannot survive reload.
         let restored: Records =

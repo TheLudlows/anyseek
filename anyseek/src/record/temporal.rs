@@ -222,7 +222,7 @@ impl PreparedExpiration {
 
     pub(super) fn install(self, state: &mut State, event: Expiration) -> Result<(), RecordError> {
         for (previous, record) in self.replacements {
-            state.records.replace_prepared(record.record_id.clone(), record, Some(previous))?;
+            state.records.replace_prepared(record.record_id.clone(), record, Some(previous), None)?;
         }
         state.seq = event.seq;
         state.time_watermark_ms = event.evaluation_time_ms;
@@ -272,14 +272,16 @@ impl Inner {
     pub(super) async fn expire_due(&mut self) -> Result<(), RecordError> {
         let evaluation=self.observe_time()?;
         let mut targets = Vec::new();
-        self.state.records.visit_due_ttl(evaluation, |id, version| targets.push(ExpiredTarget {
-            record_id: id.to_owned(),
-            previous_version: version,
-        }))?;
+        self.state.records.visit_due_ttl(evaluation, |id, version| {
+            targets.push(ExpiredTarget {record_id: id.to_owned(), previous_version: version});
+            Ok(())
+        })?;
         if targets.is_empty() {
             self.evaluation_time_ms = evaluation;
             return Ok(());
         }
+        // Keep the existing record-ID order in the durable expiration frame.
+        targets.sort_unstable_by(|a, b| a.record_id.cmp(&b.record_id));
         let event = Expiration {
             seq: self
                 .state

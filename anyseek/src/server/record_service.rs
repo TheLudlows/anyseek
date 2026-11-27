@@ -2711,7 +2711,10 @@ mod tests {
             let mut body=protected_data::<Value>(Err(error.into()),Some(data.clone())).unwrap().into_body();
             assert!(matches!(std::future::poll_fn(|cx|Pin::new(&mut body).poll_frame(cx)).await,Some(Ok(_))));
         }
-        drop(record);drop(service);std::fs::remove_dir_all(path).unwrap();
+        drop(data);
+        drop(record);
+        service.shutdown().wait().await.unwrap();
+        std::fs::remove_dir_all(path).unwrap();
     }
 
     #[cfg(feature = "fault-injection")]

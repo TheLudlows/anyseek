@@ -167,7 +167,7 @@ impl State {
             time_watermark_ms: self.time_watermark_ms,
             retired_operation_prefix: self.retired_operation_prefix.clone(),
             expirations: self.expirations.clone(),
-            records: self.records.clone(),
+            records: self.records.try_clone()?,
             operations: self.operations.clone(),
             operation_lookup: self.operation_lookup.clone(),
             operation_epochs: self.operation_epochs.clone(),
@@ -186,6 +186,7 @@ pub(super) struct Prepared {
     pub record: Shared<Record>,
     pub operation: Shared<Applied>,
     pub previous: Option<state_values::PreviousRow>,
+    pub ttl: Option<state_values::PreparedTtl>,
 }
 impl Prepared {
     pub(super) fn new(state: &State, applied: &Applied) -> Result<Self, RecordError> {
@@ -203,9 +204,10 @@ impl Prepared {
         let document=enrichment::document(prior,&applied.request)?;
         let temporal=temporal::retained(prior,&applied.request,applied.observed_time_ms)?;
         let record=mutation::projected_record(prior,applied,document,temporal);
+        let ttl = state_values::PreparedTtl::for_record(&record)?;
         let record=Shared::from_parts(record,&mut admission)?;
         let operation=Shared::copy_from_parts(applied,&mut admission)?;
-        Ok(Self{record,operation,previous,lexical:None,component:None})
+        Ok(Self{record,operation,previous,ttl,lexical:None,component:None})
     }
     pub(super) fn admit_containers(&self,state:&mut State,total:usize)->Result<(),RecordError>{
         let old_bytes=self.previous.map_or(0, |row| row.bytes);
