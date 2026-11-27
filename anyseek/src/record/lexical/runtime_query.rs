@@ -489,8 +489,8 @@ fn has_positive_terms(snapshots: &[&Snapshot], groups: &[query::ScoreGroup]) -> 
             for field in &group.match_fields {
                 let term = Term::from_field_text(*field, &group.matched_term);
                 for segment in snapshot.searcher.segment_readers() {
-                    if segment.inverted_index(*field).map_err(storage)?
-                        .get_term_info(&term).map_err(storage)?.is_some() {
+                    if segment.inverted_index(*field).map_err(super::native_search_error)?
+                        .get_term_info(&term).map_err(super::native_io_error)?.is_some() {
                         return Ok(true);
                     }
                 }

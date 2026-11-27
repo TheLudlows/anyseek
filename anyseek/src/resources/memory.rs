@@ -33,6 +33,21 @@ impl MemoryReservation {
 
     pub(crate) fn bytes(&self) -> u64 { self.memory.bytes() }
 
+    /// Transfer ownership of already admitted bytes in both ledgers.
+    pub(crate) fn split_off(&mut self, bytes: u64) -> Result<Self, MemoryError> {
+        let memory = self.memory.split_off(bytes).map_err(MemoryError::Process)?;
+        let scoped = self.scoped.as_mut().map(|lease| {
+            lease.amount.bytes -= bytes;
+            Lease {
+                governor: lease.governor.clone(),
+                subject: lease.subject.clone(),
+                lane: lease.lane,
+                amount: Usage { bytes, ..Usage::default() },
+            }
+        });
+        Ok(Self { memory, scoped })
+    }
+
     /// Reserve the increment in both ledgers before changing this owner. A
     /// failed second admission drops the first increment automatically.
     pub(crate) fn grow(&mut self, bytes: u64) -> Result<(), MemoryError> {

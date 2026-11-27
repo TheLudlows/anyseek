@@ -105,8 +105,8 @@ impl<'a> QueryStatistics<'a> {
                 {
                     let term = Term::from_field_text(*field, word);
                     for segment in view.snapshot.searcher.segment_readers() {
-                        let inverted = segment.inverted_index(*field).map_err(storage)?;
-                        if let Some(info) = inverted.get_term_info(&term).map_err(storage)? {
+                        let inverted = segment.inverted_index(*field).map_err(native_search_error)?;
+                        if let Some(info) = inverted.get_term_info(&term).map_err(native_io_error)? {
                             df += info.doc_freq as usize;
                         }
                     }
@@ -145,11 +145,11 @@ impl ActiveView<'_> {
         for (segment_id, segment) in self.snapshot.searcher.segment_readers().iter().enumerate() {
             let mut postings = Vec::with_capacity(self.snapshot.fields.len());
             for &field in self.snapshot.fields.iter() {
-                let inverted = segment.inverted_index(field).map_err(storage)?;
+                let inverted = segment.inverted_index(field).map_err(native_search_error)?;
                 if let Some(posting) = inverted.read_postings(
                     &Term::from_field_text(field, word),
                     IndexRecordOption::Basic,
-                ).map_err(storage)? {
+                ).map_err(native_io_error)? {
                     postings.push(posting);
                 }
             }
@@ -250,7 +250,7 @@ impl ActiveView<'_> {
             .weight(EnableScoring::disabled_from_searcher(
                 &self.snapshot.searcher,
             ))
-            .map_err(storage)?;
+            .map_err(native_search_error)?;
         let mut count = 0;
         for (segment_id, segment) in self.snapshot.searcher.segment_readers().iter().enumerate() {
             let mut postings = Vec::new();
@@ -266,10 +266,10 @@ impl ActiveView<'_> {
                         )?)
                     })
                     .collect::<tantivy::Result<Vec<_>>>()
-                    .map_err(storage)?;
+                    .map_err(native_search_error)?;
                 postings.push(fields);
             }
-            let mut scorer = weight.scorer(segment, 1.0).map_err(storage)?;
+            let mut scorer = weight.scorer(segment, 1.0).map_err(native_search_error)?;
             while scorer.doc() != TERMINATED {
                 let doc = scorer.doc();
                 let ordinal = self.snapshot.addresses[segment_id][doc as usize];
@@ -453,9 +453,9 @@ impl<'a> CorpusView<'a> {
             }
             let weight = query
                 .weight(EnableScoring::disabled_from_searcher(&view.snapshot.searcher))
-                .map_err(storage)?;
+                .map_err(native_search_error)?;
             for (segment_id, segment) in view.snapshot.searcher.segment_readers().iter().enumerate() {
-                let mut scorer = weight.scorer(segment, 1.0).map_err(storage)?;
+                let mut scorer = weight.scorer(segment, 1.0).map_err(native_search_error)?;
                 while scorer.doc() != TERMINATED {
                     let ordinal = view.snapshot.addresses[segment_id][scorer.doc() as usize];
                     if view.live.contains(&ordinal) {

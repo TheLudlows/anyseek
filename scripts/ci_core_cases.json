@@ -1,5 +1,7 @@
 [
   "record::lexical::directory::tests::directory_gates_share_aliases_and_isolate_other_directories",
+  "record::lexical::directory::tests::range_buffers_retain_admission_and_handles_protect_the_package",
+  "storage::build_budget::tests::positioned_reads_share_one_handle_without_moving_its_cursor",
   "record::output::tests::transport_output_waits_for_publication_and_cancellation_does_not_cancel_writer",
   "record::output::tests::transport_output_rejects_failed_publication_and_old_permit_after_recovery",
   "resources::lifecycle::tests::stopping_keeps_required_children_and_detached_output_owned",

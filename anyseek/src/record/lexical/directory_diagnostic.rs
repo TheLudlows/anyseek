@@ -28,14 +28,15 @@ fn directory_io_contention() {
                     // Same accounting, admission and gate as atomic_write; time
                     // the gate separately from atomic publication and dir fsync.
                     directory.budget.charge(&path, payload.len() as u64).unwrap();
+                    let path = directory.resolve(&path).unwrap();
                     let start = Instant::now();
-                    let guard = directory.budget.io().unwrap();
-                    let acquired = Instant::now();
-                    directory.inner.atomic_write(&path, &payload).unwrap();
-                    let synced = Instant::now();
-                    directory.inner.sync_directory().unwrap();
-                    let end = Instant::now();
-                    drop(guard);
+                    let (acquired, synced, end) = directory.budget.io(|| {
+                        let acquired = Instant::now();
+                        directory.replace_file(&path, &payload)?;
+                        let synced = Instant::now();
+                        directory.sync_root()?;
+                        Ok((acquired, synced, Instant::now()))
+                    }).unwrap();
                     samples.push((acquired-start, end-acquired, synced-acquired, end-synced));
                 }
                 samples
