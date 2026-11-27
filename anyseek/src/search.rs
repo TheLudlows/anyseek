@@ -23,6 +23,22 @@ pub(crate) struct QueryWork {
     statistics_postings: AtomicUsize,
     #[cfg(test)]
     statistics_usage: std::sync::Mutex<Option<LexicalStatisticsUsage>>,
+    #[cfg(test)]
+    pub(crate) vector_visits: VectorVisits,
+}
+
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct VectorVisits {
+    pub(crate) levels: AtomicUsize,
+    pub(crate) header_clusters: AtomicUsize,
+    pub(crate) medoids: AtomicUsize,
+    pub(crate) clusters: AtomicUsize,
+    pub(crate) sealed_members: AtomicUsize,
+    pub(crate) tail_members: AtomicUsize,
+    pub(crate) vector_ranges: AtomicUsize,
+    pub(crate) vector_bytes: AtomicUsize,
+    pub(crate) remaining_after_medoids: AtomicUsize,
 }
 
 #[cfg(test)]
@@ -50,12 +66,19 @@ impl QueryWork {
             statistics_postings: AtomicUsize::new(0),
             #[cfg(test)]
             statistics_usage: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            vector_visits: Default::default(),
         }
     }
 
     /// Meter synchronous positioned reads on this request-owned worker.
     pub(crate) fn with_reads<T>(self: Arc<Self>, work: impl FnOnce() -> T) -> T {
         QUERY_READS.sync_scope(self, work)
+    }
+
+    /// Bind the meter for every poll of a future, including after it awaits.
+    pub(crate) async fn with_async_reads<F: std::future::Future>(self: Arc<Self>, future: F) -> F::Output {
+        QUERY_READS.scope(self, future).await
     }
 
     pub(crate) fn current() -> Option<Arc<Self>> {
@@ -161,6 +184,25 @@ impl QueryWork {
             self.bytes.load(Ordering::Relaxed),
         )
     }
+}
+
+/// Stable insertion sort with one shared work unit per comparison/swap.
+/// A refusal leaves an intermediate order that the caller must discard.
+pub(crate) fn sort_with_work<T>(
+    items: &mut [T],
+    work: &QueryWork,
+    mut compare: impl FnMut(&T, &T) -> std::cmp::Ordering,
+) -> std::result::Result<(), RecordError> {
+    for end in 1..items.len() {
+        for slot in (1..=end).rev() {
+            work.charge(1)?;
+            if !compare(&items[slot - 1], &items[slot]).is_gt() {
+                break;
+            }
+            items.swap(slot - 1, slot);
+        }
+    }
+    Ok(())
 }
 
 /// Specifies the default QueryType: The following query types are supported:
@@ -525,9 +567,20 @@ pub(crate) async fn search_with_counts(
     component_counts: &mut Vec<usize>,
     work: Option<Arc<QueryWork>>,
 ) -> std::result::Result<ResultObject, RecordError> {
+    if work.as_ref().is_some_and(|supplied| {
+        QUERY_READS.try_with(|active| !Arc::ptr_eq(active, supplied)).unwrap_or(false)
+    }) {
+        return Err(RecordError::Rejected("vector search read budget does not match the supplied query budget".into()));
+    }
+    let query = async {
         if let Some(work) = &work { work.charge(0)?; }
         if !matches!(search_mode, SearchMode::Vector { .. }) {
             return Err(RecordError::Rejected("vector component cannot execute lexical queries".into()));
+        }
+        let ann_work = work.as_deref().filter(|_| matches!(&search_mode,
+            SearchMode::Vector { ann_mode, .. } if *ann_mode != AnnMode::All));
+        if ann_work.is_some() && result_type == ResultType::Count {
+            return Err(RecordError::Rejected("metered ANN does not support count-only search".into()));
         }
         let index_ref = index.read().await;
         if let Err(error) =
@@ -545,6 +598,23 @@ pub(crate) async fn search_with_counts(
         if length == 0 || offset.checked_add(length).is_none()
         {
             return Err(RecordError::Rejected("vector search requires a positive, bounded result window".into()));
+        }
+        if let Some(work) = ann_work {
+            if !field_filter.is_empty() || !result_sort.is_empty() {
+                return Err(RecordError::Rejected("metered ANN requires score-ordered Top-K over the configured vector fields".into()));
+            }
+            let SearchMode::Vector { ann_mode: AnnMode::Nprobe(probes), .. } = &search_mode else {
+                return Err(RecordError::Rejected("metered ANN requires a positive nprobe".into()));
+            };
+            let Some(Embedding::F32(values)) = &query_vector else {
+                return Err(RecordError::Rejected("metered ANN requires an unquantized F32 embedding".into()));
+            };
+            if *probes == 0 || index_ref.quantization != Quantization::None {
+                return Err(RecordError::Rejected("metered ANN requires a positive nprobe and unquantized F32 vectors".into()));
+            }
+            // Charge normalization and per-shard copies before doing either.
+            let units = values.len().div_ceil(64);
+            work.charge(2 * units + index_ref.segments.len().saturating_mul(1 + units))?;
         }
         let query_vector = if index_ref.is_vector_indexing
         {
@@ -763,7 +833,12 @@ pub(crate) async fn search_with_counts(
         }
         let shards = futures::future::join_all(index_ref.segments.iter().map(|segment| segment.vector.read())).await;
         if let Some(work) = &work { work.charge(0)?; }
-        result.results.sort_by(|a,b| crate::min_heap::rank_with_segments(&shards,b.score,b.doc_id,a.score,a.doc_id));
+        let compare = |a: &Result, b: &Result| crate::min_heap::rank_with_segments(&shards,b.score,b.doc_id,a.score,a.doc_id);
+        if let Some(work) = ann_work {
+            sort_with_work(&mut result.results, work, compare)?;
+        } else {
+            result.results.sort_by(compare);
+        }
         result.results.truncate(offset + length);
         let sorts = result_sort.iter().filter_map(|sort| Some(ResultSortIndex {
             idx: match sort.field.as_str() { "_id" => usize::MAX, "_score" => usize::MAX-1,
@@ -777,4 +852,11 @@ pub(crate) async fn search_with_counts(
         if let Some(work) = &work { work.charge(0)?; }
         component_counts.extend(counts);
         Ok(result)
+    };
+    // Metered shards are polled in this task, on the caller's owned worker.
+    // Bind the same budget for their file leaves without caller setup.
+    match work.as_ref() {
+        Some(work) => work.clone().with_async_reads(query).await,
+        None => query.await,
+    }
 }

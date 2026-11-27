@@ -1,7 +1,525 @@
 use super::super::tests::{config, query, write};
 use super::*;
+use crate::{search::QueryWork, vector_similarity::AnnMode};
 
 const DEADLINE: std::time::Duration = std::time::Duration::from_secs(20);
+const ANN_DIMENSIONS: usize = 256;
+const ANN_ROWS: usize = 120;
+const ANN_WORK: usize = 65_536;
+const ANN_RANGES: usize = 2048;
+const ANN_BYTES: usize = 16 * 1024 * 1024;
+
+fn ann_embedding(axis: usize) -> Vec<f32> {
+    let mut vector = vec![0.; ANN_DIMENSIONS];
+    vector[axis] = 1.;
+    vector
+}
+
+async fn ann_fixture(
+    root: &Path,
+    levels: usize,
+    medoids: usize,
+    winners: usize,
+    expiry: Option<u64>,
+) -> RecordPartition {
+    let mut settings = config();
+    settings.index.clustering = crate::index::Clustering::Fixed(medoids);
+    settings.index.inference = serde_json::from_value(serde_json::json!({"External":{
+        "dimensions":ANN_DIMENSIONS,"precision":"F32","quantization":"None","similarity":"Cosine"
+    }}))
+    .unwrap();
+    settings.max_records = 256;
+    settings.max_operations = 512;
+    settings.max_journal_bytes = 16 * 1024 * 1024;
+    settings.schema.push(
+        serde_json::from_value(serde_json::json!({
+            "field":"priority","field_type":"Int","store":false,"facet":true,"index_lexical":false
+        }))
+        .unwrap(),
+    );
+    let p = RecordPartition::create(root, settings).await.unwrap();
+    for level in 0..levels {
+        for row in 0..ANN_ROWS {
+            let id = format!("s{level}-r{row:03}");
+            let time = if level == 0 && row == 1 { 25 } else { 100 };
+            let mut record = dated(&id, &id, time, ExpectedVersion::Absent);
+            if level == 0 && row == 0 {
+                record.temporal.as_mut().unwrap().expire_at_ms = expiry;
+            }
+            let axis = if row < winners {
+                0
+            } else {
+                1 + (row - winners) % (medoids - 1)
+            };
+            let doc = record.document.as_mut().unwrap();
+            doc.insert("vector".into(), serde_json::json!(ann_embedding(axis)));
+            doc.insert("priority".into(), 1.into());
+            p.write(record).await.unwrap();
+        }
+        if level == 0 {
+            assert_eq!(build(&p).await, ANN_ROWS as u64);
+        } else {
+            // A new full projection would rebuild both populations into one
+            // component. Seal the committed suffix through the real cache
+            // rotation so both clustered vector files belong to the view.
+            let mut inner = p.inner.lock().await;
+            let certificate = inner.anchor.as_ref().unwrap().identity().to_owned();
+            inner.replay_context().stage_stable_tail().await.unwrap();
+            assert_eq!(inner.anchor.as_ref().unwrap().identity(), certificate);
+        }
+    }
+    p
+}
+
+async fn run_ann_probe(
+    p: &RecordPartition,
+    mode: AnnMode,
+    facets: Vec<FacetFilter>,
+    limits: (usize, usize, usize),
+) -> Result<
+    (
+        Window,
+        Vec<super::super::query::RetrievalEvidence>,
+        Arc<QueryWork>,
+    ),
+    RecordError,
+> {
+    let deadline = native_deadline();
+    let work = Arc::new(QueryWork::new(limits.0, limits.1, limits.2, deadline));
+    let (window, evidence) = p
+        .probe_metered_vector_cut(
+            25..26,
+            2,
+            Embedding::F32(ann_embedding(0)),
+            mode,
+            facets,
+            deadline,
+            work.clone(),
+        )
+        .await?;
+    Ok((window, evidence, work))
+}
+
+#[tokio::test]
+async fn metered_ann_separates_discovery_probes_members_and_positioned_io() {
+    let temp = tempfile::tempdir().unwrap();
+    let full = (ANN_WORK, ANN_RANGES, ANN_BYTES);
+    let reject_all = FacetFilter::Int {
+        field: "priority".into(),
+        filter: 9..10,
+    };
+    for (name, levels, medoids, winners, reject) in [
+        ("base", 1, 2, 24, false),
+        ("medoids", 1, 4, 24, false),
+        ("levels", 2, 2, 24, false),
+        ("filtered-base", 1, 2, 24, true),
+        ("filtered-wide", 1, 2, 72, true),
+    ] {
+        let p = ann_fixture(&temp.path().join(name), levels, medoids, winners, None).await;
+        let components = p.inner.lock().await.index.components().await;
+        let mut frozen = 0;
+        for component in components {
+            frozen += usize::from(component.read().await.vector_levels > 0);
+        }
+        assert_eq!(frozen, levels, "{name}: frozen vector components");
+        let facets = if reject {
+            vec![reject_all.clone()]
+        } else {
+            vec![]
+        };
+        let (exact_window, exact, exact_work) =
+            run_ann_probe(&p, AnnMode::All, facets.clone(), full)
+                .await
+                .unwrap();
+        let (window, approximate, work) =
+            run_ann_probe(&p, AnnMode::Nprobe(1), facets.clone(), full)
+                .await
+                .unwrap();
+        assert_eq!(window.cut, (levels * ANN_ROWS) as u64);
+        assert_eq!(window.cut, exact_window.cut);
+        assert_eq!(
+            hit_ids(&window),
+            if reject { vec![] } else { vec!["s0-r001"] }
+        );
+        let keys = |hits: &[super::super::query::RetrievalEvidence]| {
+            hits.iter()
+                .map(|hit| (hit.id.clone(), hit.version, hit.score.to_bits()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(keys(&approximate), keys(&exact));
+        assert_eq!(approximate.len(), if reject { 0 } else { 2 });
+        let visits = &work.vector_visits;
+        let exact_visits = &exact_work.vector_visits;
+        assert_eq!(visits.levels.load(Ordering::Relaxed), levels, "{name}");
+        assert_eq!(
+            visits.header_clusters.load(Ordering::Relaxed),
+            medoids * levels,
+            "{name}"
+        );
+        assert_eq!(
+            visits.medoids.load(Ordering::Relaxed),
+            medoids * levels,
+            "{name}"
+        );
+        assert_eq!(visits.clusters.load(Ordering::Relaxed), levels, "{name}");
+        assert_eq!(
+            visits.sealed_members.load(Ordering::Relaxed),
+            winners * levels,
+            "{name}"
+        );
+        assert_eq!(visits.tail_members.load(Ordering::Relaxed), 0, "{name}");
+        assert_eq!(exact_visits.medoids.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            exact_visits.sealed_members.load(Ordering::Relaxed),
+            ANN_ROWS * levels
+        );
+        let vector_io = |work: &QueryWork| {
+            (
+                work.vector_visits.vector_ranges.load(Ordering::Relaxed),
+                work.vector_visits.vector_bytes.load(Ordering::Relaxed),
+            )
+        };
+        let remaining = work.remaining_io();
+        let used = (
+            ANN_WORK - work.remaining(),
+            ANN_RANGES - remaining.0,
+            ANN_BYTES - remaining.1,
+        );
+        assert!(vector_io(&work).0 >= levels && vector_io(&work).1 >= 65_536 * levels);
+        assert!(used.1 >= vector_io(&work).0 && used.2 >= vector_io(&work).1);
+        eprintln!(
+            "{name}: levels={levels} headers={} medoids={} probes={levels} members={} candidates={} ANN work/ranges/bytes={used:?} vector file={:?}, exact vector file={:?}",
+            medoids * levels,
+            medoids * levels,
+            winners * levels,
+            approximate.len(),
+            vector_io(&work),
+            vector_io(&exact_work)
+        );
+        if name == "base" {
+            let ordinary = p
+                .search(
+                    String::new(),
+                    Some(Embedding::F32(ann_embedding(0))),
+                    SearchMode::Vector {
+                        similarity_threshold: None,
+                        ann_mode: AnnMode::Nprobe(1),
+                    },
+                    vec![],
+                    2,
+                )
+                .await
+                .unwrap();
+            let ordinary_keys: Vec<_> = ordinary
+                .hits
+                .iter()
+                .map(|hit| {
+                    (
+                        hit.record.record_id.clone(),
+                        hit.record.version,
+                        hit.score.to_bits(),
+                    )
+                })
+                .collect();
+            assert_eq!(ordinary_keys, keys(&approximate));
+            let before_selection =
+                ANN_WORK - visits.remaining_after_medoids.load(Ordering::Relaxed);
+            let deadline = native_deadline();
+            let cap = Arc::new(QueryWork::new(
+                before_selection,
+                ANN_RANGES,
+                ANN_BYTES,
+                deadline,
+            ));
+            let result = p
+                .probe_metered_vector_cut(
+                    25..26,
+                    2,
+                    Embedding::F32(ann_embedding(0)),
+                    AnnMode::Nprobe(1),
+                    facets.clone(),
+                    deadline,
+                    cap.clone(),
+                )
+                .await;
+            assert!(
+                matches!(result, Err(RecordError::Rejected(reason)) if reason == "shared query work budget exhausted")
+            );
+            assert_eq!(cap.vector_visits.medoids.load(Ordering::Relaxed), medoids);
+            assert_eq!(cap.vector_visits.clusters.load(Ordering::Relaxed), 0);
+            assert_eq!(cap.vector_visits.sealed_members.load(Ordering::Relaxed), 0);
+        }
+        if name == "levels" {
+            for (budget, message) in [
+                (
+                    (used.0 - 1, used.1, used.2),
+                    "shared query work budget exhausted",
+                ),
+                (
+                    (used.0, used.1 - 1, used.2),
+                    "shared query positioned read budget exhausted",
+                ),
+                (
+                    (used.0, used.1, used.2 - 1),
+                    "shared query positioned read budget exhausted",
+                ),
+            ] {
+                assert!(
+                    matches!(run_ann_probe(&p, AnnMode::Nprobe(1), facets.clone(), budget).await,
+                    Err(RecordError::Rejected(reason)) if reason == message),
+                    "short budget {budget:?}"
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn metered_ann_uses_canonical_versions_expiry_and_worker_admission() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("records");
+    let expiry = super::super::unix_time_ms_i64() as u64 + 120_000;
+    let p = ann_fixture(&root, 2, 2, 24, Some(expiry)).await;
+    let (clock, _) = super::super::tests::test_clock(&p).await;
+    let full = (ANN_WORK, ANN_RANGES, ANN_BYTES);
+    let replacement = |operation: &str, version| {
+        let mut row = dated(operation, "s0-r001", 25, ExpectedVersion::Match(version));
+        let doc = row.document.as_mut().unwrap();
+        doc.insert("vector".into(), serde_json::json!(ann_embedding(0)));
+        doc.insert("priority".into(), 1.into());
+        row
+    };
+    p.write(replacement("first-revision", 1)).await.unwrap();
+    let (window, initial, initial_work) = run_ann_probe(&p, AnnMode::Nprobe(1), vec![], full)
+        .await
+        .unwrap();
+    assert_eq!(window.cut, 241);
+    assert_eq!(
+        initial
+            .iter()
+            .map(|h| (h.id.as_str(), h.version))
+            .collect::<Vec<_>>(),
+        [("s0-r000", 1), ("s0-r001", 2)]
+    );
+    assert_eq!(
+        initial_work
+            .vector_visits
+            .tail_members
+            .load(Ordering::Relaxed),
+        1
+    );
+    assert_eq!(initial[0].expiry, Some(expiry));
+
+    let deliver = root.join(".test-event-time-delivery-pause");
+    let delivered = root.join(".test-event-time-delivery-started");
+    for expire in [true, false] {
+        std::fs::write(&deliver, b"pause").unwrap();
+        let reader = p.clone();
+        let pending =
+            tokio::spawn(
+                async move { run_ann_probe(&reader, AnnMode::Nprobe(1), vec![], full).await },
+            );
+        wait_file(&delivered).await;
+        if expire {
+            clock.set(expiry + 1000);
+            assert!(p.get("s0-r000").await.unwrap().is_none());
+            clock.set(expiry - 7000);
+        } else {
+            p.write(replacement("second-revision", 2)).await.unwrap();
+        }
+        std::fs::remove_file(&deliver).unwrap();
+        std::fs::remove_file(&delivered).unwrap();
+        assert!(matches!(pending.await.unwrap(), Err(RecordError::Busy)));
+    }
+    let (window, current, _) = run_ann_probe(&p, AnnMode::Nprobe(1), vec![], full)
+        .await
+        .unwrap();
+    let (_, exact, _) = run_ann_probe(&p, AnnMode::All, vec![], full).await.unwrap();
+    let keys = |hits: &[super::super::query::RetrievalEvidence]| {
+        hits.iter()
+            .map(|h| (h.id.clone(), h.version, h.score.to_bits()))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(keys(&current), keys(&exact));
+    assert_eq!(current[0].id, "s0-r001");
+    assert_eq!(current[0].version, 3);
+    assert_eq!(window.cut, 242);
+    assert!(current.iter().all(|h| h.id != "s0-r000"));
+
+    let permits = p.admission.available_permits();
+    let gate = root.join(".test-event-time-vector-worker-pause");
+    std::fs::write(&gate, b"hold").unwrap();
+    let deadline = NativeDeadline::now() + std::time::Duration::from_secs(3);
+    let work = Arc::new(QueryWork::new(ANN_WORK, ANN_RANGES, ANN_BYTES, deadline));
+    let reader = p.clone();
+    let worker_work = work.clone();
+    let pending = tokio::spawn(async move {
+        reader
+            .probe_metered_vector_cut(
+                25..26,
+                2,
+                Embedding::F32(ann_embedding(0)),
+                AnnMode::Nprobe(1),
+                vec![],
+                deadline,
+                worker_work,
+            )
+            .await
+    });
+    wait_file(&root.join(".test-event-time-vector-worker-pause-entered")).await;
+    let before = work.remaining_io();
+    assert!(matches!(pending.await.unwrap(), Err(RecordError::Busy)));
+    let timed_out = std::time::Instant::now();
+    assert_eq!(p.admission.available_permits(), permits - 1);
+    std::fs::remove_file(gate).unwrap();
+    tokio::time::timeout_at(native_deadline(), async {
+        while p.admission.available_permits() != permits {
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(work.remaining_io(), before);
+    assert_eq!(work.vector_visits.medoids.load(Ordering::Relaxed), 0);
+    eprintln!(
+        "ANN timeout to worker permit release after removing the fixture pause: {:?}",
+        timed_out.elapsed()
+    );
+}
+
+#[tokio::test]
+async fn metered_ann_binds_read_budget_and_refuses_count_only() {
+    let temp = tempfile::tempdir().unwrap();
+    let p = ann_fixture(&temp.path().join("records"), 1, 2, 24, None).await;
+    let handle = p.inner.lock().await.index.capture_query(2).await.unwrap();
+    let runtime = tokio::runtime::Handle::current();
+    let call = |work, ambient: Option<Arc<QueryWork>>, result_type, length| {
+        let index = handle.index.clone();
+        let runtime = runtime.clone();
+        crate::resources::spawn_blocking(move || {
+            let run = || {
+                runtime.block_on(async move {
+                    let mut counts = vec![usize::MAX];
+                    let result = crate::search::search_with_counts(
+                        &index,
+                        String::new(),
+                        Some(Embedding::F32(ann_embedding(0))),
+                        SearchMode::Vector {
+                            similarity_threshold: None,
+                            ann_mode: AnnMode::Nprobe(1),
+                        },
+                        0,
+                        length,
+                        result_type,
+                        true,
+                        vec![],
+                        vec![],
+                        vec![],
+                        &mut counts,
+                        work,
+                    )
+                    .await;
+                    (result, counts)
+                })
+            };
+            match ambient {
+                Some(work) => work.with_reads(run),
+                None => run(),
+            }
+        })
+    };
+    let work = |ranges, bytes| Arc::new(QueryWork::new(ANN_WORK, ranges, bytes, native_deadline()));
+    for (ranges, bytes) in [(0, ANN_BYTES), (ANN_RANGES, 0)] {
+        let denied = work(ranges, bytes);
+        let (result, counts) = call(Some(denied.clone()), None, ResultType::TopkCount, 2)
+            .await
+            .unwrap();
+        assert!(matches!(result, Err(RecordError::Rejected(reason))
+            if reason == "shared query positioned read budget exhausted"));
+        assert_eq!(
+            denied.vector_visits.vector_ranges.load(Ordering::Relaxed),
+            0
+        );
+        assert_eq!(counts, [usize::MAX]);
+    }
+
+    let supplied = work(0, 0);
+    let conflicting = work(ANN_RANGES, ANN_BYTES);
+    let (result, counts) = call(
+        Some(supplied.clone()),
+        Some(conflicting.clone()),
+        ResultType::TopkCount,
+        2,
+    )
+    .await
+    .unwrap();
+    assert!(matches!(result, Err(RecordError::Rejected(reason))
+        if reason == "vector search read budget does not match the supplied query budget"));
+    assert_eq!(supplied.remaining_io(), (0, 0));
+    assert_eq!(conflicting.remaining_io(), (ANN_RANGES, ANN_BYTES));
+    assert_eq!(supplied.remaining(), ANN_WORK);
+    assert_eq!(counts, [usize::MAX]);
+
+    let control = work(ANN_RANGES, ANN_BYTES);
+    let (result, counts) = call(Some(control.clone()), None, ResultType::TopkCount, 2)
+        .await
+        .unwrap();
+    let result = result.unwrap();
+    assert_eq!(result.results.len(), 2);
+    assert!(counts.len() > 1);
+    let remaining = control.remaining_io();
+    let consumed = (ANN_RANGES - remaining.0, ANN_BYTES - remaining.1);
+    assert!(consumed.0 > 0 && consumed.1 > 0);
+    assert_eq!(
+        consumed,
+        (
+            control.vector_visits.vector_ranges.load(Ordering::Relaxed),
+            control.vector_visits.vector_bytes.load(Ordering::Relaxed),
+        )
+    );
+
+    let same = work(ANN_RANGES, ANN_BYTES);
+    let (already_bound, already_bound_counts) = call(
+        Some(same.clone()),
+        Some(same.clone()),
+        ResultType::TopkCount,
+        2,
+    )
+    .await
+    .unwrap();
+    let keys = |scored: &crate::search::ResultObject| {
+        scored
+            .results
+            .iter()
+            .map(|hit| (hit.doc_id, hit.score.to_bits()))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(keys(&already_bound.unwrap()), keys(&result));
+    assert_eq!(same.remaining_io(), remaining);
+    assert_eq!(already_bound_counts, counts);
+
+    let count = work(ANN_RANGES, ANN_BYTES);
+    let (denied, denied_counts) = call(Some(count.clone()), None, ResultType::Count, 0)
+        .await
+        .unwrap();
+    assert!(matches!(denied, Err(RecordError::Rejected(reason))
+        if reason == "metered ANN does not support count-only search"));
+    assert_eq!(count.remaining_io(), (ANN_RANGES, ANN_BYTES));
+    assert_eq!(count.remaining(), ANN_WORK);
+    assert_eq!(denied_counts, [usize::MAX]);
+
+    let (legacy, legacy_counts) = call(None, None, ResultType::Count, 2).await.unwrap();
+    let legacy = legacy.unwrap();
+    assert!(legacy.results.is_empty());
+    assert_eq!(legacy.result_count_total, result.result_count_total);
+    assert_eq!(legacy_counts, counts);
+    eprintln!(
+        "self-bound TopkCount on frozen ANN: {} reads, {} bytes, {} vector candidates",
+        consumed.0,
+        consumed.1,
+        result.results.len()
+    );
+}
 
 async fn build(partition: &RecordPartition) -> u64 {
     partition
