@@ -110,17 +110,19 @@ gh workflow run ci.yml --ref YOUR_CANDIDATE_REF -F full=true
 
 You can also trigger `Full acceptance (manual)` directly. The command executes the selected commit's [.github/workflows/full-acceptance.yml](../.github/workflows/full-acceptance.yml). You can read the configuration without triggering a run. Verify the exact head SHA before relying on results and reassess later commits. Manual runs neither cancel each other nor get cancelled by ordinary PR feedback.
 
-The complete workflow uses `ANYSEEK_TEST_SCALE=full`, native CPU configuration, and source-only caching. It expands to nine jobs.
+The complete workflow uses `ANYSEEK_TEST_SCALE=full`, native CPU configuration, and source-only caching. It expands to 11 jobs.
 
 | Coverage | Job |
 | --- | --- |
 | All default-feature Linux modules and integration tests, normal HTTP/browser, release panic, and OpenAPI | build-and-smoke |
-| Linux/Windows native persistence, fault-injection library/server, no-default server, and default/no-default doctests | persistence-native × 2 |
-| Windows fault-injection integration | persistence-native remainder and four independent windows-lexical cases |
+| Linux fault-injection persistence library/server, targeted no-default-feature checks and default/no-default doctests on both platforms, and Windows native default-feature unit tests | persistence-native × 2 |
+| Windows fault-injection library, binary, and integration tests | windows-fault-tests × 2 (library and binary, remaining integration cases) and four independent windows-lexical cases |
 | Windows normal HTTP and both platforms' fault HTTP, indexer/authorization, storage faults, and recovery | persistence-native |
 | S3 fixture object contracts and six cache-free semantic suites on both platforms | s3-native-acceptance × 2 |
 
-S3 remote-checkpoint unit tests run in the persistence matrix with matching features. The S3 job still owns fixture object contracts and HTTP semantics. all-targets covers default Linux integration, and persistence covers fault library/binary tests. Feature sets are not interchangeable.
+S3 remote-checkpoint unit tests run with matching features in `persistence-native` on Linux and `windows-fault-tests` on Windows. The S3 job covers fixture object contracts and HTTP semantics. `build-and-smoke` uses `--all-targets` for default-feature Linux unit and integration tests. Windows runs the native default-feature unit tests in one filtered invocation. The Windows fault-injection library and binary tests, integration tests, and HTTP crash recovery in `persistence-native` run in parallel.
+
+The no-default-feature step checks the binaries, embedded SDK, tokenizer and OpenAPI contracts, text normalization, snapshot encoding, and request diagnostics.
 
 The fast manifest skips the following two long recovery cases with 2,305 updates. Full all-targets and fault library tests continue to cover them.
 

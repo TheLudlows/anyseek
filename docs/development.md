@@ -110,17 +110,19 @@ gh workflow run ci.yml --ref YOUR_CANDIDATE_REF -F full=true
 
 也可直接触发 `Full acceptance (manual)`。该命令会执行选中提交的 [.github/workflows/full-acceptance.yml](../.github/workflows/full-acceptance.yml)；查看配置不需要触发运行。使用结果前核对精确 head SHA，后续提交须重新验收。手工运行互不取消，也不由普通 PR feedback 取消。
 
-完整工作流使用 `ANYSEEK_TEST_SCALE=full`、原生 CPU 配置与仅源码缓存，共九个展开后的 job：
+完整工作流使用 `ANYSEEK_TEST_SCALE=full`、原生 CPU 配置与仅源码缓存，共 11 个展开后的 job：
 
 | 覆盖范围 | 所属 job |
 | --- | --- |
 | Linux 默认 feature 全部模块与集成测试、正常 HTTP/浏览器、release panic、OpenAPI | build-and-smoke |
-| Linux/Windows 原生持久化、fault-injection 库/服务、no-default 服务与默认/无默认 doctest | persistence-native × 2 |
-| Windows fault-injection 集成 | persistence-native 的剩余集 + windows-lexical 四个独立用例 |
+| Linux 的 fault-injection 持久化库/服务、两平台无默认 feature 的定向检查、默认/无默认 doctest，以及 Windows 默认 feature 的原生库检查 | persistence-native × 2 |
+| Windows fault-injection 库、二进制与集成测试 | windows-fault-tests × 2（库和二进制、其余集成用例）+ windows-lexical 四个独立用例 |
 | Windows 正常 HTTP；两平台 fault HTTP、Indexer/授权、存储故障与恢复 | persistence-native |
 | 两平台 S3 fixture 对象合同与六组无缓存语义 | s3-native-acceptance × 2 |
 
-S3 remote-checkpoint 单测由同 feature 的 persistence 矩阵覆盖，fixture 对象合同与 HTTP 语义仍由 S3 job 负责。Linux 默认集成由 all-targets 负责，fault 库/二进制由 persistence 负责；这不意味着不同 feature 可视为等同。
+S3 remote-checkpoint 单测在 Linux 的 `persistence-native` 和 Windows 的 `windows-fault-tests` 中以同一 feature 配置运行。S3 job 负责 fixture 对象合同与 HTTP 语义。Linux 默认 feature 的库与集成测试由 `build-and-smoke` 的 `--all-targets` 覆盖。Windows 默认 feature 的库测试用一次筛选运行覆盖原生检查。Windows 的故障注入库和二进制测试、集成测试与 `persistence-native` 中的 HTTP 崩溃恢复各自并行。
+
+无默认 feature 的步骤定向检查二进制、嵌入式 SDK、分词器和 OpenAPI、文本规范化、快照数据编码及请求诊断。
 
 快速清单不运行以下两个 2,305 次更新的长恢复用例，完整 all-targets 与 fault 库测试继续覆盖：
 
