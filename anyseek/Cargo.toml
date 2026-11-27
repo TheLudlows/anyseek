@@ -71,6 +71,7 @@ tempfile = "3.27.0"
 
 [dev-dependencies]
 memmap2 = "0.9.11"
+tokio = { version = "1.53.2", features = ["test-util"] }
 tower = { version = "0.5", features = ["util"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
