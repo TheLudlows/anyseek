@@ -479,6 +479,9 @@ impl Records {
     pub(super) fn event_time_base(&self) -> Option<&Arc<state_rows::Base>> {
         self.base.as_ref().filter(|base| base.event_time.is_some())
     }
+    pub(super) fn entity_base(&self) -> Option<&Arc<state_rows::Base>> {
+        self.base.as_ref().filter(|base| base.entity.is_some())
+    }
     // Every changed identity since the sealed base, including tombstones,
     // is present exactly once. The validated manifest replay, WAL recovery
     // and live commits all use the same replacement path.

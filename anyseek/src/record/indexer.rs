@@ -10,7 +10,7 @@ pub(super) static WORKERS: LazyLock<Arc<Semaphore>> = LazyLock::new(|| Arc::new(
 const MAX_DEADLINE: Duration = Duration::from_secs(300);
 
 #[derive(Clone,Copy,Eq,PartialEq)]
-enum JobMode { VectorIndex, Automatic, Compact, EventTime(event_time::BuildLimits) }
+enum JobMode { VectorIndex, Automatic, Compact, EventTime(event_time::BuildLimits), Entity }
 
 fn crash_boundary(point:&str) {
     #[cfg(test)]
@@ -99,6 +99,11 @@ impl RecordPartition {
     pub(crate) fn start_event_time_checkpoint(&self, timeout: Duration) -> Result<IndexJob, RecordError> {
         self.start_owned_index_job(timeout, JobMode::EventTime(event_time::BuildLimits::DEFAULT))
     }
+    /// Explicitly build the optional adjacency sidecar at a local Record cut.
+    /// Available to embedded partition owners with no remote storage or archive.
+    pub async fn build_entity_adjacency(&self, timeout: Duration) -> Result<u64, RecordError> {
+        self.start_owned_index_job(timeout, JobMode::Entity)?.finish().await
+    }
     fn start_owned_index_job(&self,timeout:Duration,mode:JobMode)->Result<IndexJob,RecordError> {
         if timeout.is_zero() || timeout > MAX_DEADLINE {
             return Err(RecordError::Rejected("index build deadline must be within 1ns..=300s".into()));
@@ -141,6 +146,9 @@ impl RecordPartition {
                 if inner.background.is_some() { return Err(RecordError::Busy); }
                 if matches!(mode, JobMode::EventTime(_)) && (inner.remote.is_some() || inner.archive.is_some()) {
                     return Err(RecordError::Rejected("event-time checkpoint requires local-only storage without archive".into()));
+                }
+                if mode == JobMode::Entity && (inner.remote.is_some() || inner.archive.is_some()) {
+                    return Err(RecordError::Rejected("entity adjacency requires local-only storage without archive".into()));
                 }
                 inner.index.drain_indexes().await?;
                 inner.index.join_materializers().await?;
@@ -279,6 +287,7 @@ impl RecordPartition {
                         anchor::Reference::prepare_captured(&root,&config,&snapshot,prior,source.anchor(),source.frames(),native.as_ref()).await?
                     }
                     JobMode::EventTime(limits) => anchor::Reference::prepare_event_time(&root,&config,&snapshot,prior,limits).await?,
+                    JobMode::Entity => anchor::Reference::prepare_entity(&root,&config,&snapshot,prior).await?,
                     _ => anchor::Reference::prepare(&root,&config,&snapshot,prior,None,None,true,None).await?,
                 };
                 drop(source);

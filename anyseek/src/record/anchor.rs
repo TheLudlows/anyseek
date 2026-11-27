@@ -1,7 +1,7 @@
 //! A partition certificate selects this immutable state/index closure. Directory
 //! discovery is never a second head or a reason to adopt an unselected object.
 use super::*;
-use crate::storage::disk_records::event_time;
+use crate::storage::disk_records::{entity, event_time};
 use crate::storage::payload_pool::{Budget,Closure,PoolBuilder,PoolReader};
 use segment::{files,write_json,read_bounded,Inventory};
 
@@ -275,9 +275,19 @@ impl Reference {
     pub(super) async fn prepare_event_time(root: &Path, config: &RecordConfig, state: &State,
         prior: Closure, limits: event_time::BuildLimits) -> Result<Self, RecordError> {
         let encoded = checkpoint_codec::StateEncoding::capture(state).await?;
-        Self::prepare_encoded(root,config,&encoded,prior,None,None,true,None,None,None,Some(limits)).await
+        Self::prepare_encoded(root,config,&encoded,prior,None,None,true,None,None,None,
+            Some(state_rows::ProjectionBuild { event_time: Some(limits), entity: false })).await
     }
-    async fn prepare_encoded(root:&Path,config:&RecordConfig,encoded:&checkpoint_codec::StateEncoding<'_>,prior:Closure,previous:Option<&Reference>,view:Option<&view::RetrievalView>,compact:bool,journal:Option<&mut PartitionJournal>,captured:Option<&[Vec<u8>]>,native:Option<&NativeReuse>,event_time:Option<event_time::BuildLimits>)->Result<Self,RecordError>{
+    pub(super) async fn prepare_entity(root: &Path, config: &RecordConfig, state: &State,
+        prior: Closure) -> Result<Self, RecordError> {
+        let encoded = checkpoint_codec::StateEncoding::capture(state).await?;
+        Self::prepare_encoded(root, config, &encoded, prior, None, None, true, None, None,
+            None, Some(state_rows::ProjectionBuild {
+                event_time: state.records.event_time_base().map(|_| event_time::BuildLimits::DEFAULT),
+                entity: true,
+            })).await
+    }
+    async fn prepare_encoded(root:&Path,config:&RecordConfig,encoded:&checkpoint_codec::StateEncoding<'_>,prior:Closure,previous:Option<&Reference>,view:Option<&view::RetrievalView>,compact:bool,journal:Option<&mut PartitionJournal>,captured:Option<&[Vec<u8>]>,native:Option<&NativeReuse>,projection:Option<state_rows::ProjectionBuild>)->Result<Self,RecordError>{
         let state=encoded.state();
         let _phase=maintenance::Phase::new("anchor_prepare",state.seq);
         let id=format!("{:032x}",rand::random::<u128>());
@@ -351,9 +361,10 @@ impl Reference {
             Some(image)=>{pool.retain_prior_closure();image},
             None=>anchor_image::Image {
                 base_owner:id.clone(),
-                base:state_chunks::Descriptor::write_encoded(&prepared,config,encoded,&mut pool,event_time.map(|limits|(id.as_str(),limits)))?,
+                base:state_chunks::Descriptor::write_encoded(&prepared,config,encoded,&mut pool,projection.map(|kind|(id.as_str(),kind)))?,
                 deltas:Vec::new(),digest:encoded.digest(),
                 event_time:None,
+                entity:None,
             },
         };
         let payloads=pool.finish().map_err(storage)?;
@@ -391,7 +402,7 @@ impl Reference {
         }).await?;
         let (state_blocks,previous_capture,mut metadata_lease)=match image {
             Ok(metadata)=>metadata,
-            Err(payloads)=>return Box::pin(Self::prepare_encoded(root,config,encoded,payloads,previous,view,compact,None,None,native,event_time)).await,
+            Err(payloads)=>return Box::pin(Self::prepare_encoded(root,config,encoded,payloads,previous,view,compact,None,None,native,projection)).await,
         };
         let mut segments=Vec::new();let mut statistics=Vec::new();
         let pending_count=native.map_or_else(||view.map_or(0,|v|v.pending_seals.len()),|capture|capture.pending.len());
@@ -523,6 +534,7 @@ impl Reference {
             return Err(storage("state block closure count or head mismatch"));
         }
         let mut projection = Self::open_event_time(&path, &self.id, &self.files, &manifest.state)?;
+        let mut adjacency = Self::open_entity(&path, &self.id, &self.files, &manifest.state)?;
         for (block,owner) in self.state_blocks.iter().zip(&owners) {
             if block.id!=*owner || block.id==self.id {
                 return Err(storage("state block closure order mismatch"));
@@ -534,8 +546,12 @@ impl Reference {
             if let Some(sealed) = Self::open_event_time(&path, &block.id, &block.files, &manifest.state)? {
                 projection = Some(sealed);
             }
+            if let Some(sealed) = Self::open_entity(&path, &block.id, &block.files, &manifest.state)? {
+                adjacency = Some(sealed);
+            }
         }
         manifest.state.event_time = projection;
+        manifest.state.entity = adjacency;
         validate_config(manifest.state.config())?;
         let mut limits=budget(manifest.state.config())?;limits.bytes=limits.bytes.min(authority_budget);
         // PoolReader retains a separate copy of the closure while Manifest is
@@ -568,6 +584,25 @@ impl Reference {
             return Ok(Some(Arc::new(projection)));
         }
         Ok(None)
+    }
+    fn open_entity(path: &Path, owner: &str, files: &Inventory, state: &anchor_image::Image)
+        -> Result<Option<Arc<entity::Projection>>, RecordError>
+    {
+        let mut members = files.iter().filter(|file| file.path.split('/').next() == Some(entity::DIRECTORY));
+        let Some(descriptor) = members.next() else { return Ok(None); };
+        if descriptor.path != entity::MEMBERS[0]
+            || !entity::MEMBERS[1..].iter().all(|name| members.next().is_some_and(|file| file.path == *name))
+            || members.next().is_some()
+        {
+            return Err(storage("incomplete entity adjacency inventory"));
+        }
+        if state.base_owner != owner {
+            return Err(storage("entity adjacency is outside its selected State base"));
+        }
+        let binding = state.base.record_rows()?.entity_binding(owner)?;
+        let adjacency = entity::Projection::open(path, &binding, descriptor.bytes, descriptor.sha256)
+            .map_err(state_rows::entity_error)?;
+        Ok(Some(Arc::new(adjacency)))
     }
     pub(super) fn selected_owner(&self) -> &str {
         &self.id
