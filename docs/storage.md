@@ -46,6 +46,8 @@
 
 嵌入宿主可为已授权的本地隔离集合调用 `LocalEngine::build_entity_adjacency` 和 `LocalEngine::query_entity_paths`。读取在交付前重新取得同一 Catalog 代次的授权，并在 Record 发布屏障内核对当前基座、切点、组发布和参与结果的 TTL。访问上限覆盖全部范围。发现、规范校验和交付复核共用一个 `QueryWork` 与原截止时间。请求在准入前已到截止时直接返回 `busy`。发布发生变化或到达 TTL 时，整次返回 `busy`。
 
+HTTP 入口复用此读取契约，并在响应头和数据帧交付时复核原代次、发布及 TTL。见[实体一跳 API](../anyseek/src/server/README.md#显式实体一跳)。
+
 ## 权威与数据归属
 
 在 S3 模式下，Record 分区的可变提交协调权威是 SQLite，保存 head/owner epoch、提交和索引水位、不可变引用、有限期幂等协调、对象依赖、pin、退休状态和备份/恢复协调记录。正文、原始向量、索引和 WAL 内容均在对象存储中。分区的本地 Record 日志、payload 和索引是可以重建的缓存；Catalog 与 S3 authority 的 SQLite 元数据是持久权威，不属于缓存。

@@ -40,6 +40,7 @@ mod index_consumers;
 mod publication;
 mod query;
 mod entity_view;
+pub(crate) use entity_view::EntityFrameOutput;
 pub use entity_view::{
     EntityAdjacencyView, EntityCandidate, EntityCandidatePaths, EntityCandidates, EntityDirection,
     EntityMember, EntityNeighborCandidates,

@@ -325,6 +325,14 @@ Service archive/root 清理是明确的离线操作，不提供删除运行根�
 
 `/doc/{record_id}/status` 保留当前技术版本、visible/deleted/expired 状态和 pending_vector_fields。完整边界见[Record 契约](../../../docs/record-model.md)，验证状态见 [路线与验收证据](../../../docs/roadmap.md)。
 
+### 显式实体一跳
+
+服务管理员使用 `POST /api/v1/entity-checkpoints` 为本地无归档集合构建认证实体侧段。使用服务密钥，省略 `X-AnySeek-Tenant`，在 JSON 正文指定 `tenant_id` 和 `collection_id`。成功返回 `indexed_seq`。构建前超时返回 429 `busy`，已准入后超时返回 503 `outcome_unknown`，构建可能继续。集合须由管理员显式启用，常规完整 checkpoint 更换基座后可能需要重建侧段。
+
+可信网关为已授权的隔离集合提供 `X-AnySeek-Tenant`。租户使用 `POST /api/v1/index/{id}/entity/query`，例如 `{"direction":"out","anchor":"app:A","kind":"link","visit_limit":32}`。`out` / `in` 分别沿出边和入边发现一跳。锚点须带命名空间，上限 256 个 UTF-8 字节，类型上限 128 个字节。访问上限为 1 至 256 并受集合候选限制。返回 `visible_seq`、`seeds`、`neighbors`，邻居下有边声明 `declarations` 及成员 `members`，身份均附规范 Record 版本。
+
+请求共享 65,536 个逻辑工作单位、2,048 次定位读和 16 MiB 定位读字节，并使用原截止时间。范围、工作超限或缺少侧段返回 400 `rejected`。原集合代次不可用返回 403 `unauthorized`。交付前发现 TTL 到期、切点或组发布变化、超时时返回 429 `busy`。响应头已发送时，数据帧前仍复核代次、发布和 TTL，失效会终止正文。结果整次交付。
+
 ### 显式事件时间窗口
 
 服务管理员用 `POST /api/v1/event-time-checkpoints` 为本地集合构建投影。使用服务密钥，省略 `X-AnySeek-Tenant`，在 JSON 正文指定 `tenant_id` 和 `collection_id`。网关须限制此操作为管理员。构建受现有后台和分区准入约束，成功返回 `indexed_seq`。本地 SDK 的 `build_event_time_projection(tenant, collection)` 由嵌入宿主授权。此构建启用当前认证基座，增量 checkpoint 可沿用该基座，普通完整 checkpoint（包括常规 PATCH）会选用一个不含投影的新基座。重开后可通过同一管理入口再次构建。远端和归档集合不支持此选项。
