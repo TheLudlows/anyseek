@@ -22,14 +22,13 @@ const MAX_BODY_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_FACETS: usize = 32;
 const MAX_FACET_TERMS: usize = 128;
 
-/// Index publications that must share the time window's canonical cut.
-/// The native time consumer only proves their readiness at that cut.
+/// Index publications required by a consumer of this Record view. Native
+/// lexical membership and facets currently use the vector/metadata component.
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum IndexChannels {
+pub(crate) enum IndexDependencies {
     None,
-    Lexical,
-    Vector,
-    LexicalAndVector,
+    VectorMetadata,
+    LexicalWithVectorMetadata,
 }
 
 pub(crate) struct Window {
@@ -82,7 +81,10 @@ struct View {
     cut: u64,
     evaluation: u64,
     anchor: String,
+    group_revision: u64,
     base: Arc<state_rows::Base>,
+    dependencies: IndexDependencies,
+    retrieval: Option<query::Handle>,
     // Stable ID order from Records, used even for tombstones or moves outside
     // the requested window. Owning only the changed rows bounds the pin.
     suffix: Vec<state_memory::Shared<Record>>,
@@ -117,32 +119,27 @@ impl EventTimeError {
     }
 }
 
-fn common_cut(
+fn published_cut(
     partition: &RecordPartition,
     inner: &Inner,
-    channels: IndexChannels,
+    dependencies: IndexDependencies,
 ) -> Result<u64, RecordError> {
     if !inner.healthy {
         return Err(RecordError::RecoveryRequired);
     }
     let cut = inner.state.seq;
-    if channels == IndexChannels::None {
+    if dependencies == IndexDependencies::None {
         return Ok(cut);
     }
     // Index publication failures still fence the shared index pipeline.
     if partition.indexes.error().is_some() {
         return Err(RecordError::RecoveryRequired);
     }
-    // The overlay cannot rewind. Each requested index must independently
-    // prove publication at the canonical cut we can pin.
-    if (matches!(
-        channels,
-        IndexChannels::Lexical | IndexChannels::LexicalAndVector
-    ) && partition.indexes.lexical.load(Ordering::Acquire) != cut)
-        || (matches!(
-            channels,
-            IndexChannels::Vector | IndexChannels::LexicalAndVector
-        ) && partition.indexes.vector.load(Ordering::Acquire) != cut)
+    // Even lexical-only retrieval uses vector/metadata membership. A pure
+    // vector consumer has no reciprocal dependency on the lexical cursor.
+    if partition.indexes.vector.load(Ordering::Acquire) != cut
+        || (dependencies == IndexDependencies::LexicalWithVectorMetadata
+            && partition.indexes.lexical.load(Ordering::Acquire) != cut)
     {
         return Err(RecordError::Busy);
     }
@@ -181,7 +178,7 @@ impl RecordPartition {
             fields: Some(fields),
         };
         let window = self
-            .read_window(window, limit, IndexChannels::None, deadline, selection)
+            .read_window(window, limit, IndexDependencies::None, deadline, selection)
             .await?;
         Ok(EventTimeResult {
             visible_seq: window.cut,
@@ -205,22 +202,92 @@ impl RecordPartition {
         &self,
         window: Range<i64>,
         limit: usize,
-        channels: IndexChannels,
+        dependencies: IndexDependencies,
         deadline: Deadline,
     ) -> Result<Window, RecordError> {
-        self.read_window(window, limit, channels, deadline, Selection::default())
+        self.read_window(window, limit, dependencies, deadline, Selection::default())
             .await
             .map_err(EventTimeError::record_error)
+    }
+
+    // Exercise vector scoring on exactly the handles shared with the time
+    // window. The probe returns identities only, without a mixed API.
+    #[cfg(test)]
+    pub(crate) async fn probe_event_time_vector_cut(
+        &self,
+        window: Range<i64>,
+        limit: usize,
+        deadline: Deadline,
+    ) -> Result<(Window, Vec<String>), RecordError> {
+        let (view, output) = self
+            .capture_and_read(
+                window,
+                limit,
+                IndexDependencies::VectorMetadata,
+                deadline,
+                Selection::default(),
+            )
+            .await
+            .map_err(EventTimeError::record_error)?;
+        let retrieval = view.retrieval.as_ref().unwrap();
+        let result = timeout_at(
+            deadline,
+            lexical::runtime_query::search(
+                &retrieval.index,
+                String::new(),
+                Some(Embedding::F32(vec![1.0, 0.0])),
+                SearchMode::Vector {
+                    similarity_threshold: None,
+                    ann_mode: crate::vector_similarity::AnnMode::All,
+                },
+                QueryType::Union,
+                0,
+                limit,
+                ResultType::TopkCount,
+                vec![],
+                vec![temporal::expiry_filter(view.evaluation)],
+                vec![],
+                lexical::Cut {
+                    sequence: view.cut,
+                    evaluation_time_ms: view.evaluation,
+                },
+            ),
+        )
+        .await
+        .map_err(|_| RecordError::Busy)??;
+        let mut ids = timeout_at(deadline, retrieval.candidate_ids(result.results))
+            .await
+            .map_err(|_| RecordError::Busy)??;
+        ids.sort_unstable();
+        let window = self
+            .deliver_window(view, output, deadline)
+            .await
+            .map_err(EventTimeError::record_error)?;
+        Ok((window, ids))
     }
 
     async fn read_window(
         &self,
         window: Range<i64>,
         limit: usize,
-        channels: IndexChannels,
+        dependencies: IndexDependencies,
         deadline: Deadline,
         selection: Selection,
     ) -> Result<Window, EventTimeError> {
+        let (view, output) = self
+            .capture_and_read(window, limit, dependencies, deadline, selection)
+            .await?;
+        self.deliver_window(view, output, deadline).await
+    }
+
+    async fn capture_and_read(
+        &self,
+        window: Range<i64>,
+        limit: usize,
+        dependencies: IndexDependencies,
+        deadline: Deadline,
+        selection: Selection,
+    ) -> Result<(View, Window), EventTimeError> {
         if window.is_empty() || limit == 0 || limit > MAX_RESULTS {
             return Err(
                 RecordError::Rejected("invalid event-time window or result limit".into()).into(),
@@ -241,38 +308,44 @@ impl RecordPartition {
             )
             .map_err(RecordError::Rejected)?;
         }
-        let view = View::capture(self, &mut inner, admission, limit, channels)?;
+        let view = timeout_at(
+            deadline,
+            View::capture(self, &mut inner, admission, limit, dependencies),
+        )
+        .await
+        .map_err(|_| RecordError::Busy)??;
         drop(inner);
 
         let task = crate::resources::spawn_blocking(move || {
             let output = view.read(window, limit, deadline, &selection)?;
             Ok::<_, EventTimeError>((view, output))
         });
-        let (view, output) = timeout_at(deadline, task)
+        timeout_at(deadline, task)
             .await
             .map_err(|_| RecordError::Busy)?
-            .map_err(storage)??;
+            .map_err(storage)?
+    }
+
+    async fn deliver_window(
+        &self,
+        view: View,
+        output: Window,
+        deadline: Deadline,
+    ) -> Result<Window, EventTimeError> {
         #[cfg(test)]
         pause_delivery(&self.inner, deadline).await;
         let mut inner = timeout_at(deadline, self.inner.lock())
             .await
             .map_err(|_| RecordError::Busy)?;
         let evaluation = inner.observe_time()?;
-        if Deadline::now() >= deadline
-            || common_cut(self, &inner, channels)? != view.cut
-            || inner
-                .anchor
-                .as_ref()
-                .is_none_or(|anchor| anchor.selected_owner() != view.anchor)
-            || !inner
-                .state
-                .records
-                .event_time_base()
-                .is_some_and(|base| Arc::ptr_eq(base, &view.base))
-            || output
-                .hits
-                .iter()
-                .any(|hit| hit.expires_at_ms.is_some_and(|expiry| expiry <= evaluation))
+        if Deadline::now() >= deadline {
+            return Err(RecordError::Busy.into());
+        }
+        view.recheck(self, &inner)?;
+        if output
+            .hits
+            .iter()
+            .any(|hit| hit.expires_at_ms.is_some_and(|expiry| expiry <= evaluation))
         {
             return Err(RecordError::Busy.into());
         }
@@ -281,15 +354,15 @@ impl RecordPartition {
 }
 
 impl View {
-    fn capture(
+    async fn capture(
         partition: &RecordPartition,
         inner: &mut Inner,
         admission: OwnedSemaphorePermit,
         limit: usize,
-        channels: IndexChannels,
+        dependencies: IndexDependencies,
     ) -> Result<Self, EventTimeError> {
         let evaluation = inner.observe_time()?;
-        let cut = common_cut(partition, inner, channels)?;
+        let cut = published_cut(partition, inner, dependencies)?;
         let records = &inner.state.records;
         let base = records
             .event_time_base()
@@ -351,18 +424,54 @@ impl View {
             .map(|scope| scope.bytes((buffers + overlay_bytes) as u64))
             .transpose()
             .map_err(|_| RecordError::Busy)?;
-        Ok(Self {
+        // Capture the ordered component handles under the same Record guard
+        // as the authenticated base and suffix. Their existing owners pin
+        // the files even if a concurrent compaction retires the view.
+        let retrieval = if dependencies == IndexDependencies::None {
+            None
+        } else {
+            Some(inner.index.capture_query(limit).await?)
+        };
+        let view = Self {
             cut,
             evaluation,
             anchor: anchor.selected_owner().to_owned(),
+            group_revision: inner.state.group_publication_revision(),
             base: base.clone(),
+            dependencies,
+            retrieval,
             suffix: records.recent_records().cloned().collect(),
             max_base_visits: MAX_BASE_VISITS.min(inner.config.max_candidates),
             barrier: partition.output_permit()?,
             _memory: memory,
             _scope: scope,
             _admission: admission,
-        })
+        };
+        view.recheck(partition, inner)?;
+        Ok(view)
+    }
+
+    fn recheck(&self, partition: &RecordPartition, inner: &Inner) -> Result<(), RecordError> {
+        if published_cut(partition, inner, self.dependencies)? != self.cut
+            || inner.state.group_publication_revision() != self.group_revision
+            || inner
+                .anchor
+                .as_ref()
+                .is_none_or(|anchor| anchor.selected_owner() != self.anchor)
+            || !inner
+                .state
+                .records
+                .event_time_base()
+                .is_some_and(|base| Arc::ptr_eq(base, &self.base))
+        {
+            return Err(RecordError::Busy);
+        }
+        if let Some(retrieval) = &self.retrieval
+            && !inner.index.matches_query_topology(retrieval)
+        {
+            return Err(RecordError::Busy);
+        }
+        Ok(())
     }
 
     fn read(
