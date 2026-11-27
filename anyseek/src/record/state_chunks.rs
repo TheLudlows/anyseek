@@ -512,7 +512,7 @@ impl Descriptor {
         let mut residency=reserve_memory(0).map_err(storage)?;
         self.visit_pieces(root,pool,authority,Some(&mut residency),|wire,ordinal,_| {
             let before=state.as_ref().map(State::value_bytes).transpose()?.unwrap_or(0);
-            apply_piece(&mut state,wire,ordinal,&self.config)?;
+            apply_piece(&mut state,wire,ordinal)?;
             let after=state.as_ref().map(State::value_bytes).transpose()?.unwrap_or(0);
             after.checked_sub(before).and_then(|n|(n as u64).checked_mul(32)).ok_or_else(||invalid("decoded value ownership overflow"))
         })?;
@@ -537,7 +537,6 @@ fn apply_piece(
     state: &mut Option<State>,
     mut wire: Value,
     ordinal: u64,
-    config: &RecordConfig,
 ) -> Result<(), RecordError> {
     let object = wire
         .as_object_mut()
@@ -570,18 +569,6 @@ fn apply_piece(
         return Err(invalid("invalid state piece fields"));
     }
     let (kind, value) = object.iter_mut().next().unwrap();
-    let exceeded = match kind.as_str() {
-        "records" => state.records.len() >= config.max_records,
-        "operations" => state.operations.len() >= config.max_operations,
-        "expirations" => state.expirations.len() >= config.max_operations,
-        "group_heads" => state.groups.as_ref().is_none_or(|g|g.heads.len() >= config.max_records),
-        "group_owners" => state.groups.as_ref().is_none_or(|g|g.owners.len() >= config.max_records),
-        "group_receipts" => state.groups.as_ref().is_none_or(|g|g.receipts.len().saturating_add(state.operations.len()) >= config.max_operations),
-        _ => false,
-    };
-    if exceeded {
-        return Err(invalid("state entry count exceeds configured capacity"));
-    }
     macro_rules! one {
         ($ty:ty) => {{
             let mut values: Vec<$ty> = snapshot_json::from_value(value.take()).map_err(storage)?;
@@ -605,7 +592,6 @@ fn apply_piece(
             }
         }
         "operations" => {
-            if state.groups.as_ref().is_some_and(|g|g.receipts.len().saturating_add(state.operations.len()) >= config.max_operations) { return Err(invalid("combined operation budget exceeded")); }
             state.operations.push(one!(Applied))?;
         },
         "group_heads" => {
@@ -642,7 +628,6 @@ mod tests {
                 self.0.push(snapshot_json::to_value(raw).map_err(storage)?);Ok(())
             }
         }
-        let config=super::super::tests::config();
         let groups=group_plan::Groups {
             heads:BTreeMap::from([("g".into(),group_plan::Head {version:2,members:std::collections::BTreeSet::from(["r".into()])})]),
             owners:BTreeMap::from([("r".into(),"g".into())]),
@@ -657,14 +642,15 @@ mod tests {
         assert!(pieces.0[0]["header"]["groups"]["heads"].as_object().unwrap().is_empty());
         assert!(pieces.0[0]["header"]["groups"]["receipts"].as_array().unwrap().is_empty());
         let mut recovered=None;
-        for (i,piece) in pieces.0.iter().cloned().enumerate() {apply_piece(&mut recovered,piece,i as u64,&config).unwrap();}
+        for (i,piece) in pieces.0.iter().cloned().enumerate() {apply_piece(&mut recovered,piece,i as u64).unwrap();}
         let recovered=recovered.unwrap();
         assert_eq!(snapshot_json::to_value(&state).unwrap(),snapshot_json::to_value(&recovered).unwrap());
         assert_eq!(state_proof::length(&state).unwrap(),checkpoint_codec::json_length(&state).unwrap());
         let mut duplicate=Some(recovered);
-        assert!(apply_piece(&mut duplicate,pieces.0[1].clone(),5,&config).is_err());
+        assert!(apply_piece(&mut duplicate,pieces.0[1].clone(),5).is_err());
         let root=tempfile::tempdir().unwrap();
         let chunks=root.path().join("chunks");
+        let config=super::super::tests::config();
         let (mut descriptor,pool)=prepare(&chunks,&config,&state);
         assert_eq!(descriptor.format,8);
         descriptor.format=6;

@@ -38,6 +38,10 @@ static MEMORY_LIMITS: LazyLock<Result<MemoryLimits, String>> = LazyLock::new(|| 
 pub(crate) fn validate_configuration() -> Result<(), String> { MEMORY_LIMITS.as_ref().map(|_| ()).map_err(Clone::clone) }
 fn memory_limits() -> io::Result<MemoryLimits> { MEMORY_LIMITS.as_ref().copied().map_err(|e| io::Error::other(e.clone())) }
 
+pub(crate) fn single_memory_limit() -> io::Result<u64> {
+    Ok(memory_limits()?.single)
+}
+
 fn exceeded() -> io::Error {
     io::Error::other("record build resource budget exceeded")
 }

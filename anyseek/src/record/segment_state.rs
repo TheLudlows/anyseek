@@ -36,21 +36,12 @@ fn encoded_length(value:&Value,limit:u64)->Result<u64,RecordError> {
     let mut counter=Counter{bytes:0,limit};
     snapshot_json::to_writer(&mut counter,value).map_err(storage)?;Ok(counter.bytes)
 }
-// A full State has at most max_records current bodies. Each retained
-// operation has either a document or a vector patch.
-#[cfg(test)]
-fn payload_limit(config:&RecordConfig)->Result<usize,RecordError>{
-    config.max_records.checked_add(config.max_operations).ok_or_else(||storage("payload budget overflow"))
-}
 #[cfg(test)]
 fn hydrate(config:RecordConfig,mut wire:Value,max_bytes:u64,mut read:impl FnMut(&Value)->Result<Vec<u8>,RecordError>)->Result<(RecordConfig,State),RecordError>{
     validate_config(&config)?;
     let max_bytes=max_bytes.min(config.max_journal_bytes);
-    let max_payloads=payload_limit(&config)?;
     let mut expanded=encoded_length(&wire,max_bytes)?;
-    let mut references=0usize;
     visit(&mut wire,|value|{
-        references=references.checked_add(1).filter(|n|*n<=max_payloads).ok_or_else(||storage("payload reference budget exceeded"))?;
         let object=value.as_object().ok_or_else(||storage("invalid payload reference"))?;
         if object.len()!=1{return Err(storage("invalid payload reference fields"));}
         let bytes=read(object.get("$payload").ok_or_else(||storage("missing payload reference"))?)?;
@@ -99,23 +90,19 @@ mod tests {
     use crate::storage::payload_pool::{Budget, Closure, PoolBuilder, PoolReader};
 
     #[test]
-    fn full_state_payload_bound_counts_records_and_vector_patches() {
-        let mut config=super::super::tests::config();
-        config.max_records=2;config.max_operations=2;
+    fn state_payload_visitor_includes_records_and_vector_patches() {
         let mut state=snapshot_json::json!({
             "records":{"a":{"document":{}},"b":{"document":{"body":"current"}}},
             "operations":[{"request":{"document":{"body":"write"}}},
                 {"request":{"document":null,"vector_patch":{"vector":[1,2]}}}]
         });
         let mut count=0;visit(&mut state,|_|{count+=1;Ok(())}).unwrap();
-        assert_eq!(count,payload_limit(&config).unwrap());
-        config.max_records=usize::MAX;
-        assert!(payload_limit(&config).is_err());
+        assert_eq!(count,4);
     }
 
     fn prepare(root: &Path, config: &RecordConfig, state: &State) -> (ReferencedState, PoolReader, Closure, PathBuf) {
         let directory=root.join("private-payload");std::fs::create_dir(&directory).unwrap();
-        let budget=Budget {bytes:config.max_journal_bytes,objects:4,payloads:payload_limit(config).unwrap(),body_bytes:config.max_record_bytes};
+        let budget=Budget {bytes:config.max_journal_bytes,objects:4,payloads:usize::try_from(config.max_journal_bytes/2).unwrap(),body_bytes:config.max_record_bytes};
         let id=format!("{:032x}",rand::random::<u128>());
         let mut writer=PoolBuilder::begin(&directory,Closure::default(),budget,id.clone()).unwrap();
         let prepared=ReferencedState::write(config,state,&mut writer).unwrap();

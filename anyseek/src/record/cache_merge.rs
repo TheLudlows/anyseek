@@ -40,10 +40,6 @@ impl Snapshot {
     }
 }
 
-pub(super) fn address_limit(config:&RecordConfig)->Result<usize,RecordError> {
-    config.max_records.checked_add(config.max_operations).and_then(|n|n.checked_mul(64))
-        .ok_or_else(||storage("cache merge address budget overflow"))
-}
 pub(super) async fn build_candidate(root:&Path,config:&RecordConfig,snapshot:&Snapshot)
     ->Result<VectorIndexArc,RecordError> {
     let build_limit=MAX_BUILD_BYTES;
@@ -71,12 +67,9 @@ pub(super) async fn rebuild_recovery_view(root:&Path,config:&RecordConfig,state:
         .ok_or_else(||storage("recovery cache inventory overflow")))?;
     let inventory=crate::storage::build_budget::reserve_memory(inventory_bytes).map_err(storage)?;
     let inventory_scope=crate::resources::Scope::current().map(|scope|scope.bytes(inventory_bytes)).transpose().map_err(storage)?;
-    let visible=visibility::visible_records(&state.records)?;
-    let records=state.records.values().filter(|record|visible.get(&record.record_id)==Some(&true)
-        ).collect::<Vec<_>>();
+    let records=state.records.values().filter(|record|record.document.is_some()).collect::<Vec<_>>();
     let mut indexes=Vec::new();
     for chunk in records.chunks(capacity::PACKAGE_RECORDS) {
-        if indexes.len()>=capacity::segments(config){return Err(storage("recovery component population exceeded"));}
         let path=root.join(format!("cache-{:032x}",rand::random::<u128>()));
         let (index,_)=build_records_at(root,&path,config,state.seq,chunk.to_vec()).await?;
         index.commit().await.map_err(storage)?;
@@ -90,6 +83,7 @@ pub(super) async fn rebuild_recovery_view(root:&Path,config:&RecordConfig,state:
         index.read().await.segments[0].lexical.seal().await?;indexes.push(index);
     }
     let count=indexes.len();let mut segments=Vec::new();
+    let address_budget=capacity::address_slots()?;
     let mut ordinals=Vec::new();let mut locations=BTreeMap::new();
     for (slot,index) in indexes.iter().enumerate() {
         let index=index.read().await;
@@ -98,7 +92,9 @@ pub(super) async fn rebuild_recovery_view(root:&Path,config:&RecordConfig,state:
             let active=shard.active.as_mut().ok_or_else(||storage("recovery statistics missing"))?;
             active.retired.get_or_insert_with(Default::default);
             for (local,key) in active.keys.iter().enumerate() {
-                let address=local.checked_mul(count).and_then(|n|n.checked_add(slot)).ok_or_else(||storage("recovery address overflow"))?;
+                let address=local.checked_mul(count).and_then(|n|n.checked_add(slot))
+                    .filter(|address|*address<address_budget)
+                    .ok_or_else(||storage("recovery address budget exceeded"))?;
                 if ordinals.len()<=address{ordinals.resize(address+1,String::new());}
                 ordinals[address]=key.clone();locations.insert(key.clone(),address);
             }
@@ -192,7 +188,7 @@ impl RecordPartition {
                     if started.elapsed()>=timeout || inner.background.as_ref().is_none_or(|tail|tail.id!=id)
                         || serde_json::to_vec(&inner.anchor).map_err(storage)?!=base {return Err(RecordError::Busy);}
                     let Inner{index,ordinals,locations,..}=&mut *inner;
-                    if !index.install_merge(&sources,candidate,ordinals,locations,address_limit(&config)?).await? {
+                    if !index.install_merge(&sources,candidate,ordinals,locations,capacity::address_slots()?).await? {
                         return Err(RecordError::Busy);
                     }
                     // Never advance consumers: mutable-tail work may still lag.
@@ -212,7 +208,7 @@ impl RecordPartition {
                 inner.output.write().map_err(|_|RecordError::RecoveryRequired)?.fenced=true;
             }
             if result.is_err() && inner.maintenance_requested.is_none()
-                && inner.index.components().await.len()>=capacity::segments(&inner.config)+1 {
+                && inner.index.components().await.len()>=capacity::package_target(inner.state.records.len())+1 {
                 inner.maintenance_requested=Some("cache_merge_retry_checkpoint");
             }
             if inner.healthy {
@@ -256,7 +252,7 @@ mod tests {
         let mut inner=partition.inner.lock().await;
         let root=inner.journal.root().to_owned();
         let (tail,_)=build_at(&root,&root.join(format!("cache-{:032x}",rand::random::<u128>())),&inner.config,&State::default()).await.unwrap();
-        let budget=view::RotationBudget{max_segments:16,max_address_slots:address_limit(&inner.config).unwrap()};
+        let budget=view::RotationBudget{max_segments:16,max_address_slots:capacity::address_slots().unwrap()};
         let Inner{index,ordinals,locations,..}=&mut *inner;
         index.seal_cache_into_successor(tail,ordinals,locations,budget).await.unwrap();
     }
@@ -341,7 +337,7 @@ mod tests {
             crate::record::tests::commit_after_backpressure(&p,batch).await;p.inner.lock().await.index.drain_indexes().await.unwrap();
         }
         crate::record::tests::wait_maintenance_idle(&p).await;
-        {let inner=p.inner.lock().await;assert_eq!(inner.anchor.as_ref().unwrap().identity(),certificate,"cache merges must not replace the checkpoint");assert!(inner.index.components().await.len()<=capacity::segments(&settings)+1);}
+        {let inner=p.inner.lock().await;assert_eq!(inner.anchor.as_ref().unwrap().identity(),certificate,"cache merges must not replace the checkpoint");assert!(inner.index.components().await.len()<=capacity::package_target(inner.state.records.len())+1);}
         log::info!("record_maintenance marker=long_suffix_before_drop");
         p.finish_service_shutdown().await.unwrap();
         drop(p);
@@ -368,7 +364,7 @@ mod tests {
         std::fs::write(root.join(".test-cache-merge-build-budget"),b"512").unwrap();
         let mut padded=0;
         for _ in 0..3 {
-            while p.inner.lock().await.index.components().await.len()<capacity::segments(&settings)+1 {
+            while p.inner.lock().await.index.components().await.len()<capacity::package_target(64)+1 {
                 let id=format!("pad-{padded}");padded+=1;
                 p.write(write(&id,&id,&"alpha ".repeat(1000),ExpectedVersion::Absent)).await.unwrap();rotate(&p).await;
             }

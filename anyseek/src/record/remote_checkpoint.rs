@@ -133,7 +133,7 @@ impl RemotePersistence {
                 if index.partition_id!=partition_id || index.checkpoint_seq!=head.log_base_seq
                     || index.indexed_seq!=head.indexed_seq || index.indexed_seq<index.checkpoint_seq
                     || index.indexed_seq>head.committed_seq || index.packages.is_empty()
-                    || index.packages.len()>capacity::MAX_SEGMENTS || index.statistics.len()!=index.packages.len()
+                    || index.statistics.len()!=index.packages.len()
                     || index.files.len()>10000 {return Err(storage("invalid index-only identity or watermarks"));}
                 let base=store.get_verified(&index.checkpoint).await.map_err(remote_read_error)?;
                 leases.push(charge(base.len())?);

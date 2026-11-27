@@ -1,55 +1,122 @@
-//! Finite population bounds; these do not grant memory or candidate admission.
-pub(super) const MAX_RECORDS: usize = 100_000;
+//! Physical package sizing and retrieval address budgets.
 pub(super) const PACKAGE_RECORDS: usize = 8192;
-pub(super) const MAX_SEGMENTS: usize = 16;
-pub(super) fn segments(config: &super::RecordConfig) -> usize {
-    if config.max_records <= 10_000 { 8 } else { MAX_SEGMENTS }
+
+/// Compact at the expected full-build package count plus room for small tails.
+pub(super) fn package_target(identities: usize) -> usize {
+    (identities.div_ceil(PACKAGE_RECORDS) + 2).max(8)
 }
+
+/// Interleaved addresses can leave gaps, so bound the dense slot array by bytes.
+pub(super) fn address_slots() -> Result<usize, super::RecordError> {
+    let slot_bytes = size_of::<String>();
+    let bytes = crate::storage::build_budget::single_memory_limit().map_err(super::storage)?;
+    let slots = bytes / slot_bytes as u64;
+    Ok(usize::try_from(slots).unwrap_or(usize::MAX).min(usize::MAX / slot_bytes))
+}
+
+#[cfg(test)]
+#[path = "../../tests/common/scale.rs"]
+mod scale;
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::{Applied, ExpectedVersion, RecordConfig, WriteReceipt};
+
+    fn seed_record(seq: u64) -> Applied {
+        let mut request = super::super::tests::write(
+            &format!("op-{seq}"), &format!("id-{seq:06}"), "alpha", ExpectedVersion::Absent,
+        );
+        request.document.as_mut().unwrap().retain(|field, _| field == "body");
+        let receipt = WriteReceipt { seq, version: 1, record_id: request.record_id.clone() };
+        Applied { observed_epoch: request.operation_id.epoch, observed_time_ms: 0, request, receipt }
+    }
+
+    fn lexical_config() -> RecordConfig {
+        let mut config = super::super::tests::config();
+        config.max_journal_bytes = 256 * 1024 * 1024;
+        config.max_candidates = 10_000;
+        config.index.inference = crate::vector::Inference::None;
+        config.schema.retain(|field| field.index_lexical);
+        config.embedding_space_id = None;
+        config
+    }
+
     #[test]
-    fn finite_population_does_not_raise_candidate_or_memory_limits() {
-        let mut config=super::super::tests::config();
-        let candidates=config.max_candidates;
-        config.max_records=MAX_RECORDS;
-        super::super::validate_config(&config).unwrap();
-        assert_eq!(config.max_candidates,candidates);
-        assert!(MAX_RECORDS.div_ceil(PACKAGE_RECORDS)<segments(&config));
-        config.max_records=MAX_RECORDS+1;
-        assert!(super::super::validate_config(&config).is_err());
+    fn package_target_grows_with_the_collection() {
+        assert_eq!(package_target(10_000), 8);
+        let identities = 200_000usize;
+        assert!(package_target(identities) > identities.div_ceil(PACKAGE_RECORDS));
     }
 
     #[tokio::test]
-    async fn population_above_one_package_recovers_all_identities_and_receipts() {
+    async fn collection_writes_queries_and_recovers_above_legacy_count_limits() {
         use super::super::*;
-        let root=tempfile::tempdir().unwrap();let path=root.path().join("partition");
-        let mut config=tests::config();config.max_records=MAX_RECORDS;config.max_operations=MAX_RECORDS;
-        config.max_journal_bytes=256*1024*1024;config.max_candidates=10_000;
-        config.index.inference=crate::vector::Inference::None;config.schema.retain(|f|f.index_lexical);
-        config.embedding_space_id=None;
-        let partition=RecordPartition::create(&path,config.clone()).await.unwrap();
-        let mut state=partition.inner.lock().await.state.try_clone().unwrap();
-        state.admit_bytes(10_001*2048).unwrap();
-        let mut last=None;
-        // Construct canonical Applied fixtures, not pretend this is HTTP load.
-        // Real load is exercised separately by the bounded capacity harness.
-        for i in 0..10_001 {
-            let request=tests::write(&format!("op-{i}"),&format!("id-{i:05}"),if i==10_000{"alpha terminal"}else{"alpha"},ExpectedVersion::Absent);
-            let receipt=WriteReceipt{seq:i+1,version:1,record_id:request.record_id.clone()};
-            let applied=Applied{observed_epoch:request.operation_id.epoch,observed_time_ms:0,request,receipt};
-            apply(&mut state,&applied).unwrap();last=Some(applied);
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("partition");
+        let legacy_limit = scale::choose(10_000, 100_000);
+        let mut config = lexical_config();
+        config.max_records = legacy_limit;
+        config.max_operations = legacy_limit;
+        let partition = RecordPartition::create(&path, config.clone()).await.unwrap();
+        let mut state = partition.inner.lock().await.state.try_clone().unwrap();
+        // Seed canonical state without an fsync for every fixture row. The next
+        // write uses the regular write path, and reopening decodes the checkpoint and WAL.
+        let seed_count = legacy_limit as u64 + 1;
+        for seq in 1..=seed_count {
+            apply(&mut state, &seed_record(seq)).unwrap();
         }
-        let last=last.unwrap();
-        partition.inner.lock().await.publish_anchor_state(state,false).await.unwrap();
-        assert_eq!(partition.inner.lock().await.index.local_statistics().await.unwrap().len(),3);
-        let mut next=Some(partition);
-        for _ in 0..2 {
-            let p=match next.take(){Some(p)=>p,None=>RecordPartition::open(&path,config.max_journal_bytes).await.unwrap()};
-            let result=p.query(RecordQuery{text:"alpha".into(),vector:None,mode:SearchMode::Lexical,query_type:QueryType::Intersection,offset:0,length:10,result_type:ResultType::TopkCount,fields:vec![],filters:vec![],sort:vec![],temporal:None}).await.unwrap();
-            assert_eq!(result.count_total,10_001);assert_eq!(result.hits.len(),10);
-            assert_eq!(p.search("terminal".into(),None,SearchMode::Lexical,vec![],10).await.unwrap().hits[0].record.record_id,"id-10000");
-            assert_eq!(p.write(last.request.clone()).await.unwrap(),last.receipt);
+        state.admit_bytes(state_proof::length(&state).unwrap()).unwrap();
+        partition.inner.lock().await.publish_anchor_state(state, false).await.unwrap();
+        let last = tests::write("last", "last", "alpha terminal", ExpectedVersion::Absent);
+        let receipt = partition.write(last.clone()).await.unwrap();
+        assert_eq!(receipt.seq, seed_count + 1);
+
+        let mut current = partition;
+        for reopen in [false, true] {
+            if reopen {
+                current.finish_service_shutdown().await.unwrap();
+                drop(current);
+                current = RecordPartition::open(&path, config.max_journal_bytes).await.unwrap();
+            }
+            let result = current.query(RecordQuery {
+                text: "alpha".into(), vector: None, mode: SearchMode::Lexical,
+                query_type: QueryType::Intersection, offset: 0, length: 10,
+                result_type: ResultType::TopkCount, fields: vec![], filters: vec![],
+                sort: vec![], temporal: None,
+            }).await.unwrap();
+            assert_eq!(result.count_total as u64, seed_count + 1);
+            assert_eq!(result.statistics.retained_identities as u64, seed_count + 1);
+            assert_eq!(result.statistics.retained_operations as u64, seed_count + 1);
+            assert_eq!(result.hits.len(), 10);
+            let terminal = current.search("terminal".into(), None, SearchMode::Lexical, vec![], 10).await.unwrap();
+            assert_eq!(terminal.hits[0].record.record_id, "last");
+            assert_eq!(current.write(last.clone()).await.unwrap(), receipt);
         }
+        current.finish_service_shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn recovery_from_wal_builds_multiple_packages_and_adds_a_writable_tail() {
+        use super::super::*;
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("partition");
+        let config = lexical_config();
+        let initial = RecordPartition::create(&path, config.clone()).await.unwrap();
+        let seed_count = PACKAGE_RECORDS + 1;
+        let frames: Vec<_> = (1..=seed_count)
+            .map(|seq| encode_entry(&Entry::Applied(seed_record(seq as u64))).unwrap())
+            .collect();
+        initial.inner.lock().await.journal
+            .append_batch(&frames.iter().map(Vec::as_slice).collect::<Vec<_>>()).unwrap();
+        initial.finish_service_shutdown().await.unwrap();
+        drop(initial);
+
+        let partition = RecordPartition::open(&path, config.max_journal_bytes).await.unwrap();
+        assert_eq!(partition.inner.lock().await.index.components().await.len(), 3);
+        partition.write(tests::write("new", "new", "alpha", ExpectedVersion::Absent)).await.unwrap();
+        let result = partition.search("alpha".into(), None, SearchMode::Lexical, vec![], 10).await.unwrap();
+        assert_eq!(result.count_total, seed_count + 1);
+        partition.finish_service_shutdown().await.unwrap();
     }
 }

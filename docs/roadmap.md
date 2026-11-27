@@ -153,7 +153,7 @@ W5 对照：Windows/default debug、local 新库、相同请求与临时数据�
 
 ## 容量与架构边界
 
-完整逻辑 State 仍驻内存；100,000 档是准入上界，不是任意数据形态的容量承诺。有限准入和显式缓冲预算不是全进程 RSS 或全磁盘硬上限。默认服务共用 SQLite authority 及其校验对象缓存；多 authority、物化索引和独立备份仍需整体评估。
+完整逻辑 State 仍驻内存，集合可承载的数据量受内存、检查点和日志字节等预算约束。有限准入和显式缓冲预算不是全进程 RSS 或全磁盘硬上限。默认服务共用 SQLite authority 及其校验对象缓存；多 authority、物化索引和独立备份仍需整体评估。
 
 回执默认最早两日后具备回收资格，另受重试窗口、认证 history floor、epoch、读者与备份保护约束，不是固定清理期限。不能通过删除窗口内回执解除容量限制。S3 模式必须同时保留 metadata.sqlite、SQLite WAL 与 owner 锁文件，不能只凭 bucket 重建权威；SQLite 首版不提供跨主机 HA 或权威卷丢失零 RPO。
 

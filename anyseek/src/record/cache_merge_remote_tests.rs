@@ -64,7 +64,7 @@ async fn remote_long_suffix_merges_caches_without_replacing_anchor_and_cold_reco
         let inner=p.inner.lock().await;
         assert_eq!(inner.anchor.as_ref().unwrap().identity(),anchor);
         assert!(inner.index.detached_cache,"the suffix must exercise independent cache maintenance");
-        assert!(inner.index.components().await.len()<=capacity::segments(&settings)+1);
+        assert!(inner.index.components().await.len()<=capacity::package_target(inner.state.records.len())+1);
         let remote=inner.remote.as_ref().unwrap();
         let head=remote.authority.lock().await.read_head("long-suffix").unwrap().unwrap();
         assert_eq!(head.manifest,manifest,"cache maintenance must not publish a new authority checkpoint");

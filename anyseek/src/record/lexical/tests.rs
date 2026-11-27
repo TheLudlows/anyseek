@@ -1001,7 +1001,6 @@ fn native_corpus_uses_one_selected_population_across_frozen_and_tail() {
     assert!(CorpusView::select_matching(&[&frozen, &tail], newer, |_| true).is_err());
     // Empty selection must still validate topology, both cut fields and names.
     assert!(CorpusView::select_matching(&[], newer, |_| false).is_err());
-    assert!(CorpusView::select_matching(&vec![&frozen; 65], newer, |_| false).is_err());
     for invalid in [Cut {sequence: 0, ..newer}, Cut {evaluation_time_ms: 0, ..newer}] {
         assert!(CorpusView::select_matching(&[&frozen], invalid, |_| false).is_err());
     }
@@ -1012,16 +1011,6 @@ fn native_corpus_uses_one_selected_population_across_frozen_and_tail() {
         vec![input("x", 1, &["alpha"])], LIMIT).unwrap()
         .open(&extra_root.0, CUT, LIMIT).unwrap();
     assert!(CorpusView::select_matching(&[&frozen, &different], newer, |_| false).is_err());
-    // Fault-inject only identity metadata: capacity must fail before any view
-    // can read the intentionally mismatched native address tables.
-    let oversized: BTreeSet<_> = (0..=MAX_POPULATION)
-        .map(|i| identity(&format!("oversized-{i}"), 1)).collect();
-    assert!(CorpusView::select(&[&frozen], newer, &oversized).is_err());
-    let mut excessive = frozen.clone();
-    excessive.identities = Arc::new(oversized.into_iter().collect::<Vec<_>>().into());
-    assert!(matches!(CorpusView::select_matching(&[&excessive], newer, |_| true),
-        Err(RecordError::Storage(message)) if message == "native corpus topology budget exceeded"));
-
     assert!(CorpusView::select(&[&frozen, &tail], CUT, &selected).is_err());
     assert!(CorpusView::select(&[&frozen, &tail, &tail], newer, &selected).is_err());
     assert!(CorpusView::select(&[&frozen], newer, &selected).is_err());

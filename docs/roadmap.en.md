@@ -124,7 +124,7 @@ Actual environment evidence is still required: real cloud S3 endpoint, system/fi
 
 ## Capacity and architectural boundaries
 
-Full logical State remains resident. The 100,000 profile is an admission limit, not a capacity promise for any data distribution. Bounded admission and explicit buffer budgets do not hard-limit whole-process RSS or disk. The default service shares SQLite authority and a verified object cache. Multiple authorities, materialized indexes, and separate backups need total-capacity assessment.
+Full logical State remains resident. Collection capacity depends on memory admission, checkpoint and journal byte budgets, and the input workload. Bounded admission and explicit buffer budgets do not hard-limit whole-process RSS or disk. The default service shares SQLite authority and a verified object cache. Multiple authorities, materialized indexes, and separate backups need total-capacity assessment.
 
 Receipts become eligible for reclamation two days after creation, subject to the retry window, certified historical floor, generation, reader and backup protection. There is no fixed cleanup deadline. Capacity limits cannot be lifted by deleting protected receipts within the window. S3 mode requires metadata.sqlite, SQLite WAL and the owner lock file. The bucket alone cannot reconstruct authority. Initial SQLite support provides neither cross-host HA nor zero RPO if the authority volume is lost.
 

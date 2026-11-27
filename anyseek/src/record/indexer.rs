@@ -173,7 +173,7 @@ impl RecordPartition {
                 let native=if mode==JobMode::Compact {
                     if let Some(admission)=anchor::NativeReuse::admit(&inner).await? {
                         if inner.anchor.as_ref().is_some_and(|previous|
-                            previous.retained_packages().len()+inner.index.pending_seals.len()+1<capacity::segments(&inner.config))
+                            previous.retained_packages().len()+inner.index.pending_seals.len()+1<capacity::package_target(inner.state.records.len()))
                             && inner.index.stable_tail_path(&root).await.is_some()
                             && inner.index.has_tail_rows().await? {
                             let _phase=maintenance::Phase::new("compact_tail_handoff_locked",inner.state.seq);
@@ -265,10 +265,11 @@ impl RecordPartition {
                 let mut locations = loaded.locations;
                 let cache = root.join(format!("segment-{:032x}",rand::random::<u128>()));
                 let (tail,_) = build_at(&root,&cache,&config,&State::default()).await?;
-                index.rotate_tail(tail,&mut ordinals,&mut locations,view::RotationBudget{
-                    max_segments:64,max_address_slots:config.max_records.checked_add(config.max_operations)
-                        .and_then(|n|n.checked_mul(64)).ok_or_else(||storage("index address budget overflow"))?,
-                }).await?;
+                let budget=view::RotationBudget{
+                    max_segments:index.components().await.len()+1,
+                    max_address_slots:capacity::address_slots()?,
+                };
+                index.rotate_tail(tail,&mut ordinals,&mut locations,budget).await?;
                 let mut candidate = Candidate {
                     snapshot_bytes:checkpoint_codec::length(&config, &loaded.state)?,
                     state:loaded.state,index,ordinals,locations,
