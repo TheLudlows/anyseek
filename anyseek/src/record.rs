@@ -39,6 +39,8 @@ pub use committed::{CommittedBatch, CommittedItem, CommittedProgress, Independen
 mod index_consumers;
 mod publication;
 mod query;
+#[cfg(test)]
+mod disk_read_fixture;
 mod query_output;
 pub use query_output::QueryRecord;
 mod replay;
@@ -54,6 +56,8 @@ mod state_values;
 mod state_proof;
 mod capacity;
 mod snapshot;
+mod local_archive;
+pub use local_archive::LocalArchiveWindow;
 mod checkpoint_codec;
 mod segment;
 mod anchor;
@@ -332,6 +336,8 @@ struct Inner {
     fail_after_durable: bool,
     #[cfg(test)]
     fail_publication_stage: u8,
+    #[cfg(test)]
+    disk_read_fixture: Option<Arc<crate::storage::disk_records::View>>,
     // Fields drop in declaration order: release owned index/mmap handles before
     // this journal reference. Background native writers and their fixed readers
     // retain the same owner lock independently until their handles are gone.
@@ -1360,6 +1366,8 @@ impl RecordPartition {
                 fail_after_durable: false,
                 #[cfg(test)]
                 fail_publication_stage: 0,
+                #[cfg(test)]
+                disk_read_fixture: None,
             })),
             writer: Arc::new(Mutex::new(())),
             committed_queue: Arc::default(),
@@ -1481,6 +1489,8 @@ impl RecordPartition {
                 fail_after_durable: false,
                 #[cfg(test)]
                 fail_publication_stage: 0,
+                #[cfg(test)]
+                disk_read_fixture: None,
             };
         let replayed_tail=!pending.is_empty();
         for entry in pending {
@@ -1554,6 +1564,19 @@ impl RecordPartition {
         inner.observe_time()?;
         if !inner.healthy {
             return Err(RecordError::RecoveryRequired);
+        }
+        #[cfg(test)]
+        if let Some(pin) = disk_read_fixture::Pinned::capture(&inner)? {
+            let barrier = self.output_permit()?;
+            drop(inner);
+            let id = id.to_owned();
+            let (pin, row) = crate::resources::spawn_blocking(move || {
+                let row = pin.read(&id, None)?;
+                Ok::<_, RecordError>((pin, row))
+            }).await.map_err(storage)??;
+            let mut inner = self.inner.lock().await;
+            pin.validate(&mut inner)?;
+            return barrier.deliver(|| row.filter(|row| temporal::visible(row, inner.evaluation_time_ms)));
         }
         Ok(inner
             .state

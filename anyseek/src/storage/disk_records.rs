@@ -274,7 +274,8 @@ pub(crate) struct View {
     visible_seq: u64,
     recent_limit: usize,
     recent_bytes: usize,
-    recent: BTreeMap<String, RecentRow>,
+    recent: BTreeMap<Arc<str>, Arc<RecentRow>>,
+    _retained_map: Option<MemoryLease>,
 }
 
 pub(crate) struct Page<'a> {
@@ -291,6 +292,7 @@ impl View {
             recent_limit,
             recent_bytes: 0,
             recent: BTreeMap::new(),
+            _retained_map: None,
         }
     }
 
@@ -300,6 +302,33 @@ impl View {
             self.checkpoint.committed_cut,
             self.visible_seq,
         )
+    }
+
+    /// Prepare a privately owned successor before committing authority. The
+    /// bounded overlay shares bodies with old views and never copies the disk
+    /// directory. After authority and indexes publish, the caller installs
+    /// this complete successor with a pointer swap under its publication guard.
+    pub(crate) fn prepare_successor(
+        &self,
+        seq: u64,
+        changes: Vec<CommittedChange>,
+    ) -> io::Result<Self> {
+        let retained_map_bytes = self
+            .recent
+            .len()
+            .checked_mul(128)
+            .ok_or_else(|| invalid("recent map budget overflow"))?;
+        let memory = reserve_memory(retained_map_bytes as u64)?;
+        let mut next = Self {
+            checkpoint: self.checkpoint.clone(),
+            visible_seq: self.visible_seq,
+            recent_limit: self.recent_limit,
+            recent_bytes: self.recent_bytes,
+            recent: self.recent.clone(),
+            _retained_map: Some(memory),
+        };
+        next.install_committed(seq, changes)?;
+        Ok(next)
     }
 
     /// Install one complete committed decision. Failed admission or validation
@@ -319,7 +348,7 @@ impl View {
             let CommittedChange { id, metadata, body } = change;
             if id.is_empty()
                 || id.len() > self.checkpoint.max_record_bytes
-                || prepared.contains_key(&id)
+                || prepared.contains_key(id.as_str())
                 || metadata.is_live() != body.is_some()
                 || body
                     .as_ref()
@@ -335,7 +364,7 @@ impl View {
                 .ok_or_else(|| invalid("recent record budget overflow"))?;
             let previous = self
                 .recent
-                .get(&id)
+                .get(id.as_str())
                 .map_or(0, |row| row._memory.bytes() as usize);
             bytes = bytes
                 .checked_sub(previous)
@@ -344,19 +373,27 @@ impl View {
             batch_bytes = batch_bytes
                 .checked_add(charge)
                 .filter(|bytes| *bytes <= self.recent_limit)
-                .ok_or_else(|| io::Error::other("recent record byte budget exceeded"))?;
+                .ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::WouldBlock,
+                        "recent record byte budget exceeded",
+                    )
+                })?;
             let memory = reserve_memory(charge as u64)?;
             prepared.insert(
-                id,
-                RecentRow {
+                Arc::<str>::from(id),
+                Arc::new(RecentRow {
                     metadata,
                     body,
                     _memory: memory,
-                },
+                }),
             );
         }
         if bytes > self.recent_limit {
-            return Err(io::Error::other("recent record byte budget exceeded"));
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "recent record byte budget exceeded",
+            ));
         }
         self.recent.extend(prepared);
         self.recent_bytes = bytes;

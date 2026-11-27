@@ -136,6 +136,18 @@ Materialize private inputs one by one as certified journal paths. The Catalog op
 
 Repeating a completed full-service backup verifies manifest and completion witness and returns the original receipt without rematerializing all inputs and exceeding HTTP deadlines. This retrieves a completed result. Restore still validates the full archive closure. Incomplete archives retain existing publication and repair procedures.
 
+### Local WAL window and targeted commit restore
+
+Ordinary HTTP restore selects the cut of the specified `backup_id`. The offline local tool captures the retained committed WAL suffix of the stopped source after its base backup. The backup must match the initial cut of the selected journal. Capture verifies source identity, base contents, group decisions, and contiguous business sequences. It returns a SHA-256 witness covering the entire window. Retain the witness independently with the paired backup. Once a checkpoint has reclaimed the old journal generation, use a window captured earlier.
+
+```sh
+cargo build --locked -p anyseek --no-default-features --example local_archive_cut
+target/debug/examples/local_archive_cut capture SOURCE BACKUP ARCHIVE BUDGET_BYTES > witness.json
+target/debug/examples/local_archive_cut restore BACKUP ARCHIVE NEW_ROOT BUDGET_BYTES TARGET_SEQ witness.json
+```
+
+Restore checks the entire window and base backup, replays through the selected business decision, and atomically publishes a new path. A group decision includes its members and original receipt at the same sequence. Later changes and maintenance at the target's same sequence are left outside the restored cut. The caller manages source paths, service catalog, and any paired Origence SQLite backup. This entry point uses a single retained local journal generation. [#224](https://github.com/TheLudlows/anyseek/issues/224)
+
 ## Maintenance publication and failure boundaries
 
 In S3 mode, SQLite selects the remote manifest. Owner epoch and failure fencing block stale writers and untrusted output. Writes and TTL share cache append. After confirmed SQLite commit, cache failure returns `durable_pending` and keeps output fenced. Reopen recovers the original receipt. A genuinely unknown SQLite result remains `outcome_unknown` and cannot justify a new operation.

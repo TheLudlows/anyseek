@@ -186,6 +186,29 @@ impl RecordPartition {
         if inner.state.group_publication_revision() != group_publication_revision {
             return Err(RecordError::Busy);
         }
+        #[cfg(test)]
+        let mut disk_records = if let Some(pin) = disk_read_fixture::Pinned::capture(&inner)? {
+            let lookups: Vec<_> = candidates.iter().map(|candidate| (
+                candidate.identity.id.clone(), candidate.identity.version, candidate.fingerprint,
+            )).collect();
+            let fields = output_fields.map(<[String]>::to_vec);
+            drop(inner);
+            let (pin, records) = crate::resources::spawn_blocking(move || {
+                let mut records = BTreeMap::new();
+                for (id, version, fingerprint) in lookups {
+                    if let Some(record) = pin.read(&id, Some((version, fingerprint)))? {
+                        records.insert(id, QueryRecord::copy(&record, fields.as_deref())?);
+                    }
+                }
+                Ok::<_, RecordError>((pin, records))
+            }).await.map_err(storage)??;
+            pause(&root, ".test-disk-readback-pause").await?;
+            inner = self.inner.lock().await;
+            pin.validate(&mut inner)?;
+            Some(records)
+        } else {
+            None
+        };
         let mut hits = Vec::with_capacity(candidates.len());
         for (rank, candidate) in candidates.into_iter().enumerate() {
             let Some(&ordinal) = inner.locations.get(&candidate.identity.id) else {
@@ -219,6 +242,15 @@ impl RecordPartition {
                     .remove(&candidate.hit.doc_id)
                     .ok_or_else(|| storage("hybrid explanation missing"))?
             };
+            #[cfg(test)]
+            if let Some(records) = &mut disk_records {
+                if let Some(record) = records.remove(&candidate.identity.id)
+                    && temporal::visible(&record, inner.evaluation_time_ms)
+                {
+                    hits.push(RecordHit { channels, record, score: candidate.hit.score });
+                }
+                continue;
+            }
             hits.push(RecordHit {
                 channels,
                 record: QueryRecord::copy(record, output_fields)?,

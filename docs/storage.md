@@ -149,6 +149,18 @@ metadata snapshot 和 descriptor 使用不可变对象；备份 ID 按 Tenant、
 
 完整服务备份完成后，同一操作重试先核验 manifest 与完成见证，直接返回原回执，避免每次重新物化全部输入而再次超过 HTTP 期限。这是已完成操作的结果查询；恢复仍须重新验证完整归档闭包。未完成的归档继续既有发布/修复协议。
 
+### 本地 WAL 窗口与指定提交切点
+
+普通 HTTP 恢复按 `backup_id` 恢复备份自身的切点。本地离线工具在保存该备份后，从停机的原分区捕获当前保留的已提交 WAL 后缀。备份必须对应当前选中的日志起始切点。工具核对原分区身份、备份内容、组决定和连续业务序号，并返回绑定整个窗口的 SHA-256 见证。把见证同备份分开保存。若 checkpoint 已回收此前的日志代次，则需使用此前已捕获的窗口。
+
+```sh
+cargo build --locked -p anyseek --no-default-features --example local_archive_cut
+target/debug/examples/local_archive_cut capture SOURCE BACKUP ARCHIVE BUDGET_BYTES > witness.json
+target/debug/examples/local_archive_cut restore BACKUP ARCHIVE NEW_ROOT BUDGET_BYTES TARGET_SEQ witness.json
+```
+
+恢复先复核整段窗口和基础备份，再重放到指定业务决定（含该决定）并原子发布新路径。组写的成员和原回执属于同一个提交序号；目标决定后的变更及同序号维护不纳入输出。原始路径、服务目录和 Origence SQLite 配套备份由调用方管理。该入口使用单个已保留的本地日志代次，支持说明见 [#224](https://github.com/TheLudlows/anyseek/issues/224)。
+
 ## 维护发布与失败边界
 
 S3 模式由 SQLite 选择远端 manifest，owner epoch 与失败 fence 阻止陈旧写者和不可信输出。普通写入和 TTL 共用缓存追加入口；SQLite 已明确提交成功时，缓存追加失败返回 `durable_pending` 并保持输出封锁，重开恢复原回执。SQLite 提交结果未知仍为 `outcome_unknown`，不能据此另发新操作。

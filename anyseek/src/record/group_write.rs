@@ -79,6 +79,8 @@ impl RecordPartition {
         ]).flatten().min();
         if deadline.is_some_and(|t|t<=inner.evaluation_time_ms){return Err(RecordError::Busy);}
         prepared.admit_containers(&mut inner.state)?;
+        #[cfg(test)]
+        let prepared_disk = disk_read_fixture::prepare_group(inner, seq, &prepared.records)?;
         if let Some(remote)=inner.remote.as_ref() {
             let id=format!("{}:{}",prepared.stored.operation_id.epoch,prepared.stored.operation_id.nonce);
             if remote.batch_tail_needs_checkpoint(&[(seq,id.clone(),&payload)]).await? {return Err(inner.request_checkpoint("group_remote_tail_room"));}
@@ -114,6 +116,10 @@ impl RecordPartition {
             let snapshot_bytes = prepared.snapshot_bytes;
             let receipt = prepared.install(&mut inner.state)?;
             inner.snapshot_bytes = snapshot_bytes;
+            #[cfg(test)]
+            if let Some(view) = prepared_disk {
+                inner.disk_read_fixture = Some(view);
+            }
             self.indexes.immediate(seq);
             Ok::<_, RecordError>(receipt)
         }.await;
