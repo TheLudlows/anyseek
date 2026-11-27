@@ -1312,6 +1312,7 @@ impl Runtime {
                     vec![],
                     vec![],
                     &mut Vec::new(),
+                    None,
                 )
                 .await;
             assert!(matches!(old, Err(RecordError::Rejected(_))), "private vector component rejects lexical execution");

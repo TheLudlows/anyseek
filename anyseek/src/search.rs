@@ -6,6 +6,43 @@ use crate::{index::VectorIndexArc, min_heap::Result,
         quantize_f32_to_i8, quantize_f32_to_i8_simd}};
 use serde::{Serialize, Deserialize};
 use std::ops::Range;
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
+use tokio::time::Instant;
+
+/// Logical visits shared by every opted-in consumer of one request. Existing
+/// leases still bound concurrent memory and physical I/O independently.
+pub(crate) struct QueryWork {
+    remaining: AtomicUsize,
+    deadline: Instant,
+}
+
+impl QueryWork {
+    #[cfg(test)]
+    pub(crate) fn new(visits: usize, deadline: Instant) -> Self {
+        Self {
+            remaining: AtomicUsize::new(visits),
+            deadline,
+        }
+    }
+
+    pub(crate) fn charge(&self, visits: usize) -> std::result::Result<(), RecordError> {
+        if Instant::now() >= self.deadline {
+            return Err(RecordError::Busy);
+        }
+        self.remaining
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |remaining| remaining.checked_sub(visits))
+            .map_err(|_| RecordError::Rejected("shared query work budget exhausted".into()))?;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn remaining(&self) -> usize {
+        self.remaining.load(Ordering::Relaxed)
+    }
+}
 /// Specifies the default QueryType: The following query types are supported:
 /// - **Union** (OR, disjunction),
 /// - **Intersection** (AND, conjunction),
@@ -130,6 +167,17 @@ pub(crate) fn rrf_contribution(weight: f32, constant: f32, rank: usize) -> f32 {
     weight / (constant + rank as f32)
 }
 
+// Check the maximum in the same f32 precision and lane order as fusion.
+pub(crate) fn validate_rrf_maximum(constant: f32, enabled_weights: &[f32]) -> std::result::Result<(), String> {
+    let max = enabled_weights.iter()
+        .map(|&weight| rrf_contribution(weight, constant, 0))
+        .sum::<f32>();
+    if !max.is_finite() {
+        return Err("RRF maximum fused score must be finite".into());
+    }
+    Ok(())
+}
+
 impl RrfOptions {
     /// Reject invalid inputs and combinations capable of overflowing the fused f32 score.
     /// One zero weight disables that channel's contribution; both zero is invalid.
@@ -141,14 +189,24 @@ impl RrfOptions {
             || (self.keyword_weight == 0.0 && self.vector_weight == 0.0) {
             return Err("RRF weights must be finite, nonnegative, and not both zero".into());
         }
-        if !(self.keyword_weight / self.constant + self.vector_weight / self.constant).is_finite() {
-            return Err("RRF maximum fused score must be finite".into());
-        }
+        validate_rrf_maximum(self.constant, &[self.keyword_weight, self.vector_weight])?;
         if self.keyword_candidates == Some(0) || self.vector_candidates == Some(0) {
             return Err("RRF candidate budgets must be positive".into());
         }
         Ok(())
     }
+}
+
+#[cfg(test)]
+#[test]
+fn rrf_maximum_checks_all_enabled_rank_zero_contributions() {
+    let weight = 1.2e38f32;
+    let legacy = RrfOptions { constant: 1.0, keyword_weight: weight, vector_weight: weight, ..RrfOptions::default() };
+    assert!(RrfOptions::default().validate().is_ok());
+    assert!(legacy.validate().is_ok());
+    assert!(validate_rrf_maximum(1.0, &[weight, weight, weight]).is_err());
+    assert!(RrfOptions { keyword_weight: f32::MAX, vector_weight: 0.0, ..legacy }.validate().is_ok());
+    assert!(RrfOptions { keyword_weight: f32::MAX, ..legacy }.validate().is_err());
 }
 
 /// The following result types are supported:
@@ -295,7 +353,9 @@ pub(crate) async fn search_with_counts(
     facet_filter: Vec<FacetFilter>,
     result_sort: Vec<ResultSort>,
     component_counts: &mut Vec<usize>,
+    work: Option<Arc<QueryWork>>,
 ) -> std::result::Result<ResultObject, RecordError> {
+        if let Some(work) = &work { work.charge(0)?; }
         if !matches!(search_mode, SearchMode::Vector { .. }) {
             return Err(RecordError::Rejected("vector component cannot execute lexical queries".into()));
         }
@@ -473,39 +533,66 @@ pub(crate) async fn search_with_counts(
 
         let SearchMode::Vector { similarity_threshold, ann_mode } = search_mode else { unreachable!() };
         let segment_count = index_ref.segments.len();
-        let mut tasks = Vec::new();
-        for (slot, shard) in index_ref.segments.iter().enumerate() {
+        let _merge_workspace = if work.is_some() {
+            let bytes = (segment_count as u64).checked_mul((offset + length) as u64)
+                .and_then(|rows| rows.checked_mul(128))
+                .ok_or_else(|| RecordError::Rejected("vector result workspace overflow".into()))?;
+            Some(crate::record::build_budget::admit_memory(bytes, crate::resources::Scope::current().as_ref())?)
+        } else {
+            None
+        };
+        let jobs = index_ref.segments.iter().enumerate().map(|(slot, shard)| {
             let shard = shard.vector.clone();
             let query = query_vector.clone();
             let ann = ann_mode.clone();
             let fields = field_filter.clone();
             let filters = facet_filter.clone();
-            tasks.push(crate::resources::spawn(async move {
+            let work = work.clone();
+            async move {
                 #[cfg(test)] crate::record::query_test_gate().await;
                 let mut result = shard.search_vector_segment(query, offset + length, include_uncommitted,
-                    similarity_threshold, ann, fields, filters).await?;
+                    similarity_threshold, ann, fields, filters, work.as_deref()).await?;
                 for hit in &mut result.results { hit.doc_id = hit.doc_id * segment_count + slot; }
                 Ok(result)
-            }));
-        }
+            }
+        });
+        let channels = if work.is_some() {
+            // The strict scorer runs on the request's owned blocking worker.
+            // A budget failure drops pending shard futures, with no detached work.
+            futures::future::try_join_all(jobs).await?
+        } else {
+            let tasks: Vec<_> = jobs.map(crate::resources::spawn).collect();
+            let mut channels = Vec::new();
+            let mut failure = None;
+            for task in tasks {
+                match task.await {
+                    Ok(Ok(channel)) => channels.push(channel),
+                    Ok(Err(error)) => { failure.get_or_insert(error); }
+                    Err(error) => { failure.get_or_insert(RecordError::Storage(error.to_string())); }
+                }
+            }
+            if let Some(error) = failure { return Err(error); }
+            channels
+        };
         let mut result = ResultObject { original_query: query_string.clone(), query: query_string,
             ..Default::default() };
-        let mut failure = None;
-        for task in tasks {
-            match task.await {
-                Ok(Ok(mut channel)) => {
-                    component_counts.push(channel.result_count_total);
-                    result.result_count_total += channel.result_count_total;
-                    result.observed_vector_count += channel.observed_vector_count;
-                    result.observed_cluster_count += channel.observed_cluster_count;
-                    if result_type != ResultType::Count { result.results.append(&mut channel.results); }
-                }
-                Ok(Err(error)) => { failure.get_or_insert(error); }
-                Err(error) => { failure.get_or_insert(RecordError::Storage(error.to_string())); }
+        if let Some(work) = &work {
+            let visits = channels.iter().try_fold(0usize, |total, channel| total.checked_add(channel.results.len()))
+                .ok_or_else(|| RecordError::Rejected("vector merge work overflow".into()))?;
+            work.charge(visits)?;
+        }
+        let mut counts = Vec::with_capacity(channels.len());
+        for mut channel in channels {
+            counts.push(channel.result_count_total);
+            result.result_count_total += channel.result_count_total;
+            result.observed_vector_count += channel.observed_vector_count;
+            result.observed_cluster_count += channel.observed_cluster_count;
+            if result_type != ResultType::Count {
+                result.results.append(&mut channel.results);
             }
         }
-        if let Some(error) = failure { return Err(error); }
         let shards = futures::future::join_all(index_ref.segments.iter().map(|segment| segment.vector.read())).await;
+        if let Some(work) = &work { work.charge(0)?; }
         result.results.sort_by(|a,b| crate::min_heap::rank_with_segments(&shards,b.score,b.doc_id,a.score,a.doc_id));
         result.results.truncate(offset + length);
         let sorts = result_sort.iter().filter_map(|sort| Some(ResultSortIndex {
@@ -517,5 +604,7 @@ pub(crate) async fn search_with_counts(
         }
         result.results = result.results.into_iter().skip(offset).take(length).collect();
         result.result_count = result.results.len();
+        if let Some(work) = &work { work.charge(0)?; }
+        component_counts.extend(counts);
         Ok(result)
 }

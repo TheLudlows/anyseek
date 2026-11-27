@@ -22,15 +22,24 @@ impl Candidate {
             None => Ok(false),
         }
     }
+
+    pub(super) async fn pin(self, rank: usize, inner: &Inner) -> Result<Option<PinnedCandidate>, RecordError> {
+        if !self.is_current(inner).await? {
+            return Ok(None);
+        }
+        let source = inner.state.records.source(&self.identity.id)
+            .ok_or_else(|| storage("published candidate missing from current records"))?;
+        Ok(Some(PinnedCandidate { rank, candidate: self, source }))
+    }
 }
 
-struct PinnedCandidate {
+pub(super) struct PinnedCandidate {
     rank: usize,
     candidate: Candidate,
     source: state_values::RecordSource,
 }
 impl PinnedCandidate {
-    fn read(&self, fields: Option<&[String]>, evaluation: u64) -> Result<Option<QueryRecord>, RecordError> {
+    fn qualified(&self, evaluation: u64) -> Result<Option<state_values::CurrentRow<'_>>, RecordError> {
         let id = &self.candidate.identity.id;
         let Some(row) = self.source.find(id)? else {
             return Err(storage("published candidate missing from selected records"));
@@ -40,8 +49,21 @@ impl PinnedCandidate {
         {
             return Ok(None);
         }
-        let record = row.load(id)?;
-        Ok(Some(QueryRecord::copy(&record, fields)?))
+        Ok(Some(row))
+    }
+
+    fn read(&self, fields: Option<&[String]>, evaluation: u64) -> Result<Option<QueryRecord>, RecordError> {
+        self.qualified(evaluation)?.map(|row| {
+            let record = row.load(&self.candidate.identity.id)?;
+            QueryRecord::copy(&record, fields)
+        }).transpose()
+    }
+
+    #[cfg(test)]
+    pub(super) fn strict_evidence(self, evaluation: u64) -> Result<(String, Option<u64>), RecordError> {
+        let expiry = self.qualified(evaluation)?.ok_or(RecordError::Busy)?
+            .temporal().expire_at_ms;
+        Ok((self.candidate.identity.id, expiry))
     }
 }
 
@@ -87,15 +109,7 @@ impl Handle {
             _scope: scope,
         })
     }
-    #[cfg(test)]
-    pub(super) async fn candidate_ids(
-        &self,
-        hits: Vec<crate::min_heap::Result>,
-    ) -> Result<Vec<String>, RecordError> {
-        Ok(self.candidates(hits).await?.into_iter().map(|candidate| candidate.identity.id).collect())
-    }
-
-    async fn candidates(
+    pub(super) async fn candidates(
         &self,
         hits: Vec<crate::min_heap::Result>,
     ) -> Result<Vec<Candidate>, RecordError> {
@@ -229,10 +243,8 @@ impl RecordPartition {
         let (cut, read_time) = (inner.state.seq, inner.evaluation_time_ms);
         let mut pinned = Vec::with_capacity(candidates.len());
         for (rank, candidate) in candidates.into_iter().enumerate() {
-            if candidate.is_current(&inner).await? {
-                let source = inner.state.records.source(&candidate.identity.id)
-                    .ok_or_else(|| storage("published candidate missing from current records"))?;
-                pinned.push(PinnedCandidate { rank, candidate, source });
+            if let Some(candidate) = candidate.pin(rank, &inner).await? {
+                pinned.push(candidate);
             }
         }
         let records = if pinned.is_empty() {
@@ -798,7 +810,7 @@ mod tests {
 }
 
 #[cfg(test)]
-fn blocking_pause(root: &Path, name: &str) -> Result<(), RecordError> {
+pub(super) fn blocking_pause(root: &Path, name: &str) -> Result<(), RecordError> {
     let marker = root.join(name);
     if marker.exists() {
         std::fs::write(root.join(format!("{name}-entered")), b"ready").map_err(storage)?;

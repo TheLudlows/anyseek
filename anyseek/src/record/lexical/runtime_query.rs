@@ -48,6 +48,7 @@ pub(crate) async fn search(
                 filters,
                 sort,
                 &mut Vec::new(),
+                None,
             )
             .await;
     }
@@ -86,6 +87,7 @@ pub(crate) async fn search(
                 filters.clone(),
                 vec![],
                 &mut vector_counts,
+                None,
             )
             .await?;
     }

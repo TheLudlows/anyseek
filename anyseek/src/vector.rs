@@ -9,7 +9,7 @@ use crate::{
     clustering::{ClusterHeader, Medoid, ParentMedoid},
     index::{Clustering, Document, FieldType, IS_SYSTEM_LE, VectorSegment, VectorSegmentArc},
     min_heap,
-    search::{ResultObject, FacetFilter, FilterSparse},
+    search::{ResultObject, FacetFilter, FilterSparse, QueryWork},
     metadata_filter::{compile_filters, is_facet_filter},
     utils::decode_bytes_from_base64_string,
     vector_similarity::{
@@ -263,7 +263,9 @@ impl VectorBlock {
         start: u64,
         stride: usize,
         bound: usize,
+        work: Option<&QueryWork>,
     ) -> Result<VectorLevel, RecordError> {
+        if let Some(work) = work { work.charge(1)?; }
         let read_count = |buffer: &mut Self, offset| -> Result<u32, RecordError> {
             Ok(u32::from_le_bytes(
                 buffer
@@ -278,11 +280,13 @@ impl VectorBlock {
             .checked_add((count as u64 + 1) * 4)
             .filter(|end| *end <= self.file_len && count <= bound.saturating_add(1))
             .ok_or_else(|| vector_io(invalid_vector("invalid vector cluster count")))?;
+        if let Some(work) = work { work.charge(count)?; }
         // Includes the query's downstream probe heap and selected cluster list.
         let _memory = admit_memory((count as u64) * 128, Scope::current().as_ref())?;
         let mut clusters = Vec::with_capacity(count);
         let mut rows = 0u32;
         for cluster in 0..count {
+            if let Some(work) = work && cluster % 64 == 0 { work.charge(0)?; }
             let child_count = read_count(self, start + ((cluster as u64 + 1) * 4))?;
             clusters.push(ClusterHeader {
                 start_index: rows,
@@ -1123,7 +1127,7 @@ impl VectorSegment {
         for _ in 0..self.vector_levels {
             last = offset;
             let level =
-                buffer.read_level(&self.vector_file, offset, stride, self.indexed_vector_count)?;
+                buffer.read_level(&self.vector_file, offset, stride, self.indexed_vector_count, None)?;
             clusters = clusters
                 .checked_add(level.clusters.len())
                 .ok_or_else(|| vector_io(invalid_vector("vector count overflow")))?;
@@ -1197,6 +1201,7 @@ impl VectorSegment {
                     self.last_level_vector_file_start_pos,
                     vector_size,
                     self.indexed_vector_count,
+                    None,
                 )
                 .map_err(io::Error::other)?;
             self.indexed_cluster_count = self
@@ -1304,6 +1309,7 @@ pub(crate) trait SearchVectorSegment {
         cluster_search: AnnMode,
         field_filter: Vec<String>,
         facet_filter: Vec<FacetFilter>,
+        work: Option<&QueryWork>,
     ) -> Result<ResultObject, RecordError>;
 }
 
@@ -1334,6 +1340,7 @@ impl VectorSegment {
         facet_filter: &[FilterSparse],
         facets: &mut FacetReader<'_>,
         top_k: &mut TopK<'_>,
+        work: Option<(&QueryWork, usize)>,
     ) -> Result<(), RecordError> {
         let level_id = if self.is_last_level_incomplete {
             self.vector_levels - 1
@@ -1344,6 +1351,7 @@ impl VectorSegment {
         let non_affine = self.max_vector_value == f32::MIN;
 
         for record in self.block_vector_buffer.iter() {
+            if let Some((work, row_cost)) = work { work.charge(row_cost)?; }
             let doc_id = (level_id << 16) | (record.doc_id as usize);
             if self.is_deleted(doc_id) || is_facet_filter(facets, facet_filter, doc_id)? {
                 continue;
@@ -1409,11 +1417,24 @@ impl SearchVectorSegment for VectorSegmentArc {
         ann_mode: AnnMode,
         field_filter: Vec<String>,
         facet_filter: Vec<FacetFilter>,
+        work: Option<&QueryWork>,
     ) -> Result<ResultObject, RecordError> {
         let mut result_object: ResultObject = Default::default();
 
         let shard_ref = self.read().await;
         if shard_ref.failed { return Err(RecordError::RecoveryRequired); }
+        if let Some(work) = work { work.charge(1)?; }
+        // Charge the full predicate count even when a row is filtered early.
+        let row_cost = 1usize.saturating_add(facet_filter.len());
+        let _strict_workspace = if let Some(work) = work {
+            let bytes = crate::metadata_filter::workspace_bytes(&shard_ref, &facet_filter)
+                .map_err(RecordError::Rejected)?;
+            let units = usize::try_from(bytes.div_ceil(16)).map_err(|_| RecordError::Rejected("metadata work budget overflow".into()))?;
+            work.charge(units)?;
+            let bytes = bytes.checked_add((length as u64).saturating_mul(256))
+                .ok_or_else(|| RecordError::Rejected("vector workspace budget overflow".into()))?;
+            Some(admit_memory(bytes, Scope::current().as_ref())?)
+        } else { None };
         let facet_filter = match compile_filters(&shard_ref, &facet_filter) {
             Ok(filters) => filters,
             Err(error) => return Err(RecordError::Rejected(error)),
@@ -1477,6 +1498,7 @@ impl SearchVectorSegment for VectorSegmentArc {
                     &facet_filter,
                     &mut facets,
                     &mut top_k,
+                    work.map(|work| (work, row_cost)),
                 )?;
         }
 
@@ -1484,7 +1506,7 @@ impl SearchVectorSegment for VectorSegmentArc {
         let mut buffer = if shard_ref.vector_levels > 0 { Some(VectorBlock::new(&shard_ref.vector_file)?) } else { None };
         for level_id in 0..shard_ref.vector_levels {
             let buffer = buffer.as_mut().expect("published vector levels have a read window");
-            let level = buffer.read_level(&shard_ref.vector_file, offset, vector_size, shard_ref.indexed_vector_count)?;
+            let level = buffer.read_level(&shard_ref.vector_file, offset, vector_size, shard_ref.indexed_vector_count, work)?;
             let clusters = &level.clusters;
             let (n_probe, cluster_similarity_threshold) = match ann_mode {
                 AnnMode::All => (clusters.len(), None),
@@ -1503,6 +1525,7 @@ impl SearchVectorSegment for VectorSegmentArc {
                     TopK::new(n_probe, cluster_similarity_threshold, vector_similarity, similarity_normalization);
                 for (cluster_id, cluster) in clusters.iter().enumerate() {
                     if cluster.child_count == 0 { continue; }
+                    if let Some(work) = work { work.charge(1)?; }
                     let medoid_offset = level.rows_start + u64::from(cluster.start_index) * vector_size as u64;
                     let medoid_record = read_record(
                         buffer.read(&shard_ref.vector_file, medoid_offset, vector_size).map_err(vector_io)?,
@@ -1590,6 +1613,7 @@ impl SearchVectorSegment for VectorSegmentArc {
 
                 unsafe {
                     for i in 0..cluster_vectors_count {
+                        if let Some(work) = work { work.charge(row_cost)?; }
                         let record = read_record(
                             buffer.read(&shard_ref.vector_file, cluster_offset + i as u64 * vector_size as u64, vector_size).map_err(vector_io)?,
                             vector_dimensions,
@@ -1662,6 +1686,7 @@ impl SearchVectorSegment for VectorSegmentArc {
             offset = level.end;
         }
 
+        if let Some(work) = work { work.charge(0)?; }
         top_k.items[..top_k.len].sort_by(|a, b| shard_ref.rank(b.score, b.doc_id, a.score, a.doc_id));
 
         for item in top_k.items[..top_k.len].iter() {

@@ -78,6 +78,8 @@ struct Selection {
 }
 
 struct View {
+    #[cfg(test)]
+    root: PathBuf,
     cut: u64,
     evaluation: u64,
     anchor: String,
@@ -210,60 +212,107 @@ impl RecordPartition {
             .map_err(EventTimeError::record_error)
     }
 
-    // Exercise vector scoring on exactly the handles shared with the time
-    // window. The probe returns identities only, without a mixed API.
     #[cfg(test)]
     pub(crate) async fn probe_event_time_vector_cut(
         &self,
         window: Range<i64>,
         limit: usize,
+        work_limit: usize,
+        facets: Vec<FacetFilter>,
         deadline: Deadline,
-    ) -> Result<(Window, Vec<String>), RecordError> {
+    ) -> Result<(Window, Vec<String>, usize), RecordError> {
+        let work = Arc::new(crate::search::QueryWork::new(work_limit, deadline));
         let (view, output) = self
             .capture_and_read(
                 window,
                 limit,
                 IndexDependencies::VectorMetadata,
                 deadline,
-                Selection::default(),
+                Selection {
+                    facets: facets.clone(),
+                    ..Selection::default()
+                },
+                Some(work.clone()),
             )
             .await
             .map_err(EventTimeError::record_error)?;
-        let retrieval = view.retrieval.as_ref().unwrap();
-        let result = timeout_at(
-            deadline,
-            lexical::runtime_query::search(
-                &retrieval.index,
-                String::new(),
-                Some(Embedding::F32(vec![1.0, 0.0])),
-                SearchMode::Vector {
-                    similarity_threshold: None,
-                    ann_mode: crate::vector_similarity::AnnMode::All,
-                },
-                QueryType::Union,
-                0,
-                limit,
-                ResultType::TopkCount,
-                vec![],
-                vec![temporal::expiry_filter(view.evaluation)],
-                vec![],
-                lexical::Cut {
-                    sequence: view.cut,
-                    evaluation_time_ms: view.evaluation,
-                },
-            ),
-        )
-        .await
-        .map_err(|_| RecordError::Busy)??;
-        let mut ids = timeout_at(deadline, retrieval.candidate_ids(result.results))
+        let runtime = tokio::runtime::Handle::current();
+        let scorer_work = work.clone();
+        let worker = crate::resources::spawn_blocking(move || {
+            query::blocking_pause(&view.root, ".test-event-time-vector-worker-pause")?;
+            let result = runtime.block_on(async {
+                let mut filters = facets;
+                filters.push(temporal::expiry_filter(view.evaluation));
+                timeout_at(
+                    deadline,
+                    crate::search::search_with_counts(
+                        &view.retrieval.as_ref().unwrap().index,
+                        String::new(),
+                        Some(Embedding::F32(vec![1.0, 0.0])),
+                        SearchMode::Vector {
+                            similarity_threshold: None,
+                            ann_mode: crate::vector_similarity::AnnMode::All,
+                        },
+                        0,
+                        limit,
+                        ResultType::TopkCount,
+                        true,
+                        vec![],
+                        filters,
+                        vec![],
+                        &mut Vec::new(),
+                        Some(scorer_work),
+                    ),
+                )
+                .await
+                .map_err(|_| RecordError::Busy)?
+            });
+            result.map(|result| (view, result.results))
+        });
+        let (view, hits) = timeout_at(deadline, worker)
+            .await
+            .map_err(|_| RecordError::Busy)?
+            .map_err(storage)??;
+        let candidates = timeout_at(deadline, view.retrieval.as_ref().unwrap().candidates(hits))
             .await
             .map_err(|_| RecordError::Busy)??;
+        let inner = timeout_at(deadline, self.inner.lock())
+            .await
+            .map_err(|_| RecordError::Busy)?;
+        view.recheck(self, &inner)?;
+        let mut pinned = Vec::with_capacity(candidates.len());
+        for (rank, candidate) in candidates.into_iter().enumerate() {
+            work.charge(1)?;
+            pinned.push(
+                timeout_at(deadline, candidate.pin(rank, &inner))
+                    .await
+                    .map_err(|_| RecordError::Busy)??
+                    .ok_or(RecordError::Busy)?,
+            );
+        }
+        drop(inner);
+        let validation_work = work.clone();
+        let worker = crate::resources::spawn_blocking(move || {
+            let mut ids = Vec::with_capacity(pinned.len());
+            let mut earliest = None;
+            for candidate in pinned {
+                validation_work.charge(0)?;
+                let (id, expiry) = candidate.strict_evidence(view.evaluation)?;
+                ids.push(id);
+                earliest = earliest.into_iter().chain(expiry).min();
+            }
+            Ok::<_, RecordError>((view, ids, earliest))
+        });
+        let (view, mut ids, earliest) = timeout_at(deadline, worker)
+            .await
+            .map_err(|_| RecordError::Busy)?
+            .map_err(storage)??;
         ids.sort_unstable();
         let window = self
-            .deliver_window(view, output, deadline)
+            .deliver_window(view, output, deadline, earliest)
             .await
             .map_err(EventTimeError::record_error)?;
-        Ok((window, ids))
+        Ok((window, ids, work_limit - work.remaining()))
     }
 
     async fn read_window(
@@ -275,9 +324,9 @@ impl RecordPartition {
         selection: Selection,
     ) -> Result<Window, EventTimeError> {
         let (view, output) = self
-            .capture_and_read(window, limit, dependencies, deadline, selection)
+            .capture_and_read(window, limit, dependencies, deadline, selection, None)
             .await?;
-        self.deliver_window(view, output, deadline).await
+        self.deliver_window(view, output, deadline, None).await
     }
 
     async fn capture_and_read(
@@ -287,6 +336,7 @@ impl RecordPartition {
         dependencies: IndexDependencies,
         deadline: Deadline,
         selection: Selection,
+        work: Option<Arc<crate::search::QueryWork>>,
     ) -> Result<(View, Window), EventTimeError> {
         if window.is_empty() || limit == 0 || limit > MAX_RESULTS {
             return Err(
@@ -317,7 +367,7 @@ impl RecordPartition {
         drop(inner);
 
         let task = crate::resources::spawn_blocking(move || {
-            let output = view.read(window, limit, deadline, &selection)?;
+            let output = view.read(window, limit, deadline, &selection, work.as_deref())?;
             Ok::<_, EventTimeError>((view, output))
         });
         timeout_at(deadline, task)
@@ -331,6 +381,7 @@ impl RecordPartition {
         view: View,
         output: Window,
         deadline: Deadline,
+        additional_expiry: Option<u64>,
     ) -> Result<Window, EventTimeError> {
         #[cfg(test)]
         pause_delivery(&self.inner, deadline).await;
@@ -342,10 +393,10 @@ impl RecordPartition {
             return Err(RecordError::Busy.into());
         }
         view.recheck(self, &inner)?;
-        if output
-            .hits
-            .iter()
-            .any(|hit| hit.expires_at_ms.is_some_and(|expiry| expiry <= evaluation))
+        if additional_expiry
+            .into_iter()
+            .chain(output.hits.iter().filter_map(|hit| hit.expires_at_ms))
+            .any(|expiry| expiry <= evaluation)
         {
             return Err(RecordError::Busy.into());
         }
@@ -433,6 +484,8 @@ impl View {
             Some(inner.index.capture_query(limit).await?)
         };
         let view = Self {
+            #[cfg(test)]
+            root: inner.journal.root().to_owned(),
             cut,
             evaluation,
             anchor: anchor.selected_owner().to_owned(),
@@ -480,9 +533,13 @@ impl View {
         limit: usize,
         deadline: Deadline,
         selection: &Selection,
+        work: Option<&crate::search::QueryWork>,
     ) -> Result<Window, EventTimeError> {
         let mut suffix_hits = Vec::with_capacity(self.suffix.len());
         for row in &self.suffix {
+            if let Some(work) = work {
+                work.charge(1)?;
+            }
             if Deadline::now() >= deadline {
                 return Err(RecordError::Busy.into());
             }
@@ -517,6 +574,9 @@ impl View {
                 window,
                 |error| EventTimeError::from(state_rows::read_error(error)),
                 |id, time, reference| {
+                    if let Some(work) = work {
+                        work.charge(1)?;
+                    }
                     if Deadline::now() >= deadline {
                         return Err(RecordError::Busy.into());
                     }
