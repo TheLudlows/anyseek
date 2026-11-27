@@ -19,3 +19,5 @@
 Update the service guide and runnable examples together when an interface changes. Describe design invariants in their protocol documents and keep verification commands in the development guide. Performance reports retain their pinned revisions, raw evidence, and reproduction steps. The roadmap indexes these reports. Consult Git history, PRs, and CI for historical plans, completed work logs, and test organization history.
 
 Each document comes in Simplified Chinese and English. Use the links at the top to switch languages. Update both versions in the same change and keep sections, tables, commands, parameters, numbers, and verification conclusions aligned. Code examples and original evidence use the same content.
+
+The root `AGENTS.md` is maintained as a single version and is exempt from the bilingual requirement above.
