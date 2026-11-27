@@ -42,7 +42,7 @@ This entry point returns edge declaration candidates at a fixed cut for authoriz
 
 New sidecars also store canonical `entity_ids` membership keys in the same ordered tree. A Record can declare up to 32 namespaced IDs. The authenticated inventory carries a membership capability marker. An older sidecar still supplies edges, and member discovery requires an explicit rebuild.
 
-`candidate_paths` on a pinned view discovers anchor members, directed edges, and neighbor members. It checks member claims and their canonical versions by reading the selected Record. A shared visit limit spans all ranges, and one `QueryWork` accounts for logical work, positioned reads, bytes, and the original deadline. This interface supplies native candidates for an already authorized, isolated collection. Live delivery still requires publication, TTL, and authorization checks on the selected paths.
+`candidate_paths` on a pinned view discovers anchor members, directed edges, and neighbor members. It checks member claims and their canonical versions by reading the selected Record. A shared visit limit spans all ranges, and one `QueryWork` accounts for logical work, positioned reads, bytes, and the original deadline. The result holds its memory reservation and exposes read-only borrows through `seeds()` and `neighbors()`. This interface supplies native candidates for an already authorized, isolated collection. Live delivery still requires publication, TTL, and authorization checks on the selected paths.
 
 ## Authority and data ownership
 

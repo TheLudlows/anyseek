@@ -64,22 +64,57 @@ pub struct EntityMember {
 
 /// One neighbor, its declarations and visible member revisions at the same cut.
 pub struct EntityNeighborCandidates {
+    entity_id: String,
+    declarations: Vec<EntityCandidate>,
+    members: Vec<EntityMember>,
+}
+
+impl EntityNeighborCandidates {
     /// Neighbor entity ID.
-    pub entity_id: String,
+    pub fn entity_id(&self) -> &str {
+        &self.entity_id
+    }
+
     /// Edges linking the requested anchor and neighbor in the requested direction.
-    pub declarations: Vec<EntityCandidate>,
+    pub fn declarations(&self) -> &[EntityCandidate] {
+        &self.declarations
+    }
+
     /// Canonical member revisions of this neighbor in Record ID order.
-    pub members: Vec<EntityMember>,
+    pub fn members(&self) -> &[EntityMember] {
+        &self.members
+    }
 }
 
 /// Bounded discovery for an already authorized embedded owner of the pinned view.
 /// These candidates require final publication revalidation before live delivery.
+/// The candidate storage remains borrowed from the result that holds its memory lease.
+///
+/// ```compile_fail,E0616
+/// use anyseek::record::EntityCandidatePaths;
+///
+/// fn detach_candidates(mut result: EntityCandidatePaths) {
+///     let neighbors = std::mem::take(&mut result.neighbors);
+///     drop(result);
+///     assert!(!neighbors.is_empty());
+/// }
+/// ```
 pub struct EntityCandidatePaths {
-    /// Canonical member revisions of the anchor in Record ID order.
-    pub seeds: Vec<EntityMember>,
-    /// Neighbors with members, ordered by entity ID.
-    pub neighbors: Vec<EntityNeighborCandidates>,
+    seeds: Vec<EntityMember>,
+    neighbors: Vec<EntityNeighborCandidates>,
     _memory: MemoryLease,
+}
+
+impl EntityCandidatePaths {
+    /// Canonical member revisions of the anchor in Record ID order.
+    pub fn seeds(&self) -> &[EntityMember] {
+        &self.seeds
+    }
+
+    /// Neighbors with members, ordered by entity ID.
+    pub fn neighbors(&self) -> &[EntityNeighborCandidates] {
+        &self.neighbors
+    }
 }
 
 /// An immutable storage snapshot for a trusted embedded partition owner.

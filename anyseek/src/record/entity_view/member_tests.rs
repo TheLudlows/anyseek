@@ -92,26 +92,26 @@ async fn paths(
 
 fn expect(output: &EntityCandidatePaths, seed: &str, entity: &str, target: &str, version: u64) {
     assert_eq!(
-        output.seeds,
+        output.seeds(),
         [EntityMember {
             record_id: seed.into(),
             version: 1
         }]
     );
-    let [neighbor] = output.neighbors.as_slice() else {
+    let [neighbor] = output.neighbors() else {
         panic!("expected one neighbor")
     };
-    assert_eq!(neighbor.entity_id, entity);
+    assert_eq!(neighbor.entity_id(), entity);
     assert_eq!(
         neighbor
-            .declarations
+            .declarations()
             .iter()
             .map(|edge| edge.record_id.as_str())
             .collect::<Vec<_>>(),
         ["first", "second"]
     );
     assert_eq!(
-        neighbor.members,
+        neighbor.members(),
         [EntityMember {
             record_id: target.into(),
             version
@@ -176,10 +176,10 @@ async fn entity_members_discover_both_directions_and_shadow_after_reopen() {
     let view = p.capture_entity_adjacency().await.unwrap();
     assert_eq!(view.visible_seq(), 5);
     let forward = paths(&view, Out, "app:A").await;
-    assert_eq!(forward.seeds.len(), 1);
-    assert!(forward.neighbors.is_empty());
+    assert_eq!(forward.seeds().len(), 1);
+    assert!(forward.neighbors().is_empty());
     let reverse = paths(&view, In, "app:B").await;
-    assert!(reverse.seeds.is_empty() && reverse.neighbors.is_empty());
+    assert!(reverse.seeds().is_empty() && reverse.neighbors().is_empty());
     drop(view);
 
     let (clock, now) = crate::record::tests::test_clock(&p).await;
@@ -197,8 +197,8 @@ async fn entity_members_discover_both_directions_and_shadow_after_reopen() {
     assert_eq!(build(&p).await, 6);
     clock.set(expiry);
     let view = p.capture_entity_adjacency().await.unwrap();
-    assert!(paths(&view, Out, "app:A").await.neighbors.is_empty());
-    assert!(paths(&view, In, "app:B").await.seeds.is_empty());
+    assert!(paths(&view, Out, "app:A").await.neighbors().is_empty());
+    assert!(paths(&view, In, "app:B").await.seeds().is_empty());
     p.finish_service_shutdown().await.unwrap();
 }
 
