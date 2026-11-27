@@ -39,6 +39,8 @@ pub use committed::{CommittedBatch, CommittedItem, CommittedProgress, Independen
 mod index_consumers;
 mod publication;
 mod query;
+mod entity_view;
+pub use entity_view::{EntityAdjacencyView, EntityCandidate, EntityCandidates, EntityDirection};
 mod event_time_view;
 pub use event_time_view::{EventTimeResult, TimeVectorResult};
 pub(crate) use event_time_view::{EventTimeError, TimeVectorQuery};

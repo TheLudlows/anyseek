@@ -21,6 +21,8 @@ pub(super) struct Image {
     // Populated only after the selected file closure and base binding pass.
     #[serde(skip)]
     pub(super) event_time: Option<Arc<crate::storage::disk_records::event_time::Projection>>,
+    #[serde(skip)]
+    pub(super) entity: Option<Arc<crate::storage::disk_records::entity::Projection>>,
 }
 
 impl Image {
@@ -74,7 +76,7 @@ impl Image {
         self.owners()?;
         let base = directory(&self.base_owner)?;
         let decoded = if let Some(local) = local {
-            self.base.read_local(&base, local, authority, self.event_time.clone())?
+            self.base.read_local(&base, local, authority, self.event_time.clone(), self.entity.clone())?
         } else {
             self.base.read(&base, pool, authority)?
         };

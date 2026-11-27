@@ -3,7 +3,7 @@
 use super::*;
 use crate::storage::{
     build_budget::{File, reserve_memory},
-    disk_records::{Checkpoint, Limits, Located, Root, event_time, primary, rows},
+    disk_records::{Checkpoint, Limits, Located, Root, entity, event_time, primary, rows},
     payload_pool::{PoolBuilder, PoolReader},
 };
 use std::collections::BTreeSet;
@@ -35,6 +35,23 @@ fn projection_error(error: std::io::Error) -> RecordError {
     }
 }
 
+#[derive(Clone, Copy)]
+pub(super) struct ProjectionBuild {
+    pub(super) event_time: Option<event_time::BuildLimits>,
+    pub(super) entity: bool,
+}
+
+pub(super) fn entity_error(error: std::io::Error) -> RecordError {
+    if error
+        .get_ref()
+        .is_some_and(|cause| cause.is::<entity::Rejected>())
+    {
+        RecordError::Rejected(error.to_string())
+    } else {
+        read_error(error)
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Descriptor {
@@ -49,6 +66,7 @@ pub(super) struct Descriptor {
 pub(super) struct Base {
     pub(super) checkpoint: Arc<Checkpoint>,
     pub(super) event_time: Option<Arc<event_time::Projection>>,
+    pub(super) entity: Option<Arc<entity::Projection>>,
     count: u64,
     _pin: Arc<package_pins::Pin>,
 }
@@ -84,13 +102,19 @@ impl Descriptor {
         state: &State,
         config: &RecordConfig,
         pool: &mut PoolBuilder,
-        project: Option<(&str, event_time::BuildLimits)>,
+        project: Option<(&str, ProjectionBuild)>,
     ) -> Result<Self, RecordError> {
         let generation = identity(&state.lineage)?;
         let mut projection = project
-            .map(|(_, limits)| event_time::Builder::new(root, config.max_record_bytes, limits))
+            .and_then(|(_, build)| build.event_time)
+            .map(|limits| event_time::Builder::new(root, config.max_record_bytes, limits))
             .transpose()
             .map_err(projection_error)?;
+        let mut adjacency = project
+            .filter(|(_, build)| build.entity)
+            .map(|_| entity::Builder::new())
+            .transpose()
+            .map_err(entity_error)?;
         let mut keys = primary::Writer::create(root, config.max_record_bytes).map_err(storage)?;
         let mut rows = rows::SegmentWriter::create(root, SEGMENT).map_err(storage)?;
         let mut objects = BTreeSet::new();
@@ -133,6 +157,11 @@ impl Descriptor {
             {
                 projection.push(at, id, row).map_err(projection_error)?;
             }
+            if let Some(adjacency) = &mut adjacency
+                && let Some(document) = &record.document
+            {
+                adjacency.push(id, document, row).map_err(entity_error)?;
+            }
             Ok(true)
         })?;
         let descriptor = Self {
@@ -143,12 +172,31 @@ impl Descriptor {
             objects,
         };
         if let Some((projection, (owner, _))) = projection.zip(project) {
-            projection.finish(descriptor.event_time_binding(owner)?).map_err(projection_error)?;
+            projection
+                .finish(descriptor.event_time_binding(owner)?)
+                .map_err(projection_error)?;
+        }
+        if let Some((adjacency, (owner, _))) = adjacency.zip(project) {
+            adjacency
+                .finish(root, descriptor.entity_binding(owner)?)
+                .map_err(entity_error)?;
         }
         Ok(descriptor)
     }
 
-    pub(super) fn event_time_binding(&self, owner: &str) -> Result<event_time::Binding, RecordError> {
+    pub(super) fn entity_binding(&self, owner: &str) -> Result<entity::Binding, RecordError> {
+        Ok(entity::Binding {
+            owner: owner.to_owned(),
+            lineage: self.generation,
+            cut: self.committed_cut,
+            rows_sha256: checkpoint_codec::json_digest(self)?,
+        })
+    }
+
+    pub(super) fn event_time_binding(
+        &self,
+        owner: &str,
+    ) -> Result<event_time::Binding, RecordError> {
         Ok(event_time::Binding {
             owner: owner.to_owned(),
             lineage: self.generation,
@@ -165,12 +213,26 @@ impl Descriptor {
         config: &RecordConfig,
         pool: &PoolReader,
         event_time: Option<Arc<event_time::Projection>>,
+        entity: Option<Arc<entity::Projection>>,
     ) -> Result<Base, RecordError> {
         if self.generation != identity(lineage)? || self.committed_cut != committed_cut {
             return Err(storage("disk records differ from their selected State cut"));
         }
-        if event_time.as_ref().is_some_and(|projection| projection.cut() != committed_cut) {
-            return Err(storage("event-time projection differs from its selected Record cut"));
+        if event_time
+            .as_ref()
+            .is_some_and(|projection| projection.cut() != committed_cut)
+        {
+            return Err(storage(
+                "event-time projection differs from its selected Record cut",
+            ));
+        }
+        if entity
+            .as_ref()
+            .is_some_and(|projection| projection.cut() != committed_cut)
+        {
+            return Err(storage(
+                "entity adjacency differs from its selected Record cut",
+            ));
         }
         let payloads = self
             .objects
@@ -202,6 +264,7 @@ impl Descriptor {
         Ok(Base {
             checkpoint,
             event_time,
+            entity,
             count: self.count,
             _pin: pin,
         })
@@ -216,7 +279,7 @@ impl Descriptor {
         pool: &PoolReader,
         mut accept: impl FnMut(String, Record) -> Result<(), RecordError>,
     ) -> Result<(), RecordError> {
-        let base = self.open(root, lineage, committed_cut, config, pool, None)?;
+        let base = self.open(root, lineage, committed_cut, config, pool, None, None)?;
         base.visit(|id, row| decode(id, row, |record| accept(id.to_owned(), record)))
     }
 }

@@ -32,6 +32,14 @@ New full checkpoint bases store current record metadata in the disk directory. S
 
 Existing full descriptors 6 and 8 and the S3 recovery path keep their existing decoding contract. Local retrieval still keeps index locations in memory under their address budget. Group metadata, receipt metadata and payload descriptors have separate accounting from body reads. Cold authentication can still read whole files for checksums. These changes do not establish a whole-process RSS or cold-open I/O bound. See [#224](https://github.com/TheLudlows/anyseek/issues/224).
 
+### Optional entity adjacency sidecar
+
+An embedded local partition without automatic archival can call `RecordPartition::build_entity_adjacency` explicitly. The builder reads namespaced `from` and `to` values and an edge `type` from the canonical document's `relations.edges` array. It writes forward and reverse keys with their `RowRef` in the same authenticated base. The sidecar is disabled by default, is authenticated through the existing anchor inventory, and can be built without an event-time projection. Ordinary writes keep their existing validation. An invalid declaration or exhausted build budget rejects the optional build. The builder admits at most 8,192 derived keys and a 16 MiB sort budget.
+
+`RecordPartition::capture_entity_adjacency` pins the base and its bounded canonical suffix. Updates and tombstones shadow older edges by declaring Record ID. A range returns declarations ordered by neighbor and declaring ID, with at most 256 matching keys examined and subject to the collection candidate limit. An additional match beyond the limit rejects the entire read. Old views keep their files pinned until release, after which the existing GC can reclaim the package. Incremental checkpoints reuse the selected base. An ordinary full rebuild can select a new base without a sidecar, which requires an explicit rebuild.
+
+This entry point returns edge declaration candidates at a fixed cut for authorized embedded callers. A future online query still needs seed and target eligibility and a publication and authorization check at delivery.
+
 ## Authority and data ownership
 
 In S3 mode, SQLite is the mutable commit coordination authority for Record partitions. It stores head/owner epoch, commit and index watermarks, immutable references, bounded idempotency coordination, dependencies, pins, retirement, and backup/restore coordination. Object storage holds text, original vectors, indexes, and WAL contents. Local Record logs, payloads, and indexes are rebuildable cache, while Catalog and S3 SQLite metadata are durable authority.

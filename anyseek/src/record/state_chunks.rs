@@ -331,7 +331,7 @@ impl Descriptor {
     }
     pub(super) fn write_encoded(root: &Path, config: &RecordConfig,
         encoded: &checkpoint_codec::StateEncoding<'_>, pool: &mut PoolBuilder,
-        project: Option<(&str, crate::storage::disk_records::event_time::BuildLimits)>,
+        project: Option<(&str, state_rows::ProjectionBuild)>,
     ) -> Result<Self, RecordError> {
         let state = encoded.state();
         validate_config(config)?;
@@ -534,17 +534,19 @@ impl Descriptor {
         pool: &PoolReader,
         authority: u64,
     ) -> Result<Decoded, RecordError> {
-        self.read_inner(root, pool, authority, None, None)
+        self.read_inner(root, pool, authority, None, None, None)
     }
 
     pub(super) fn read_local(&self, root: &Path, pool: &Arc<state_values::OperationPool>, authority: u64,
         event_time: Option<Arc<crate::storage::disk_records::event_time::Projection>>,
+        entity: Option<Arc<crate::storage::disk_records::entity::Projection>>,
     ) -> Result<Decoded, RecordError> {
-        self.read_inner(root, &pool.reader, authority, Some(pool), event_time)
+        self.read_inner(root, &pool.reader, authority, Some(pool), event_time, entity)
     }
 
     fn read_inner(&self, root: &Path, pool: &PoolReader, authority: u64, local: Option<&Arc<state_values::OperationPool>>,
         event_time: Option<Arc<crate::storage::disk_records::event_time::Projection>>,
+        entity: Option<Arc<crate::storage::disk_records::entity::Projection>>,
     ) -> Result<Decoded, RecordError> {
         let sealed = match self.format {
             6 | 8 if self.records.is_none() => false,
@@ -578,7 +580,7 @@ impl Descriptor {
         if let Some(rows) = &self.records {
             if deferred.is_some() {
                 state.records = state_values::Records::from_base(
-                    rows.open(root, &state.lineage, state.seq, &self.config, pool, event_time)?)?;
+                    rows.open(root, &state.lineage, state.seq, &self.config, pool, event_time, entity)?)?;
             } else { rows.visit(root, &state.lineage, state.seq, &self.config, pool, |id, record| {
                 let key_bytes = (id.len() as u64).checked_mul(32).and_then(|n| n.checked_add(128)).ok_or(RecordError::Busy)?;
                 residency.grow(key_bytes).map_err(memory_error)?;
