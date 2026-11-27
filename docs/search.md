@@ -6,7 +6,7 @@ HTTP 查询用法见[服务指南](../anyseek/src/server/README.md#查询与遍�
 
 ## 文本归一化
 
-创建集合时可在 `config` 中选择 `text_normalization: "OpenCcT2s1_1_9"`；省略为 `"None"`，缺少该字段的元数据也按 None 解释。不支持查询级覆盖、在线修改或旧索引迁移。例如配置片段：
+创建集合时可在 `config` 中选择 `text_normalization: "OpenCcT2s1_1_9"`。默认是 `"None"`。该设置写入集合元数据，创建后固定，对查询和索引都生效。
 
 ```json
 {
@@ -42,7 +42,7 @@ N-gram 是相邻两个或三个词项组成的索引项，用于词法短语检�
 
 多个选项按位或组合，仍保留普通单词索引。FFR 和 FRF 分别检查自身开关，不依赖 RFF；5 表示 FF | RF，默认 9 为 FF | FFF。增加组合会增加空间与构建工作量，需要用实际数据测量。
 
-关闭 N-gram 仍支持普通短语搜索；开启也不会使 `rust` 被 `r`、`ru`、`us` 或 `r*` 匹配。独立位、默认及混合组合的既有回归覆盖提交前后、重开后的短语成员/计数与 BM25F/Proximity。历史 FFR/FRF 漏 postings 的修复不会补齐旧索引，受影响数据需从原始记录重建；默认 9 不启用这两种组合。
+关闭 N-gram 仍支持普通短语搜索；开启也不会使 `rust` 被 `r`、`ru`、`us` 或 `r*` 匹配。独立位、默认及混合组合的既有回归覆盖提交前后、重开后的短语成员/计数与 BM25F/Proximity。
 
 定义见 [NgramSet 与 FrequentwordType](../anyseek/src/index.rs)、[CreateIndexRequest](../anyseek/src/server/api_types.rs)，执行见 [tokenizer.rs](../anyseek/src/tokenizer.rs) 和 [search.rs](../anyseek/src/search.rs)。
 
@@ -54,7 +54,7 @@ N-gram 是相邻两个或三个词项组成的索引项，用于词法短语检�
 
 TTL 在 Top-K 前排除过期候选；后台回收退休其索引行之前，这些行仍可能影响语料统计。元数据过滤只限制候选，不重定义统计总体。同步/异步可见性以[Record 契约](record-model.md)为准，checkpoint 和原生 commit 不建立第二个业务可见性开关。
 
-独立公式 oracle 位于 `anyseek/tests/common/ngram_oracle.rs` 与 `anyseek/tests/lexical_correctness.rs`，覆盖 boost、不等 DF、Shared/PerField 与持久化状态；不依赖已删除的旧 posting 编码。
+独立公式 oracle 位于 `anyseek/tests/common/ngram_oracle.rs` 与 `anyseek/tests/lexical_correctness.rs`，覆盖 boost、不等 DF、Shared/PerField 与持久化状态。
 
 ## 稳定排序
 

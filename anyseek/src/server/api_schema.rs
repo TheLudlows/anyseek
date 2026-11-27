@@ -228,13 +228,13 @@ pub enum TextNormalization {
 #[derive(Serialize, ToSchema)]
 #[serde(remote = "crate::index::FieldLengthNormalization")]
 pub enum FieldLengthNormalization {
-    /// Historical shared length average.
+    /// Shared length average across fields.
     Shared,
     /// Nonempty physical document average for each field.
     PerField,
 }
 
-/// Zero-based reciprocal rank fusion. Omitted fields preserve legacy defaults.
+/// Zero-based reciprocal rank fusion.
 #[derive(ToSchema, Serialize)]
 #[serde(remote = "crate::search::RrfOptions")]
 pub struct RrfOptions {
@@ -248,7 +248,7 @@ pub struct RrfOptions {
     #[schema(default = 1, minimum = 0)]
     #[serde(default)]
     pub vector_weight: f32,
-    /// Per-shard TopK budget and global fusion cap; omitted preserves legacy window.
+    /// Per-shard TopK budget and global fusion cap.
     #[schema(minimum = 1)]
     pub keyword_candidates: Option<usize>,
     /// Per-shard TopK budget and global fusion cap; does not bound probes or scanned vectors.

@@ -410,7 +410,7 @@ export const english: Record<string, string> = {
   "请填写模型名称。": "Enter a model name.",
   "请选择集合中用于嵌入的文本字段。": "Select the collection's text fields to embed.",
   "请选择 Json 类型的向量目标字段。": "Select a Json vector target field.",
-  "服务未返回集合向量维度，请更新 API 服务后再使用自动嵌入。": "The service did not return collection vector dimensions. Update the API service before using automatic embeddings.",
+  "集合缺少有效的向量维度，无法自动生成嵌入。": "Automatic embeddings require valid collection vector dimensions.",
   "模型返回向量无效：需要 {0} 维有限数值数组。": "Invalid model vector: expected {0} finite numeric dimensions.",
   "请在连接与管理中重新填写当前模型的 API Key；浏览器未保留该密钥。": "Enter the current model's API Key again in Connection & management. The browser has not retained it.",
   "每次模型请求需包含 1–16 条非空文本。": "Each model request must contain 1–16 non-empty texts.",

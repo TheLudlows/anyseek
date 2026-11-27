@@ -5,15 +5,15 @@ from observation import observe_batch
 class Current(Engine):
  def create(self):
   cfg={'index_name':'capacity-baseline','schema':[{'field':f,'field_type':'Text','index_lexical':f in ['title','text'],'store':True} for f in ['id','docid','title','text']]}
-  self.seq+=1;self.request('POST','/api/v1/index',{'operation_id':op(self.seq),'collection_id':'bench','config':cfg,**({'capacity_profile':self.capacity_profile} if getattr(self,'capacity_profile',None) else {})});dump(self.out/'settings.json',self.request('GET','/api/v1/index/bench')[1])
+  self.seq+=1;self.request('POST','/api/v1/index',{'operation_id':op(self.seq),'collection_id':'bench','config':cfg});dump(self.out/'settings.json',self.request('GET','/api/v1/index/bench')[1])
 def main():
- p=argparse.ArgumentParser();p.add_argument('--revision',required=True);p.add_argument('--binary',type=pathlib.Path,required=True);p.add_argument('--data',type=pathlib.Path,required=True);p.add_argument('--out',type=pathlib.Path,required=True);p.add_argument('--capacity-profile',choices=['standard_10k','bounded_100k']);p.add_argument('--take',type=int);p.add_argument('--build-single-mib',type=int);p.add_argument('--build-shared-mib',type=int);a=p.parse_args();a.out=a.out.resolve();a.out.mkdir(parents=True,exist_ok=False)
+ p=argparse.ArgumentParser();p.add_argument('--revision',required=True);p.add_argument('--binary',type=pathlib.Path,required=True);p.add_argument('--data',type=pathlib.Path,required=True);p.add_argument('--out',type=pathlib.Path,required=True);p.add_argument('--take',type=int);p.add_argument('--build-single-mib',type=int);p.add_argument('--build-shared-mib',type=int);a=p.parse_args();a.out=a.out.resolve();a.out.mkdir(parents=True,exist_ok=False)
  assert not any(k.startswith('ANYSEEK_') for k in os.environ);os.sched_setaffinity(0,{2,3});os.environ['TOKENIZER_ANYSEEK_BINARY']=str(a.binary.resolve())
  overrides={}
  for arg,key in [(a.build_single_mib,'ANYSEEK_BUILD_MEMORY_BYTES'),(a.build_shared_mib,'ANYSEEK_BUILD_SHARED_MEMORY_BYTES')]:
   if arg is not None:overrides[key]=str(arg*1024*1024)
  os.environ.update(overrides)
- rows=json.loads(a.data.read_text());rows=rows[:a.take] if a.take else rows;e=Current('anyseek','restricted',a.out);e.capacity_profile=a.capacity_profile;accepted=[];last=None;failed=None;summary={'revision':a.revision,'binary_sha256':hashlib.sha256(a.binary.read_bytes()).hexdigest(),'corpus_sha256':hashlib.sha256(a.data.read_bytes()).hexdigest(),'attempt_target':len(rows),'accepted':0,'attempted':0,'status':'running','overrides':overrides,'capacity_profile':a.capacity_profile,'cpu_max':pathlib.Path('/sys/fs/cgroup/cpu.max').read_text().strip(),'memory_max':pathlib.Path('/sys/fs/cgroup/memory.max').read_text().strip()}
+ rows=json.loads(a.data.read_text());rows=rows[:a.take] if a.take else rows;e=Current('anyseek','restricted',a.out);accepted=[];last=None;failed=None;summary={'revision':a.revision,'binary_sha256':hashlib.sha256(a.binary.read_bytes()).hexdigest(),'corpus_sha256':hashlib.sha256(a.data.read_bytes()).hexdigest(),'attempt_target':len(rows),'accepted':0,'attempted':0,'status':'running','overrides':overrides,'cpu_max':pathlib.Path('/sys/fs/cgroup/cpu.max').read_text().strip(),'memory_max':pathlib.Path('/sys/fs/cgroup/memory.max').read_text().strip()}
  try:
   e.start();e.create();start=time.monotonic();e.phase='load'
   for i in range(0,len(rows),25):

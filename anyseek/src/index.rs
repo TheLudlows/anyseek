@@ -276,10 +276,9 @@ pub enum FieldLengthNormalization {
 }
 
 /// Immutable pre-tokenization text normalization, shared by index and query.
-/// Missing metadata defaults to None; an existing index is never auto-converted.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
 pub enum TextNormalization {
-    /// Preserve the existing analysis behavior (default).
+    /// Analyze text without normalization (default).
     #[default]
     None,
     /// Phrase-aware t2s using pinned OpenCC 1.1.9 tables, without regional rules.
@@ -297,10 +296,8 @@ pub struct IndexMetaObject {
     /// TokenizerType selects TantivySimpleV1 or JiebaMixedV1 (requires zh).
     pub tokenizer: TokenizerType,
     /// Pre-tokenization rule for this index and every query. Immutable after creation.
-    #[serde(default)]
     pub text_normalization: TextNormalization,
-    /// Persisted length policy; Shared remains the conservative default.
-    #[serde(default)]
+    /// Persisted field length normalization policy.
     pub field_length_normalization: FieldLengthNormalization,
 
     /// StopwordType defines the stopword behavior: None, English, German, French, Spanish, Custom.
@@ -480,7 +477,7 @@ pub(crate) fn hash64(term_bytes: &[u8]) -> u64 {
     crate::term_hash::term_key(term_bytes)
 }
 
-/// Build the exact persisted analysis dictionaries for both native and legacy callers.
+/// Build the dictionaries for the persisted analysis configuration.
 pub(crate) fn analysis_dictionaries(
     meta: &IndexMetaObject,
 ) -> (AHashSet<String>, Vec<String>, AHashSet<u64>) {

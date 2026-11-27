@@ -6,7 +6,7 @@ See the [service guide](../anyseek/src/server/README.en.md#queries-and-iteration
 
 ## Text normalization
 
-When creating a collection, select `text_normalization: "OpenCcT2s1_1_9"` under `config`. The default is `"None"`, also used for stored metadata missing the field. Query-level overrides, online changes, and legacy index migrations are unavailable. The following is a configuration excerpt.
+When creating a collection, select `text_normalization: "OpenCcT2s1_1_9"` under `config`. The default is `"None"`. The setting is persisted at creation and applies to indexing and queries.
 
 ```json
 {
@@ -42,7 +42,7 @@ Internal settings are `frequent_words` and `ngram_indexing`. HTTP does not accep
 
 Combine options with bitwise OR. Single-term indexing remains enabled. FFR and FRF check their own flags independently of RFF. 5 means FF | RF, and the default 9 means FF | FFF. More combinations cost more space and build work. Measure with real data.
 
-Ordinary phrase search works with N-grams disabled. Enabling them does not make `rust` match `r`, `ru`, `us`, or `r*`. Existing tests cover independent bits, default and combined flags, phrase membership and counts, and BM25F/Proximity before and after commit and reopening. The correction for historically missing FFR/FRF postings does not backfill old indexes. Rebuild affected data from original records. The default 9 enables neither bit.
+Ordinary phrase search works with N-grams disabled. Enabling them does not make `rust` match `r`, `ru`, `us`, or `r*`. Existing tests cover independent bits, default and combined flags, phrase membership and counts, and BM25F/Proximity before and after commit and reopening.
 
 See [NgramSet and FrequentwordType](../anyseek/src/index.rs) and [CreateIndexRequest](../anyseek/src/server/api_types.rs) for definitions, and [tokenizer.rs](../anyseek/src/tokenizer.rs) and [search.rs](../anyseek/src/search.rs) for execution.
 
@@ -54,7 +54,7 @@ Production Tantivy scoring retains BM25F/Bm25fProximity, field boosts, k1/b, and
 
 TTL excludes expired candidates before Top-K. Their index rows can still affect corpus statistics until background reclamation. Metadata filtering restricts candidates without redefining the statistical population. Synchronous and asynchronous visibility follow the [Record contract](record-model.en.md). Checkpoints and native commits do not create a second business visibility switch.
 
-The independent formula oracle in `anyseek/tests/common/ngram_oracle.rs` and `anyseek/tests/lexical_correctness.rs` covers boosts, unequal DF, Shared/PerField, and persistence states. It does not depend on the removed legacy posting encoding.
+The independent formula oracle in `anyseek/tests/common/ngram_oracle.rs` and `anyseek/tests/lexical_correctness.rs` covers boosts, unequal DF, Shared/PerField, and persistence states.
 
 ## Stable ordering
 

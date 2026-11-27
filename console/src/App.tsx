@@ -69,8 +69,6 @@ export default function App() {
   useEffect(() => {
     if (booted.current) return;
     booted.current = true;
-    storage.remove("apiKey");
-    storage.remove("bootstrap");
     const key = saved("tenant", "");
     if (key) void connect(key).catch(() => {});
   }, []);
@@ -313,8 +311,7 @@ export default function App() {
                   )}
                 </div>
               </section>
-              {tenant && <EmbeddingSettings key={owner + (selected?.id || "")} owner={owner}
-                collection={selected?.schema.some((f) => f.index_vector) ? selected : undefined} />}
+              {tenant && <EmbeddingSettings key={owner} owner={owner} />}
               <Recovery tenant={tenant} />
             </>
           ) : !tenant ? (

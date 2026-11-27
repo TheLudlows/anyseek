@@ -24,7 +24,9 @@ fn api_defaults_and_retired_codecs() {
 fn retired_disk_metadata_is_not_silently_reinterpreted() {
     // Unknown codecs/access types are rejected while decoding persisted configuration.
     // Record does not read the retired index.json format.
-    let valid: serde_json::Value=json!({"name":"typed","lexical_similarity":"Bm25f","tokenizer":"TantivySimpleV1"});
+    let valid: serde_json::Value=json!({"name":"typed","lexical_similarity":"Bm25f","tokenizer":"TantivySimpleV1",
+        "text_normalization":"None","field_length_normalization":"Shared"});
+    serde_json::from_value::<anyseek::index::IndexMetaObject>(valid.clone()).unwrap();
     for (field,value) in [("access_type","Mmap"),("access_type","Ram"),("document_compression","None"),("document_compression","Snappy"),("document_compression","Lz4"),("document_compression","Zstd")] {
         let mut invalid=valid.clone();invalid[field]=json!(value);
         assert!(serde_json::from_value::<anyseek::index::IndexMetaObject>(invalid).is_err());

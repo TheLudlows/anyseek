@@ -45,9 +45,9 @@ In Docker, set `API_UPSTREAM` to the authenticated gateway. This variable is use
 
 ## Retries and sessions
 
-Tenant selection is stored in the current tab's sessionStorage. Write requests persist the original operation ID and body before sending. After timeouts or unknown outcomes, retries reuse the original request and ID. Switching tenants does not automatically replay another tenant's unconfirmed requests. Service backup and restoration also retain the original request for confirmation. During upgrades, obsolete tenant keys and issuance-flow session entries are cleared, and standalone record retry data is kept. Pending writes from old connections do not bind automatically to a new namespace.
+Tenant selection is stored in the current tab's sessionStorage. Write requests persist the original operation ID and body before sending. After timeouts or unknown outcomes, retries reuse the original request and ID. Switching tenants does not automatically replay another tenant's unconfirmed requests. Service backup and restoration also retain the original request for confirmation.
 
-Model credentials for the embedding provider are configured separately from AnySeek service authentication and follow the existing session and explicit save rules.
+Model credentials are scoped to the connection, endpoint, and model. They stay in memory by default and can be saved for the current tab session.
 
 ## Verification
 

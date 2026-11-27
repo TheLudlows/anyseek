@@ -61,7 +61,7 @@ def seed(base, builder, directory, size):
     server = ScaleServer(base, data, directory / "create.log", SERVER_CPUS)
     try:
         server.call("POST", "/api/v1/index", {
-            "operation_id": operation(), "collection_id": "bench", "capacity_profile": "bounded_100k",
+            "operation_id": operation(), "collection_id": "bench",
             "embedding_space_id": "scale-fixed", "config": {
                 "index_name": "Published query scale", "schema": SCHEMA,
                 "tokenizer": "TantivySimpleV1", "vector": {"dimensions": 2},

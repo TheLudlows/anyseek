@@ -20,7 +20,7 @@ HTTP and web UI data requests share the service's Record/catalog implementation.
 | Service authentication and tenant namespaces | The upstream gateway handles user permissions. AnySeek validates the service credential and isolates collections, backups, and receipts using the trusted tenant header. It does not register or issue tenant keys. |
 | Backups | Independent collection snapshots, backup retirement, full service/catalog backup, and restoration to a new root that has never been started |
 
-The derived full-text index uses Tantivy and WAL-backed queryable deltas. Background materialization does not create a second commit authority. Vectors and metadata use separate components. Payload stores canonical original text and original vectors. The [architecture](architecture.en.md) covers queryable tails, budget reservations, and file ownership. Only new databases are supported. Legacy-format upgrades and migrations are unavailable.
+The derived full-text index uses Tantivy and WAL-backed queryable deltas. Background materialization does not create a second commit authority. Vectors and metadata use separate components. Payload stores canonical original text and original vectors. The [architecture](architecture.en.md) covers queryable tails, budget reservations, and file ownership.
 
 ## Integration and limits
 

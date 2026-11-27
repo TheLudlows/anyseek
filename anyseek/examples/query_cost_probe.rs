@@ -11,7 +11,7 @@ async fn main() {
     let output=&args[4];
     let p=if root.exists() {RecordPartition::open(&root,256*1024*1024).await.unwrap()} else {
         let config=RecordConfig {
-            index:serde_json::from_value(json!({"name":"query-cost","lexical_similarity":"Bm25f","tokenizer":"TantivySimpleV1","stop_words":"None","frequent_words":"None","ngram_indexing":0,"clustering":"None","inference":{"External":{"dimensions":3,"precision":"F32","quantization":"None","similarity":"Cosine"}}})).unwrap(),
+            index:serde_json::from_value(json!({"name":"query-cost","lexical_similarity":"Bm25f","tokenizer":"TantivySimpleV1","text_normalization":"None","field_length_normalization":"Shared","stop_words":"None","frequent_words":"None","ngram_indexing":0,"clustering":"None","inference":{"External":{"dimensions":3,"precision":"F32","quantization":"None","similarity":"Cosine"}}})).unwrap(),
             schema:serde_json::from_value(json!([
                 {"field":"body","field_type":"Text","store":true,"index_lexical":true},
                 {"field":"rank","field_type":"Int","store":true,"index_lexical":false,"facet":true},

@@ -65,7 +65,7 @@ Catalog 在 SQLite 保存集合、备份归属和管理回执，集合变更与�
 
 独立 restore 只恢复备份时保存的数据，不自动追平备份后的写入或删除，也不提供跨服务双活。
 
-每个 collection 一个 partition。没有跨 collection 事务、来源依赖、SQL/JOIN、完整图语言或旧格式迁移。Linux/Windows 进程故障回归不替代系统崩溃与断电验收。
+每个 collection 一个 partition。没有跨 collection 事务、来源依赖、SQL/JOIN或完整图语言。Linux/Windows 进程故障回归不替代系统崩溃与断电验收。
 
 ## 普通写入的提交基准
 

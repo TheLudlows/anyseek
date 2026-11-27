@@ -11,7 +11,8 @@ async fn segment_query_profile() {
     let output = PathBuf::from(std::env::var("ANYSEEK_SEGMENT_PROFILE_OUTPUT").expect("output file"));
     let temporary = tempfile::tempdir().unwrap(); let root = temporary.path().join("records");
     let meta = serde_json::from_value(json!({"name":"profile","lexical_similarity":"Bm25f",
-        "tokenizer":"TantivySimpleV1","stop_words":"None","frequent_words":"None","ngram_indexing":0,
+        "tokenizer":"TantivySimpleV1","text_normalization":"None","field_length_normalization":"Shared",
+        "stop_words":"None","frequent_words":"None","ngram_indexing":0,
         "clustering":"None","inference":{"External":{"dimensions":3,"precision":"F32","quantization":"None","similarity":"Cosine"}}})).unwrap();
     let schema = serde_json::from_value(json!([
         {"field":"body","field_type":"Text","store":true,"index_lexical":true},

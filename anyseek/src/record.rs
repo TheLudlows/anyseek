@@ -118,13 +118,11 @@ pub struct RecordConfig {
     pub schema: Vec<SchemaField>,
     /// Optional caller-provided description of the external embedding space.
     pub embedding_space_id: Option<String>,
-    /// Legacy value retained for serialized config and existing Rust callers.
-    /// Record identities are admitted by resource budgets.
+    /// Persisted configuration field included in catalog and checkpoint identities.
     pub max_records: usize,
     /// Per-command serialized byte budget.
     pub max_record_bytes: usize,
-    /// Legacy value retained for serialized config and existing Rust callers.
-    /// Operation receipts are admitted by resource budgets.
+    /// Persisted configuration field included in catalog and checkpoint identities.
     pub max_operations: usize,
     /// Maximum bytes per journal generation; checkpoint publication may use two.
     pub max_journal_bytes: u64,

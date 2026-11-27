@@ -7,7 +7,7 @@ import {
   newOperationId,
 } from "./api.ts";
 import { sendIngest } from "./ingest.ts";
-import { beginWriteAttempt, finishWriteAttempt, clearPendingWrites, restoreWriteOutcomes, type PendingWrites } from "./pending-writes.ts";
+import { beginWriteAttempt, finishWriteAttempt, clearPendingWrites, type PendingWrites } from "./pending-writes.ts";
 export type { PendingWrites } from "./pending-writes.ts";
 import type { Json } from "./types.ts";
 
@@ -89,7 +89,6 @@ export async function sendWrites(
 ) {
   if (pending.owner !== owner)
     throw new Error(t("保留的写入属于另一连接，请切回原租户处理。"));
-  restoreWriteOutcomes(pending);
   if (pending.delivery === "ingest") return sendIngest(pending, key, progress);
   for (let i = pending.completed; i < pending.requests.length; i++) {
     const batch = [pending.requests[i]];
