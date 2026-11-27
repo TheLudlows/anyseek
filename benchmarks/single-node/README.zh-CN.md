@@ -34,6 +34,21 @@ done
 
 用不同输出目录与候选 SHA 对候选二进制复跑，同一时刻运行一组。专用档要求操作员确认独占，数据路径必须有可识别的 NVMe 底层块设备，备份根必须在不同的块设备。共享/overlay 仅运行固定小夹具。装载达到预算时保留首个停止批及其逐项结果，后续规模仍可单独尝试。
 
+在预留主机上记录设备、进程 CPU 分配和实际可用字节，再安排两个版本的运行。
+
+```bash
+uname -srvmo
+lscpu
+taskset -pc "$$"
+cat /proc/meminfo /sys/fs/cgroup/cpu.max /sys/fs/cgroup/memory.max
+findmnt -T "$LOCAL_NVME" -o SOURCE,TARGET,FSTYPE,OPTIONS
+findmnt -T "$BACKUP_DEVICE" -o SOURCE,TARGET,FSTYPE,OPTIONS
+lsblk -b -o NAME,TYPE,TRAN,MODEL,SIZE,ROTA,MOUNTPOINTS
+df -B1 --output=source,avail,target "$LOCAL_NVME" "$BACKUP_DEVICE"
+```
+
+按四条正文循环平均，确定性文档 JSON 每条上界为 1,441 字节。计入 4,096 和 64 条辅助集合，三档文档 JSON 上界分别为 150,094,560、1,446,994,560、4,328,994,560 字节。请求封套和实际磁盘结构须另计。将备份前引擎稳态物理字节记为 `S`，完整归档复制件物理字节记为 `A`，额外的维护、staging 和临时空间峰值记为 `T`，在预留文件系统通过 `du -s -B1` 和报告的分配量采样测算。每轮数据盘先按 `1.2 × (2S + 4A + T)`、独立备份盘按 `1.2 × A` 预留，覆盖源库、恢复库、原归档、两个恢复控制目录复制件及一个归档大小的暂用空间。保留多轮输出时累加。安排 PITR 前按实际归档窗口补算日志字节。1 GiB preflight 采用不同于归档占盘的估算口径，独立记录首次预算拒绝。
+
 `report.json` 的成功请求 p99 使用最近秩。延迟包括 HTTP 往返和读取整个响应，排除生成请求及 JSON 响应解码。吞吐含生成负载、结果检验、记录及等待水位。Busy 和其它失败分别统计，未知结果保留原样。进程内存用 `VmHWM`，数据根、临时目录物理分配量每秒采样。采样峰值不覆盖两个采样点间的瞬时用量。重开是进程冷启动，操作系统页缓存保留。测设备冷读需专用机器另行记录缓存处理和操作。
 
 以集合和操作为单位复核混合负载时，将 `trace` 指向本次运行的 `requests.jsonl.gz`。
@@ -52,6 +67,45 @@ jq -s 'group_by([.collection, .operation]) | map(
 ```
 
 ## 恢复与故障矩阵
+
+### 发布期间点读
+
+以固定 Release 和指定的 #224 候选分别运行。每轮为四个独立小库复用同一语料与八路读者，覆盖仅读、并发写入、HTTP checkpoint、写入与 checkpoint 同时运行。记录每次初始请求和复核的路径及时间区间。观察线程在混合窗口内重试 503，窗口结束后核对同一 Record 的版本和原文。进度接口会等待分区锁，返回 `false` 时短时输出 fence 可能已经清除。静默等待后若读或健康仍失败，探针尝试同版本重开并记录结果。
+
+```bash
+python3 benchmarks/single-node/measure.py --binary "$baseline" \
+  --revision 74d48d92db27d4fa155ce38004ac079f3bf92835 \
+  --point-fence-probe --probe-rounds 3 --cpus 0,1 --out /tmp/anyseek-229-fence-baseline
+python3 benchmarks/single-node/measure.py --binary "$CANDIDATE_BINARY" \
+  --revision "$CANDIDATE_REVISION" \
+  --point-fence-probe --probe-rounds 3 --cpus 0,1 --out /tmp/anyseek-229-fence-candidate
+```
+
+退出 1 表示可用性失败，重试读到原文仍记失败。HTTP 503 与 HTTP 429 分开统计。退出 2 表示证据不完整，例如 checkpoint 对照缺少与点读重叠且成功的热集合 checkpoint。退出 0 适用于本次已测小库窗口。报告、逐场景请求轨迹及服务日志保留在输出目录。
+
+固定基线在 overlay 上的三轮探针判定为可用性失败。初次混合冒烟在热集合 checkpoint 期间的 5 次失败保留在原始轨迹。控制变量复测在有无 checkpoint 的并发写入中均复现。
+
+| 固定基线窗口 | 首次点读 503 / 请求数 | 混合窗口全部 HTTP 429 | 在同一进程复核原版本及原文 |
+| --- | ---: | ---: | ---: |
+| 仅读 | 0 / 96 | 0 | 无需重试 |
+| 写入，无 checkpoint | 9 / 96 | 18 | 9 / 9 |
+| Checkpoint，无写入 | 0 / 96 | 0 | 无需重试 |
+| Checkpoint 与写入 | 14 / 96 | 20 | 14 / 14 |
+
+23 次初始 `recovery_required` 都与普通 `async_write` 或 `record_delete` 请求重叠。6 次首次重试仍为 503。近端及静默后的进度采样均显示 `recovery_required: false`。所有失败点读均在原进程读回同一版本和原文。仅加日志的诊断 Release 对 8 次初始和 6 次首次重试 503 输出了 14 条 `stage=capture ... fenced=true`，未命中 Record 健康检查或响应交付拒绝分支。 [探针报告](results/point-fence-report.json) · [逐请求轨迹](results/point-fence-requests.jsonl.gz) · [诊断和原生用例输出](results/point-fence-diagnostic.txt)
+
+集成 Release `d8e19e18ac4166a5ffa71f41fe79888566496a89` 也未通过探针。并发写入无 checkpoint 时首次点读 503 为 7 / 96，加 checkpoint 为 3 / 96。两个窗口各有 23 次混合 HTTP 429。仅读及仅 checkpoint 均无点读 503，混合 429 分别为 4 次和 1 次。10 次失败都在原进程读回同一版本和原文，5 次首次重试仍为 503，进度采样均正常，无需重开。 [集成 PR #235](https://github.com/TheLudlows/anyseek/pull/235)
+
+点读路由在查询 Record 前同步取得 `output_permit()`。读到 `OutputState.fenced` 即返回 `RecordError::RecoveryRequired`，HTTP 映射为 503。普通批写在发布阶段置位，成功后清除。进度接口获取 `Inner`，因此会在短时 fence 清除后才采样。#224 可复用查询路由已用的等待发布机制，涵盖点读捕获和交付，并保留真正发布失败时的拒绝语义。修改后复跑本探针，以及暂停健康写者和实际发布失败两项回归。 [点读入口](https://github.com/TheLudlows/anyseek/blob/74d48d92db27d4fa155ce38004ac079f3bf92835/anyseek/src/server/record_service.rs#L970-L995) · [捕获检查](https://github.com/TheLudlows/anyseek/blob/74d48d92db27d4fa155ce38004ac079f3bf92835/anyseek/src/record.rs#L998-L1005) · [写入发布](https://github.com/TheLudlows/anyseek/blob/74d48d92db27d4fa155ce38004ac079f3bf92835/anyseek/src/record/write.rs#L250-L281) · [查询交付](https://github.com/TheLudlows/anyseek/blob/74d48d92db27d4fa155ce38004ac079f3bf92835/anyseek/src/server/record_service.rs#L1687-L1705)
+
+复核诊断日志时，在一次性 `74d48d9` checkout 应用[日志补丁](results/point-fence-diagnostic.patch.gz)，按同一 Release profile 编译并用相同探针运行。保留独立诊断二进制和原固定 Release。
+
+```bash
+gzip -dc benchmarks/single-node/results/point-fence-diagnostic.patch.gz | git -C "$DIAGNOSTIC_CHECKOUT" apply
+(cd "$DIAGNOSTIC_CHECKOUT" && cargo +1.98.0 build --locked --release -p anyseek --bin anyseek_server -j 4)
+```
+
+### 恢复矩阵
 
 | 用例 | 执行与核对 |
 | --- | --- |
@@ -74,7 +128,9 @@ for case in \
   record::group_write::tests::group_wal_process_exit_recovers_single_decision \
   record::anchor::tests::incremental_state_closure_survives_rejection_gc_and_reopen \
   record::anchor::tests::rejected_prepared_anchor_reclaims_only_unselected_objects \
-  record::anchor::tests::multisegment_delete_and_corrupt_selected_object_fail_closed; do
+  record::anchor::tests::multisegment_delete_and_corrupt_selected_object_fail_closed \
+  record::output::tests::transport_output_waits_for_publication_and_cancellation_does_not_cancel_writer \
+  record::output::tests::transport_output_rejects_failed_publication_and_old_permit_after_recovery; do
   cargo +1.98.0 test --locked -p anyseek --lib "$case" -- --exact
 done
 ```
@@ -96,7 +152,7 @@ python3 benchmarks/single-node/origence_pair.py --origence-repo "$ORIGENCE_CHECK
 
 | 检查 | 共享执行器观察 |
 | --- | --- |
-| 查询和维护 | 热集合 checkpoint 与 128 次查询重叠，随后运行的第二个集合 checkpoint 无重叠。混合负载共 128 次读，其中 5 次点读返回 503 `recovery_required`，13 次搜索返回 429 Busy。见[逐请求记录](results/overlay-requests.jsonl.gz)。 |
+| 查询和维护 | 热集合 checkpoint 与 128 次查询重叠，随后运行的第二个集合 checkpoint 无重叠。混合负载共 128 次读，其中 5 次点读失败并返回 503 `recovery_required`，13 次搜索返回 429 Busy。见[逐请求记录](results/overlay-requests.jsonl.gz)及上面的对照探针。 |
 | 同版本重开 | SIGKILL 后进程冷启动，在 782 ms 内验证 C。 |
 | 独立备份 | 备份 A 返回 200。从复制的归档恢复到新根并验证 A 共 4,234 ms。归档与源库仍在同一底层文件系统。损坏复制件返回 503 `storage_error`，原因是 `unsupported payload segment`。 |
 | 快照预算 | 固定二进制发布了 17,454,518 字节归档。[独立故障／诊断 Release 构建](results/preflight-report.json) 实测 preflight 为 3,496,639 字节，限额 1,073,741,824 字节。返回 200，归档实际为 17,454,510 字节。本轮未触及 preflight 拒绝或测量大规模查询容量。 |

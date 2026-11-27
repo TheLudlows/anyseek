@@ -36,7 +36,7 @@ MIN_FREE_BYTES = 512 * 1024**2
 class Server(LocalServer):
     tenant = "bench229"
     log_filter = ("anyseek::record::anchor=info,anyseek::record::indexer=info,"
-                  "anyseek::catalog::service_snapshot=debug")
+                  "anyseek::catalog::service_snapshot=debug,anyseek_229_fence=info")
 
     def close(self):
         # Match the shared lifecycle for normal shutdown. A deliberate SIGKILL
@@ -309,7 +309,7 @@ def load(evidence, server, collection, count, epoch, run):
         raise RuntimeError(f"loaded point read differs for {collection}: {first}")
 
 
-def read(evidence, server, phase, collection, count, lane, iterations, barrier=None):
+def read(evidence, server, phase, collection, count, lane, iterations, barrier=None, point_failure=None):
     if barrier is not None:
         barrier.wait()
     path = path_for(collection)
@@ -328,6 +328,8 @@ def read(evidence, server, phase, collection, count, lane, iterations, barrier=N
         for name, method, endpoint, body in operations[j % 4:] + operations[:j % 4]:
             response, attempt = evidence.call(server, phase, name, method, endpoint, body)
             if not attempt["success"]:
+                if point_failure and name == "point" and attempt["status"] == 503:
+                    point_failure(collection, i, attempt)
                 continue
             if name == "point" and (response["record_id"], response["version"], response["document"]) != (
                 f"r{i:09d}", 1, document(i)
@@ -393,6 +395,24 @@ def checkpoint(evidence, server, barrier):
         evidence.call(server, "mixed", f"{name}_checkpoint", "PATCH", path_for(name), detail=True)
 
 
+def mixed_workload(evidence, server, counts, iterations, epoch, *, writer=True, maintenance=True,
+                   point_failure=None):
+    workers = 8 + int(writer) + int(maintenance)
+    barrier = threading.Barrier(workers)
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = []
+        for lane in range(8):
+            name = "hot" if lane < 6 else "peer"
+            futures.append(pool.submit(read, evidence, server, "mixed", name, counts[name], lane,
+                                       iterations, barrier, point_failure))
+        if writer:
+            futures.append(pool.submit(activity, evidence, server, epoch, iterations, "mixed", barrier))
+        if maintenance:
+            futures.append(pool.submit(checkpoint, evidence, server, barrier))
+        for future in futures:
+            future.result()
+
+
 def measure(args, cpu_ids, backup_root, evidence, report, epoch):
     binary, out = args.binary, evidence.out
     loaded = report["load"]
@@ -411,16 +431,7 @@ def measure(args, cpu_ids, backup_root, evidence, report, epoch):
         phase[0] = "write_only"
         activity(evidence, server, epoch, iterations, "write_only")
         phase[0] = "mixed"
-        barrier = threading.Barrier(10)
-        with ThreadPoolExecutor(max_workers=10) as pool:
-            futures = [
-                pool.submit(read, evidence, server, "mixed", "hot" if lane < 6 else "peer",
-                            target if lane < 6 else counts["peer"], lane, iterations, barrier)
-                for lane in range(8)]
-            futures += [pool.submit(activity, evidence, server, epoch, iterations, "mixed", barrier),
-                        pool.submit(checkpoint, evidence, server, barrier)]
-            for future in futures:
-                future.result()
+        mixed_workload(evidence, server, counts, iterations, epoch)
         phase[0] = "backup"
         from recovery import make_backup
         cut = make_backup(evidence, server, backup_root, epoch, report)
@@ -466,6 +477,8 @@ def main():
     parser.add_argument("--scale", type=int, choices=SCALES)
     parser.add_argument("--cpus", default=",".join(map(str, sorted(os.sched_getaffinity(0))[:2])))
     parser.add_argument("--exclusive-nvme", action="store_true", help="attest that test devices and CPU are reserved")
+    parser.add_argument("--point-fence-probe", action="store_true", help="run the four small-store point-read controls")
+    parser.add_argument("--probe-rounds", type=int, default=3, help="fresh repetitions of each point-read control")
     args = parser.parse_args()
     if len(args.revision) != 40 or any(c not in "0123456789abcdef" for c in args.revision):
         parser.error("--revision must be a full lowercase commit SHA")
@@ -473,6 +486,8 @@ def main():
         parser.error("dedicated mode requires --scale, --exclusive-nvme and --backup-root")
     if args.mode == "smoke" and (args.scale or args.exclusive_nvme):
         parser.error("smoke mode has a fixed 512-record primary collection")
+    if args.point_fence_probe and (args.mode != "smoke" or args.backup_root or args.probe_rounds < 1):
+        parser.error("the point-fence probe needs smoke mode, no --backup-root, and positive --probe-rounds")
     args.binary, out = args.binary.resolve(strict=True), args.out.resolve()
     backup = args.backup_root.resolve() if args.backup_root else out / "backup-media"
     cpus = [int(cpu_id) for cpu_id in args.cpus.split(",")]
@@ -486,13 +501,18 @@ def main():
     if args.mode == "dedicated" and (not media["backing_nvme"] or not independent):
         parser.error("dedicated acceptance requires a local NVMe data device and independent backup media")
     out.mkdir(exist_ok=False)
-    backup.mkdir(exist_ok=False)
+    if not args.point_fence_probe:
+        backup.mkdir(exist_ok=False)
     # The subset below describes the fixed default-budget experiment. An operator's
     # AnySeek overrides, credentials, proxies and allocators must not affect it.
     for key in list(os.environ):
         if key.startswith(("ANYSEEK_", "SEEKPOWER_", "AWS_")) or key in {"LD_PRELOAD", "RUST_LOG"}:
             os.environ.pop(key)
     epoch = int(time.time() // 86400)
+    if args.point_fence_probe:
+        from point_fence import run_probe
+
+        return run_probe(args, out, cpus, media, epoch)
     report = {
         "status": "running", "mode": args.mode, "scale": args.scale or 512,
         "revision": args.revision, "baseline_revision": BASELINE,
@@ -532,4 +552,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
