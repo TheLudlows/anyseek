@@ -1,6 +1,7 @@
 //! A partition certificate selects this immutable state/index closure. Directory
 //! discovery is never a second head or a reason to adopt an unselected object.
 use super::*;
+use crate::storage::disk_records::event_time;
 use crate::storage::payload_pool::{Budget,Closure,PoolBuilder,PoolReader};
 use segment::{files,write_json,read_bounded,Inventory};
 
@@ -264,14 +265,19 @@ impl Reference {
     }
     pub(super) async fn prepare(root:&Path,config:&RecordConfig,state:&State,prior:Closure,previous:Option<&Reference>,view:Option<&view::RetrievalView>,compact:bool,journal:Option<&mut PartitionJournal>)->Result<Self,RecordError>{
         let encoded={let _phase=maintenance::Phase::new("state_measure_and_digest",state.seq);checkpoint_codec::StateEncoding::capture(state).await?};
-        Self::prepare_encoded(root,config,&encoded,prior,previous,view,compact,journal,None,None).await
+        Self::prepare_encoded(root,config,&encoded,prior,previous,view,compact,journal,None,None,None).await
     }
     pub(super) async fn prepare_captured(root:&Path,config:&RecordConfig,state:&State,prior:Closure,
         previous:Option<&Reference>,frames:&[Vec<u8>],native:Option<&NativeReuse>)->Result<Self,RecordError> {
         let encoded=checkpoint_codec::StateEncoding::capture(state).await?;
-        Self::prepare_encoded(root,config,&encoded,prior,previous,None,false,None,Some(frames),native).await
+        Self::prepare_encoded(root,config,&encoded,prior,previous,None,false,None,Some(frames),native,None).await
     }
-    async fn prepare_encoded(root:&Path,config:&RecordConfig,encoded:&checkpoint_codec::StateEncoding<'_>,prior:Closure,previous:Option<&Reference>,view:Option<&view::RetrievalView>,compact:bool,journal:Option<&mut PartitionJournal>,captured:Option<&[Vec<u8>]>,native:Option<&NativeReuse>)->Result<Self,RecordError>{
+    pub(super) async fn prepare_event_time(root: &Path, config: &RecordConfig, state: &State,
+        prior: Closure, limits: event_time::BuildLimits) -> Result<Self, RecordError> {
+        let encoded = checkpoint_codec::StateEncoding::capture(state).await?;
+        Self::prepare_encoded(root,config,&encoded,prior,None,None,true,None,None,None,Some(limits)).await
+    }
+    async fn prepare_encoded(root:&Path,config:&RecordConfig,encoded:&checkpoint_codec::StateEncoding<'_>,prior:Closure,previous:Option<&Reference>,view:Option<&view::RetrievalView>,compact:bool,journal:Option<&mut PartitionJournal>,captured:Option<&[Vec<u8>]>,native:Option<&NativeReuse>,event_time:Option<event_time::BuildLimits>)->Result<Self,RecordError>{
         let state=encoded.state();
         let _phase=maintenance::Phase::new("anchor_prepare",state.seq);
         let id=format!("{:032x}",rand::random::<u128>());
@@ -345,8 +351,9 @@ impl Reference {
             Some(image)=>{pool.retain_prior_closure();image},
             None=>anchor_image::Image {
                 base_owner:id.clone(),
-                base:state_chunks::Descriptor::write_encoded(&prepared,config,encoded,&mut pool)?,
+                base:state_chunks::Descriptor::write_encoded(&prepared,config,encoded,&mut pool,event_time.map(|limits|(id.as_str(),limits)))?,
                 deltas:Vec::new(),digest:encoded.digest(),
+                event_time:None,
             },
         };
         let payloads=pool.finish().map_err(storage)?;
@@ -384,7 +391,7 @@ impl Reference {
         }).await?;
         let (state_blocks,previous_capture,mut metadata_lease)=match image {
             Ok(metadata)=>metadata,
-            Err(payloads)=>return Box::pin(Self::prepare_encoded(root,config,encoded,payloads,previous,view,compact,None,None,native)).await,
+            Err(payloads)=>return Box::pin(Self::prepare_encoded(root,config,encoded,payloads,previous,view,compact,None,None,native,event_time)).await,
         };
         let mut segments=Vec::new();let mut statistics=Vec::new();
         let pending_count=native.map_or_else(||view.map_or(0,|v|v.pending_seals.len()),|capture|capture.pending.len());
@@ -509,12 +516,13 @@ impl Reference {
         if self.segments.iter().any(|s|!ids.insert(&s.id)){return Err(storage("duplicate selected segment"));}
         let path=directory(root,&self.id)?;
         if files(&path,closure_limit(authority_budget)?)?.as_slice()!=self.files.as_slice(){return Err(storage("anchor closure checksum mismatch"));}
-        let (manifest,mut manifest_lease)=read_manifest(&path.join("manifest"),authority_budget)?;
+        let (mut manifest,mut manifest_lease)=read_manifest(&path.join("manifest"),authority_budget)?;
         if manifest.format!=9{return Err(storage("unsupported anchor format"));}
         let owners=manifest.state.owners()?;
         if owners.last()!=Some(&self.id.as_str()) || self.state_blocks.len()+1!=owners.len() {
             return Err(storage("state block closure count or head mismatch"));
         }
+        let mut projection = Self::open_event_time(&path, &self.id, &self.files, &manifest.state)?;
         for (block,owner) in self.state_blocks.iter().zip(&owners) {
             if block.id!=*owner || block.id==self.id {
                 return Err(storage("state block closure order mismatch"));
@@ -523,7 +531,11 @@ impl Reference {
             if files(&path,closure_limit(authority_budget)?)?.as_slice()!=block.files.as_slice() {
                 return Err(storage("state block closure checksum mismatch"));
             }
+            if let Some(sealed) = Self::open_event_time(&path, &block.id, &block.files, &manifest.state)? {
+                projection = Some(sealed);
+            }
         }
+        manifest.state.event_time = projection;
         validate_config(manifest.state.config())?;
         let mut limits=budget(manifest.state.config())?;limits.bytes=limits.bytes.min(authority_budget);
         // PoolReader retains a separate copy of the closure while Manifest is
@@ -531,6 +543,34 @@ impl Reference {
         manifest_lease.grow(metadata_charge(checkpoint_codec::json_length(&manifest.payloads)?)?).map_err(memory_error)?;
         let pool=PoolReader::open(root,manifest.payloads.clone(),limits).map_err(storage)?;
         Ok((path,manifest,pool,manifest_lease))
+    }
+    fn event_time_descriptor(inventory: &Inventory) -> Result<Option<&segment::FileRef>, RecordError> {
+        let mut members = inventory.iter().filter(|member|
+            member.path.split('/').next() == Some(event_time::DIRECTORY));
+        let Some(descriptor) = members.next() else { return Ok(None); };
+        if descriptor.path != event_time::MEMBERS[0]
+            || !event_time::MEMBERS[1..].iter().all(|name|
+                members.next().is_some_and(|member| member.path == *name))
+            || members.next().is_some()
+        {
+            return Err(storage("incomplete event-time projection inventory"));
+        }
+        Ok(Some(descriptor))
+    }
+    fn open_event_time(path: &Path, owner: &str, files: &Inventory, state: &anchor_image::Image) -> Result<Option<Arc<event_time::Projection>>, RecordError> {
+        if let Some(descriptor) = Self::event_time_descriptor(files)? {
+            if state.base_owner != owner {
+                return Err(storage("event-time projection is outside its selected State base"));
+            }
+            let binding = state.base.record_rows()?.event_time_binding(owner)?;
+            let projection = event_time::Projection::open(path, &binding, state.config().max_record_bytes,
+                descriptor.bytes, descriptor.sha256).map_err(state_rows::read_error)?;
+            return Ok(Some(Arc::new(projection)));
+        }
+        Ok(None)
+    }
+    pub(super) fn selected_owner(&self) -> &str {
+        &self.id
     }
     // Only for a service archive whose exact journal/closure was already fully
     // opened and validated. Recheck every bound byte without reopening readers.
@@ -671,7 +711,7 @@ pub(super) async fn snapshot_payload(root:&Path,config:&RecordConfig,state:&Stat
     ->Result<(Vec<u8>,crate::storage::build_budget::MemoryLease,crate::storage::build_budget::DiskScope),RecordError>{
     let disk=crate::storage::build_budget::DiskScope::begin(root,closure_limit(config.max_journal_bytes)?).map_err(storage)?;
     let encoded=checkpoint_codec::StateEncoding::capture(state).await?;
-    let reference=Reference::prepare_encoded(root,config,&encoded,Closure::default(),None,None,true,None,None,None).await?;
+    let reference=Reference::prepare_encoded(root,config,&encoded,Closure::default(),None,None,true,None,None,None,None).await?;
     // An independent snapshot never becomes a live delta-proof predecessor.
     // Authenticate the same bytes without retaining another State's containers.
     let verified=reference.load_verified_view(root,config,&encoded,false).await?;
@@ -825,7 +865,7 @@ impl Inner {
         let encoded={let _phase=maintenance::Phase::new("state_measure_and_digest",next.seq);checkpoint_codec::StateEncoding::capture(next).await?};
         let snapshot_bytes=encoded.checkpoint_length(&self.config)?;
         let prior=if reuse{self.payloads.clone()}else{Closure::default()};
-        let mut reference=Reference::prepare_encoded(&root,&self.config,&encoded,prior,self.anchor.as_ref(),Some(&self.index),!reuse,if candidate.is_none() && reuse {Some(&mut self.journal)}else{None},None,None).await?;
+        let mut reference=Reference::prepare_encoded(&root,&self.config,&encoded,prior,self.anchor.as_ref(),Some(&self.index),!reuse,if candidate.is_none() && reuse {Some(&mut self.journal)}else{None},None,None,None).await?;
         #[cfg(test)]
         if root.join(".test-anchor-reject-prepared").exists() {
             return Err(storage("injected candidate rejection before certificate"));
@@ -950,6 +990,10 @@ impl Inner {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "anchor_event_time_tests.rs"]
+mod event_time_tests;
 
 #[cfg(test)]
 mod tests {

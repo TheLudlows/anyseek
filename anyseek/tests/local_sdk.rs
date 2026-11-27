@@ -204,3 +204,249 @@ async fn local_sdk_owns_publishes_isolates_and_recovers() {
     group_view(&reopened, "subscription", &[], 3).await;
     reopened.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn local_sdk_event_time_projection_shares_filters_and_survives_reopen() {
+    use anyseek::sdk::EventTimeRequest;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("catalog");
+    let engine = LocalEngine::open(&root, true).await.unwrap();
+    let tenant = "tenant";
+    let collection = "window";
+    engine
+        .create_collection(
+            tenant,
+            collection,
+            OperationId::new("create-window".into()),
+            serde_json::from_value(json!({"index_name":"window","schema":[
+                {"field":"body","field_type":"Text","store":true,"index_lexical":true},
+                {"field":"private","field_type":"Text","store":false},
+                {"field":"label","field_type":"String","filterable":true}
+            ]}))
+            .unwrap(),
+            None,
+        )
+        .await
+        .unwrap();
+    let expiry = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64
+        + 1600;
+    let row = |id: &str, time: i64, label: &str, expiry: Option<u64>| {
+        json!({
+            "record_id":id,"document":{"body":"alpha","private":"hidden","label":label},
+            "temporal":{"event_time_ms":time,"expire_at_ms":expiry}
+        })
+    };
+    let group = |id: &str, records: Vec<Value>| {
+        serde_json::from_value(json!({
+        "operation_id":OperationId::new(id.into()),"group_id":id,"expected_group_version":0,"records":records
+    })).unwrap()
+    };
+    engine
+        .replace_group(
+            tenant,
+            collection,
+            group(
+                "base",
+                vec![
+                    row("earlier", 9, "take", None),
+                    row("later", 11, "take", None),
+                    row("excluded", 10, "skip", None),
+                    row("matched", 10, "take", None),
+                    row("expired", 10, "take", Some(expiry)),
+                ],
+            ),
+        )
+        .await
+        .unwrap();
+    let request = json!({"temporal":{"event":{"from_ms":10,"to_ms":11}},"length":4,
+        "fields":["body","private"], "filter":[{"String":{"field":"label","filter":["take"]}}]});
+    let parse = || serde_json::from_value::<EventTimeRequest>(request.clone()).unwrap();
+    let mut invalid = request.clone();
+    invalid["query_vector"] = json!([1, 0]);
+    assert!(serde_json::from_value::<EventTimeRequest>(invalid).is_err());
+    assert_eq!(
+        engine
+            .query_event_time("other", collection, parse())
+            .await
+            .unwrap_err()
+            .kind(),
+        LocalErrorKind::NotFound
+    );
+    let missing = engine
+        .query_event_time(tenant, collection, parse())
+        .await
+        .unwrap_err();
+    assert_eq!(missing.kind(), LocalErrorKind::Rejected);
+    assert_eq!(missing.code(), "event_time_unavailable");
+    let ordinary = || serde_json::from_value(json!({"query":"alpha","length":10})).unwrap();
+    assert!(
+        !engine
+            .query(tenant, collection, ordinary())
+            .await
+            .unwrap()
+            .hits()
+            .is_empty()
+    );
+    assert_eq!(
+        engine
+            .build_event_time_projection(tenant, collection)
+            .await
+            .unwrap(),
+        1
+    );
+    tokio::time::sleep(Duration::from_millis(
+        expiry.saturating_sub(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64,
+        ) + 10,
+    ))
+    .await;
+    let result = engine
+        .query_event_time(tenant, collection, parse())
+        .await
+        .unwrap();
+    assert_eq!(result.visible_seq, 1);
+    assert_eq!(result.hits.len(), 1);
+    assert_eq!(result.hits[0].record_id, "matched");
+    assert_eq!(result.hits[0].document.as_ref().unwrap().len(), 1);
+    assert_eq!(result.hits[0].document.as_ref().unwrap()["body"], "alpha");
+    engine.shutdown().await.unwrap();
+
+    let engine = LocalEngine::open(&root, false).await.unwrap();
+    let result = engine
+        .query_event_time(tenant, collection, parse())
+        .await
+        .unwrap();
+    assert_eq!(result.visible_seq, 1);
+    assert_eq!(result.hits[0].record_id, "matched");
+    engine
+        .replace_group(
+            tenant,
+            collection,
+            group(
+                "overlay",
+                vec![
+                    row("a-overlay", 10, "take", None),
+                    row("suppressed-overlay", 10, "skip", None),
+                ],
+            ),
+        )
+        .await
+        .unwrap();
+    let updated = engine
+        .query_event_time(tenant, collection, parse())
+        .await
+        .unwrap();
+    assert_eq!(updated.visible_seq, 2);
+    assert_eq!(
+        updated
+            .hits
+            .iter()
+            .map(|row| row.record_id.as_str())
+            .collect::<Vec<_>>(),
+        ["a-overlay", "matched"]
+    );
+    for (i, chunk) in (0..129).collect::<Vec<_>>().chunks(43).enumerate() {
+        let rows = chunk
+            .iter()
+            .map(|n| row(&format!("r-{n}"), 20, "take", None))
+            .collect();
+        engine
+            .replace_group(tenant, collection, group(&format!("tail-{i}"), rows))
+            .await
+            .unwrap();
+    }
+    let exhausted = engine
+        .query_event_time(tenant, collection, parse())
+        .await
+        .unwrap_err();
+    assert_eq!(exhausted.kind(), LocalErrorKind::Rejected);
+    assert_eq!(exhausted.code(), "event_time_budget");
+    assert!(
+        !engine
+            .query(tenant, collection, ordinary())
+            .await
+            .unwrap()
+            .hits()
+            .is_empty()
+    );
+    assert_eq!(
+        engine
+            .build_event_time_projection(tenant, collection)
+            .await
+            .unwrap(),
+        5
+    );
+    let refreshed = engine
+        .query_event_time(tenant, collection, parse())
+        .await
+        .unwrap();
+    assert_eq!(refreshed.visible_seq, 5);
+    assert_eq!(
+        refreshed
+            .hits
+            .iter()
+            .map(|row| row.record_id.as_str())
+            .collect::<Vec<_>>(),
+        ["a-overlay", "matched"]
+    );
+    engine.shutdown().await.unwrap();
+
+    // An ordinary full checkpoint is supported by the underlying Record
+    // partition. Close the SDK owner before using that native entry point.
+    let catalog = anyseek::catalog::Catalog::open(&root).await.unwrap();
+    let entry = catalog.collection_entry(tenant, collection).await.unwrap();
+    let partition = anyseek::record::RecordPartition::open(
+        &root.join(entry.directory()),
+        entry.config.max_journal_bytes,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        partition
+            .index_committed(Duration::from_secs(20))
+            .await
+            .unwrap(),
+        5
+    );
+    partition.finish_service_shutdown().await.unwrap();
+    drop(partition);
+    drop(catalog);
+
+    let engine = LocalEngine::open(&root, false).await.unwrap();
+    let missing = engine
+        .query_event_time(tenant, collection, parse())
+        .await
+        .unwrap_err();
+    assert_eq!(missing.code(), "event_time_unavailable");
+    assert_eq!(
+        engine
+            .build_event_time_projection(tenant, collection)
+            .await
+            .unwrap(),
+        5
+    );
+    engine.shutdown().await.unwrap();
+    let engine = LocalEngine::open(&root, false).await.unwrap();
+    let replayed = engine
+        .query_event_time(tenant, collection, parse())
+        .await
+        .unwrap();
+    assert_eq!(replayed.visible_seq, refreshed.visible_seq);
+    assert_eq!(
+        replayed
+            .hits
+            .iter()
+            .map(|row| row.record_id.as_str())
+            .collect::<Vec<_>>(),
+        ["a-overlay", "matched"]
+    );
+    engine.shutdown().await.unwrap();
+}

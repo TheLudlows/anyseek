@@ -439,16 +439,9 @@ pub(super) fn filters(filter: TemporalFilter) -> Result<Vec<FacetFilter>, Record
     let mut filters = Vec::new();
     for (field, range) in [(FIELDS[0], filter.event), (FIELDS[1], filter.ingested)] {
         if let Some(range) = range {
-            let from = range.from_ms.unwrap_or(MIN_TIME);
-            let to = range.to_ms.unwrap_or(MAX_TIME as i64 + 1);
-            if from < MIN_TIME || to > MAX_TIME as i64 + 1 || from >= to {
-                return Err(RecordError::Rejected(
-                    "time range must be nonempty [from_ms,to_ms) within supported UTC range".into(),
-                ));
-            }
             filters.push(FacetFilter::Int {
                 field: field.into(),
-                filter: from..to,
+                filter: checked_range(range)?,
             });
         }
     }
@@ -468,6 +461,37 @@ pub(super) fn filters(filter: TemporalFilter) -> Result<Vec<FacetFilter>, Record
         });
     }
     Ok(filters)
+}
+
+fn checked_range(range: TimeRange) -> Result<std::ops::Range<i64>, RecordError> {
+    let from = range.from_ms.unwrap_or(MIN_TIME);
+    let to = range.to_ms.unwrap_or(MAX_TIME as i64 + 1);
+    if from < MIN_TIME || to > MAX_TIME as i64 + 1 || from >= to {
+        return Err(RecordError::Rejected(
+            "time range must be nonempty [from_ms,to_ms) within supported UTC range".into(),
+        ));
+    }
+    Ok(from..to)
+}
+
+pub(super) fn event_window(
+    mut request: TemporalFilter,
+) -> Result<(std::ops::Range<i64>, Vec<FacetFilter>), RecordError> {
+    let event = request.event.take()
+        .filter(|range| range.from_ms.is_some() && range.to_ms.is_some())
+        .ok_or_else(|| RecordError::Rejected("event-time query requires both event range endpoints".into()))?;
+    Ok((checked_range(event)?, filters(request)?))
+}
+
+pub(super) fn matches_indexed_time(
+    predicates: &[FacetFilter], metadata: &TemporalMetadata, ingested_at_ms: u64,
+) -> bool {
+    let values = indexed_values(metadata, ingested_at_ms);
+    predicates.iter().all(|predicate| {
+        let FacetFilter::Int { field, filter } = predicate else { return false; };
+        FIELDS.iter().position(|name| field == name)
+            .is_some_and(|slot| filter.contains(&values[slot]))
+    })
 }
 
 /// Authenticated checkpoint summary of a fully validated committed-time prefix.

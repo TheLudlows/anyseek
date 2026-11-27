@@ -24,6 +24,16 @@ pub(crate) fn validate_filters(
     schema: &HashMap<String, SchemaField>,
     filters: &[FacetFilter],
 ) -> Result<(), String> {
+    validate_filter_fields(filters, |name| schema.get(name))
+}
+
+pub(crate) fn validate_record_filters(schema: &[SchemaField], filters: &[FacetFilter]) -> Result<(), String> {
+    validate_filter_fields(filters, |name| schema.iter().find(|field| field.field == name))
+}
+
+fn validate_filter_fields<'a>(
+    filters: &[FacetFilter], lookup: impl Fn(&str) -> Option<&'a SchemaField>,
+) -> Result<(), String> {
     for filter in filters {
         let (field, expected, valid_range) = match filter {
             FacetFilter::Int { field, filter } => {
@@ -40,8 +50,7 @@ pub(crate) fn validate_filters(
             FacetFilter::String { field, .. } => (field, FieldType::String, true),
             FacetFilter::StringSet { field, .. } => (field, FieldType::StringSet, true),
         };
-        let definition = schema
-            .get(field)
+        let definition = lookup(field)
             .ok_or_else(|| format!("facet_filter field '{field}' does not exist"))?;
         if !definition.facet || definition.field_type != expected {
             return Err(format!(
@@ -55,6 +64,25 @@ pub(crate) fn validate_filters(
         }
     }
     Ok(())
+}
+
+/// Evaluate the same validated predicates on a canonical Record body.
+/// Like the segment evaluator, missing or null values reject the record.
+pub(crate) fn matches_document(
+    document: &crate::index::Document,
+    filters: &[FacetFilter],
+) -> bool {
+    filters.iter().all(|predicate| match predicate {
+        FacetFilter::Int { field, filter } | FacetFilter::Timestamp { field, filter } =>
+            document.get(field).and_then(serde_json::Value::as_i64).is_some_and(|value| filter.contains(&value)),
+        FacetFilter::Float { field, filter } =>
+            document.get(field).and_then(serde_json::Value::as_f64).is_some_and(|value| filter.contains(&value)),
+        FacetFilter::String { field, filter } =>
+            document.get(field).and_then(serde_json::Value::as_str).is_some_and(|value| filter.iter().any(|expected| expected == value)),
+        FacetFilter::StringSet { field, filter } =>
+            document.get(field).and_then(serde_json::Value::as_array).is_some_and(|values|
+                values.iter().any(|value| value.as_str().is_some_and(|value| filter.iter().any(|expected| expected == value)))),
+    })
 }
 
 /// Bound the temporary string-set expansion before copying IDs into a predicate.

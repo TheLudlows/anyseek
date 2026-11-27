@@ -57,6 +57,7 @@ impl PauseNext {
 
 #[derive(Default)]
 pub(in crate::server::record_service) struct Hooks {
+    pub(in crate::server::record_service) event_time_admission: PauseNext,
     pub(in crate::server::record_service) preflight: PauseNext,
     pub(in crate::server::record_service) before_install: PauseNext,
     pub(in crate::server::record_service) backup_snapshot: PauseNext,
@@ -148,6 +149,20 @@ async fn tcp_get(address: std::net::SocketAddr, headers: &HeaderMap, path: &str)
 
 #[tokio::test]
 async fn residency_pressure_keeps_frames_and_reopens_original_record() {
+    residency_pressure_keeps_frame(FrameSource::Record).await;
+}
+
+#[tokio::test]
+async fn event_time_checkpoint_receipt_frame_pins_built_generation() {
+    residency_pressure_keeps_frame(FrameSource::EventTimeCheckpoint).await;
+}
+
+enum FrameSource {
+    Record,
+    EventTimeCheckpoint,
+}
+
+async fn residency_pressure_keeps_frame(source: FrameSource) {
     use crate::storage::build_budget::{reserve_memory, shared_memory_usage};
     use http_body::Body as _;
 
@@ -195,13 +210,26 @@ async fn residency_pressure_keeps_frames_and_reopens_original_record() {
         .await
         .unwrap()
         .scope();
-    let mut request = axum::http::Request::builder().uri("/api/v1/index/c/doc/fixture");
-    request.headers_mut().unwrap().extend(headers.clone());
-    let response = app
-        .clone()
-        .oneshot(request.body(Body::empty()).unwrap())
-        .await
-        .unwrap();
+    let request = match source {
+        FrameSource::Record => {
+            let mut request = axum::http::Request::builder().uri("/api/v1/index/c/doc/fixture");
+            request.headers_mut().unwrap().extend(headers.clone());
+            request.body(Body::empty()).unwrap()
+        }
+        FrameSource::EventTimeCheckpoint => {
+            let mut request = axum::http::Request::builder()
+                .method("POST")
+                .uri("/api/v1/event-time-checkpoints");
+            request
+                .headers_mut()
+                .unwrap()
+                .extend(super::super::tests::master_headers());
+            request
+                .body(Body::from(r#"{"tenant_id":"tenant","collection_id":"c"}"#))
+                .unwrap()
+        }
+    };
+    let response = app.clone().oneshot(request).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let mut body = response.into_body();
     let bytes = std::future::poll_fn(|cx| Pin::new(&mut body).poll_frame(cx))
@@ -212,7 +240,10 @@ async fn residency_pressure_keeps_frames_and_reopens_original_record() {
         .unwrap();
     drop(body);
     let before: Value = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(before["document"]["body"], original);
+    match source {
+        FrameSource::Record => assert_eq!(before["document"]["body"], original),
+        FrameSource::EventTimeCheckpoint => assert_eq!(before, json!({"indexed_seq":1})),
+    }
     let (used, shared) = shared_memory_usage().unwrap();
     service.records.set_budget_for_test(used);
     let pressure = reserve_memory(1024).unwrap();
@@ -249,7 +280,10 @@ async fn residency_pressure_keeps_frames_and_reopens_original_record() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{after}");
-    assert_eq!(after, before);
+    assert_eq!(after["document"]["body"], original);
+    if matches!(source, FrameSource::Record) {
+        assert_eq!(after, before);
+    }
     let operation_uri = format!(
         "/api/v1/index/c/operation/{}/{}",
         operation.epoch, operation.nonce

@@ -3,7 +3,7 @@
 use super::*;
 use crate::storage::{
     build_budget::{File, reserve_memory},
-    disk_records::{Checkpoint, Limits, Located, Root, primary, rows},
+    disk_records::{Checkpoint, Limits, Located, Root, event_time, primary, rows},
     payload_pool::{PoolBuilder, PoolReader},
 };
 use std::collections::BTreeSet;
@@ -21,6 +21,17 @@ pub(super) fn read_error(error: std::io::Error) -> RecordError {
     }
 }
 
+fn projection_error(error: std::io::Error) -> RecordError {
+    if error
+        .get_ref()
+        .is_some_and(|cause| cause.is::<event_time::BuildLimit>())
+    {
+        RecordError::Rejected(error.to_string())
+    } else {
+        read_error(error)
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Descriptor {
@@ -34,6 +45,7 @@ pub(super) struct Descriptor {
 /// A selected immutable row directory and the GC pins for its physical files.
 pub(super) struct Base {
     pub(super) checkpoint: Arc<Checkpoint>,
+    pub(super) event_time: Option<Arc<event_time::Projection>>,
     count: u64,
     _pin: Arc<package_pins::Pin>,
 }
@@ -69,8 +81,13 @@ impl Descriptor {
         state: &State,
         config: &RecordConfig,
         pool: &mut PoolBuilder,
+        project: Option<(&str, event_time::BuildLimits)>,
     ) -> Result<Self, RecordError> {
         let generation = identity(&state.lineage)?;
+        let mut projection = project
+            .map(|(_, limits)| event_time::Builder::new(root, config.max_record_bytes, limits))
+            .transpose()
+            .map_err(projection_error)?;
         let mut keys = primary::Writer::create(root, config.max_record_bytes).map_err(storage)?;
         let mut rows = rows::SegmentWriter::create(root, SEGMENT).map_err(storage)?;
         let mut objects = BTreeSet::new();
@@ -107,14 +124,33 @@ impl Descriptor {
                 .push(id, &rows::Row { metadata, payload })
                 .map_err(storage)?;
             keys.push(id, row).map_err(storage)?;
+            if let Some(projection) = &mut projection
+                && record.document.is_some()
+                && let Some(at) = record.temporal.event_time_ms
+            {
+                projection.push(at, id, row).map_err(projection_error)?;
+            }
             Ok(true)
         })?;
-        Ok(Self {
+        let descriptor = Self {
             primary: keys.finish().map_err(storage)?,
             count: rows.finish().map_err(storage)?,
             generation,
             committed_cut: state.seq,
             objects,
+        };
+        if let Some((projection, (owner, _))) = projection.zip(project) {
+            projection.finish(descriptor.event_time_binding(owner)?).map_err(projection_error)?;
+        }
+        Ok(descriptor)
+    }
+
+    pub(super) fn event_time_binding(&self, owner: &str) -> Result<event_time::Binding, RecordError> {
+        Ok(event_time::Binding {
+            owner: owner.to_owned(),
+            lineage: self.generation,
+            cut: self.committed_cut,
+            rows_sha256: checkpoint_codec::json_digest(self)?,
         })
     }
 
@@ -125,9 +161,13 @@ impl Descriptor {
         committed_cut: u64,
         config: &RecordConfig,
         pool: &PoolReader,
+        event_time: Option<Arc<event_time::Projection>>,
     ) -> Result<Base, RecordError> {
         if self.generation != identity(lineage)? || self.committed_cut != committed_cut {
             return Err(storage("disk records differ from their selected State cut"));
+        }
+        if event_time.as_ref().is_some_and(|projection| projection.cut() != committed_cut) {
+            return Err(storage("event-time projection differs from its selected Record cut"));
         }
         let payloads = self
             .objects
@@ -158,6 +198,7 @@ impl Descriptor {
             .map_err(storage)?;
         Ok(Base {
             checkpoint,
+            event_time,
             count: self.count,
             _pin: pin,
         })
@@ -172,7 +213,7 @@ impl Descriptor {
         pool: &PoolReader,
         mut accept: impl FnMut(String, Record) -> Result<(), RecordError>,
     ) -> Result<(), RecordError> {
-        let base = self.open(root, lineage, committed_cut, config, pool)?;
+        let base = self.open(root, lineage, committed_cut, config, pool, None)?;
         base.visit(|id, row| decode(id, row, |record| accept(id.to_owned(), record)))
     }
 }

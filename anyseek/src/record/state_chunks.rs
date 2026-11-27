@@ -327,17 +327,18 @@ impl Descriptor {
         pool: &mut PoolBuilder,
     ) -> Result<Self, RecordError> {
         validate_config(config)?;
-        Self::write_encoded(root, config, &checkpoint_codec::StateEncoding::new(state)?, pool)
+        Self::write_encoded(root, config, &checkpoint_codec::StateEncoding::new(state)?, pool, None)
     }
     pub(super) fn write_encoded(root: &Path, config: &RecordConfig,
         encoded: &checkpoint_codec::StateEncoding<'_>, pool: &mut PoolBuilder,
+        project: Option<(&str, crate::storage::disk_records::event_time::BuildLimits)>,
     ) -> Result<Self, RecordError> {
         let state = encoded.state();
         validate_config(config)?;
         if encoded.length() as u64 > config.max_journal_bytes {
             return Err(invalid("complete state byte budget exceeded"));
         }
-        let records = state_rows::Descriptor::write(root, state, config, pool)?;
+        let records = state_rows::Descriptor::write(root, state, config, pool, project)?;
         let mut writer = Writer {
             root,
             config,
@@ -523,7 +524,7 @@ impl Descriptor {
         if count != state.records.len() { return Err(invalid("disk record missing from checkpoint")); }
         Ok(())
     }
-    fn record_rows(&self) -> Result<&state_rows::Descriptor, RecordError> {
+    pub(super) fn record_rows(&self) -> Result<&state_rows::Descriptor, RecordError> {
         self.records.as_ref().ok_or_else(|| invalid("missing authenticated disk records"))
     }
 
@@ -533,14 +534,18 @@ impl Descriptor {
         pool: &PoolReader,
         authority: u64,
     ) -> Result<Decoded, RecordError> {
-        self.read_inner(root, pool, authority, None)
+        self.read_inner(root, pool, authority, None, None)
     }
 
-    pub(super) fn read_local(&self, root: &Path, pool: &Arc<state_values::OperationPool>, authority: u64) -> Result<Decoded, RecordError> {
-        self.read_inner(root, &pool.reader, authority, Some(pool))
+    pub(super) fn read_local(&self, root: &Path, pool: &Arc<state_values::OperationPool>, authority: u64,
+        event_time: Option<Arc<crate::storage::disk_records::event_time::Projection>>,
+    ) -> Result<Decoded, RecordError> {
+        self.read_inner(root, &pool.reader, authority, Some(pool), event_time)
     }
 
-    fn read_inner(&self, root: &Path, pool: &PoolReader, authority: u64, local: Option<&Arc<state_values::OperationPool>>) -> Result<Decoded, RecordError> {
+    fn read_inner(&self, root: &Path, pool: &PoolReader, authority: u64, local: Option<&Arc<state_values::OperationPool>>,
+        event_time: Option<Arc<crate::storage::disk_records::event_time::Projection>>,
+    ) -> Result<Decoded, RecordError> {
         let sealed = match self.format {
             6 | 8 if self.records.is_none() => false,
             10 | 11 if self.records.is_some() => true,
@@ -572,7 +577,8 @@ impl Descriptor {
         let mut state = state.ok_or_else(|| invalid("missing state header"))?;
         if let Some(rows) = &self.records {
             if deferred.is_some() {
-                state.records = state_values::Records::from_base(rows.open(root, &state.lineage, state.seq, &self.config, pool)?)?;
+                state.records = state_values::Records::from_base(
+                    rows.open(root, &state.lineage, state.seq, &self.config, pool, event_time)?)?;
             } else { rows.visit(root, &state.lineage, state.seq, &self.config, pool, |id, record| {
                 let key_bytes = (id.len() as u64).checked_mul(32).and_then(|n| n.checked_add(128)).ok_or(RecordError::Busy)?;
                 residency.grow(key_bytes).map_err(memory_error)?;

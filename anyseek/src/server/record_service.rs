@@ -11,11 +11,14 @@ pub(crate) mod local;
 #[cfg(test)]
 #[path = "record_service/diagnostic_tests.rs"]
 mod diagnostic_tests;
-use super::api_types::{CreateIndexRequest, FieldRequest, GetDocumentRequest, SearchRequestObject};
+#[cfg(test)]
+#[path = "record_service/event_time_tests.rs"]
+mod event_time_tests;
+use super::api_types::{CreateIndexRequest, EventTimeRequest, FieldRequest, GetDocumentRequest, SearchRequestObject};
 use axum::{
     Json, Router,
     body::{Body, Bytes},
-    extract::{DefaultBodyLimit, Path, Query, State},
+    extract::{DefaultBodyLimit, Extension, Path, Query, State},
     http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -29,7 +32,7 @@ use anyseek::{
     index::{FrequentwordType, IndexMetaObject, LexicalSimilarity},
     index::Clustering,
     record::{
-        OperationId, RecordConfig, RecordCursor, RecordError, RecordPartition, RecordQuery,
+        EventTimeError, EventTimeResult, OperationId, RecordConfig, RecordCursor, RecordError, RecordPartition, RecordQuery,
         RecordWrite, DataOutputPermit, S3CompatibleRecordConfig, IndependentItem, GroupReplace,
     },
     vector::Inference,
@@ -53,15 +56,23 @@ tokio::task_local! { static ROUTED_COLLECTION: Option<admission::RoutedCollectio
 struct Principal(String);
 
 const TENANT_HEADER: &str = "x-anyseek-tenant";
+const ERROR_CODE_HEADER: &str = "x-anyseek-error-code";
+const EVENT_TIME_QUERY_PATH: &str = "/api/v1/index/{id}/event-time/query";
+const EVENT_TIME_CHECKPOINT_PATH: &str = "/api/v1/event-time-checkpoints";
 
 const MAX_BODY: usize = 2 * 1024 * 1024;
 const MAX_RESPONSE: usize = 16 * 1024 * 1024;
 #[derive(Clone, Debug)]
 struct Error(StatusCode, &'static str, String);
+impl Error {
+    fn body(&self) -> Value {
+        json!({"code":self.1,"message":self.2})
+    }
+}
 impl IntoResponse for Error {
     fn into_response(self) -> Response {
-        let mut response = (self.0, Json(json!({"code":self.1,"message":self.2}))).into_response();
-        response.headers_mut().insert("x-anyseek-error-code", self.1.parse().expect("static error code"));
+        let mut response = (self.0, Json(self.body())).into_response();
+        response.headers_mut().insert(ERROR_CODE_HEADER, header::HeaderValue::from_static(self.1));
         response
     }
 }
@@ -96,6 +107,15 @@ impl From<RecordError> for Error {
             RecordError::Storage(_) => (StatusCode::SERVICE_UNAVAILABLE, "storage_error"),
         };
         Self(status, code, e.to_string())
+    }
+}
+impl From<EventTimeError> for Error {
+    fn from(error: EventTimeError) -> Self {
+        match error {
+            EventTimeError::Unavailable(reason) => Self(StatusCode::BAD_REQUEST, "event_time_unavailable", reason.into()),
+            EventTimeError::Budget(reason) => Self(StatusCode::BAD_REQUEST, "event_time_budget", reason.into()),
+            EventTimeError::Record(error) => error.into(),
+        }
     }
 }
 fn bad(message: impl ToString) -> Error {
@@ -279,14 +299,9 @@ fn encode_data_response<T: Serialize>(
             Ok((status, bytes))
         }
     });
-    let (status, bytes) = match encoded {
-        Ok(value) => value,
-        Err(error) => (
-            error.0,
-            json!({"code":error.1,"message":error.2})
-                .to_string()
-                .into_bytes(),
-        ),
+    let (status, bytes, code) = match encoded {
+        Ok((status, bytes)) => (status, bytes, None),
+        Err(error) => (error.0, error.body().to_string().into_bytes(), Some(error.1)),
     };
     // The response may be produced by an owned task after the HTTP waiter has
     // gone away. Charge its bytes immediately, before the task-local is dropped.
@@ -310,6 +325,9 @@ fn encode_data_response<T: Serialize>(
             deadline: REQUEST_DEADLINE.try_with(|deadline| *deadline).ok(),
         }))
         .unwrap();
+    if let Some(code) = code {
+        response.headers_mut().insert(ERROR_CODE_HEADER, header::HeaderValue::from_static(code));
+    }
     if let Some(data) = data { response.extensions_mut().insert(data); }
     Ok(response)
 }
@@ -1704,6 +1722,147 @@ async fn checkpoint(
     };
     protected(result.map_err(Into::into))
 }
+
+#[derive(Deserialize, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
+struct EventTimeCheckpointRequest {
+    tenant_id: String,
+    collection_id: String,
+}
+
+#[derive(Default)]
+enum CheckpointAdmission {
+    #[default]
+    Waiting,
+    Accepted,
+    Closed,
+}
+
+type EventTimeAdmission = Arc<std::sync::Mutex<CheckpointAdmission>>;
+
+#[derive(Default)]
+struct EventTimeCheckpointWait(EventTimeAdmission);
+
+impl EventTimeCheckpointWait {
+    // Admission and waiter exit serialize around the synchronous try-start.
+    // Catalog authorization owns its task and can outlive a dropped waiter.
+    fn stop_waiting(&self) -> bool {
+        let Ok(mut admission) = self.0.lock() else { return true; };
+        if matches!(*admission, CheckpointAdmission::Accepted) {
+            return true;
+        }
+        *admission = CheckpointAdmission::Closed;
+        false
+    }
+
+    fn timeout_error(&self) -> Error {
+        if self.stop_waiting() {
+            Error(StatusCode::SERVICE_UNAVAILABLE, "outcome_unknown",
+                "The wait ended after checkpoint admission.".into())
+        } else {
+            Error(StatusCode::TOO_MANY_REQUESTS, "busy",
+                "The wait ended before checkpoint admission.".into())
+        }
+    }
+}
+
+impl Drop for EventTimeCheckpointWait {
+    fn drop(&mut self) {
+        self.stop_waiting();
+    }
+}
+
+fn event_time_checkpoint_guidance(code: &str) -> Option<&'static str> {
+    match code {
+        "busy" => Some("Query the current event-time projection before explicitly requesting a new build."),
+        "outcome_unknown" => Some("The build may continue. Query the current event-time projection first. A successful query can read a previous projection and does not confirm this refresh. A new explicit call requests a separate build."),
+        _ => None,
+    }
+}
+
+fn event_time_checkpoint_error(mut error: Error) -> Error {
+    if let Some(guidance) = event_time_checkpoint_guidance(error.1) {
+        error.2.push(' ');
+        error.2.push_str(guidance);
+    }
+    error
+}
+
+async fn event_time_checkpoint(
+    State(s): State<Arc<Service>>,
+    Extension(admission): Extension<EventTimeAdmission>,
+    headers: HeaderMap,
+    bytes: Bytes,
+) -> Result<Response, Error> {
+    s.admin(&headers).await?;
+    let request: EventTimeCheckpointRequest = parse(&bytes)?;
+    let deadline = REQUEST_DEADLINE.with(|deadline| *deadline);
+    let (seq, pin) = build_event_time_collection(&s, request.tenant_id, request.collection_id, deadline, admission)
+        .await.map_err(event_time_checkpoint_error)?;
+    protected_data(Ok(json!({"indexed_seq":seq})), Some(DataOutputPermit::residency_only(pin)))
+}
+
+async fn build_event_time_collection(
+    s: &Arc<Service>, tenant: String, id: String, deadline: tokio::time::Instant,
+    admission: EventTimeAdmission,
+) -> Result<(u64, ResidencyPin), Error> {
+    anyseek::catalog::validate_tenant(&tenant)?;
+    anyseek::catalog::validate_name(&id)?;
+    let p = s.record(&tenant, &id).await?;
+    let generation = p.generation;
+    let partition = p.clone();
+    #[cfg(test)]
+    let service = s.clone();
+    let job = s.catalog.authorized_generation(tenant.clone(), id.clone(), generation, move |_| async move {
+        #[cfg(test)]
+        service.cold.test.event_time_admission.wait().await;
+        let mut admission = admission.lock().map_err(|_| RecordError::OutcomeUnknown("checkpoint admission interrupted".into()))?;
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if !matches!(*admission, CheckpointAdmission::Waiting) || remaining.is_zero() {
+            return Err(RecordError::Busy);
+        }
+        let job = partition.start_event_time_checkpoint(remaining)?;
+        *admission = CheckpointAdmission::Accepted;
+        Ok(job)
+    }).await??;
+    let seq = job.finish().await?;
+    let seq = s.catalog.authorized_generation(tenant, id, generation, move |_| async move { seq }).await?;
+    Ok((seq, p.residency))
+}
+
+async fn event_time_query(
+    State(s): State<Arc<Service>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    bytes: Bytes,
+) -> Result<Response, Error> {
+    let request = parse::<EventTimeRequest>(&bytes)?;
+    let tenant = s.authenticate(&headers).await?;
+    let deadline = REQUEST_DEADLINE.with(|deadline| *deadline);
+    let (result, data) = query_event_time_collection(&s, tenant, id, request, deadline).await?;
+    protected_after_publication(result, data).await
+}
+
+async fn query_event_time_collection(
+    s: &Arc<Service>, tenant: String, id: String, request: EventTimeRequest,
+    deadline: tokio::time::Instant,
+) -> Result<(Result<EventTimeResult, Error>, DataOutputPermit), Error> {
+    let p = s.record(&tenant, &id).await?;
+    let data = p.output_permit_after_publication().await?;
+    let result = s.catalog.authorized_generation(tenant, id, p.generation, move |entry| async move {
+        let fields = stored_fields(&entry, &request.fields);
+        p.query_event_time(request.temporal, request.facet_filter, fields, request.length, deadline)
+            .await.map_err(Error::from)
+    }).await?;
+    Ok((result, data))
+}
+
+fn stored_fields(entry: &CollectionEntry, requested: &[String]) -> Vec<String> {
+    entry.config.schema.iter()
+        .filter(|field| field.store && (requested.is_empty() || requested.contains(&field.field)))
+        .map(|field| field.field.clone()).collect()
+}
+
 async fn query(
     State(s): State<Arc<Service>>,
     headers: HeaderMap,
@@ -1736,9 +1895,7 @@ async fn query_collection(
         let start=std::time::Instant::now();
         let vector=request.query_vector.as_ref().map(|value|anyseek::vector::parse_external_embedding(value,&entry.config.index.inference)).transpose().map_err(bad)?;
         let query=RecordQuery{temporal:request.temporal.clone(),text:request.query_string.clone(),vector,mode,query_type:request.query_type(),offset:request.offset,length:request.length,result_type:request.result_type(),fields:request.field_filter,filters:request.facet_filter,sort:request.result_sort};
-        let fields = entry.config.schema.iter().filter(|f| f.store &&
-            (request.fields.is_empty() || request.fields.contains(&f.field)))
-            .map(|f| f.field.clone()).collect();
+        let fields = stored_fields(&entry, &request.fields);
         let result=anyseek::server::query_records(&p,query,fields).await?;
         let analysis = entry.config.analysis_contract()?;
         let progress = p.committed_progress().await;
@@ -1849,13 +2006,30 @@ async fn request_admitted(
 ) -> Response {
     let version = request.version();
     let deadline = tokio::time::Instant::now() + service.request_timeout;
-    let (request, scope) = match tokio::time::timeout_at(deadline, admission::request(&service, request)).await {
+    let checkpoint = (request.method() == axum::http::Method::POST
+        && request.extensions().get::<axum::extract::MatchedPath>()
+            .is_some_and(|path| path.as_str() == EVENT_TIME_CHECKPOINT_PATH))
+        .then(EventTimeCheckpointWait::default);
+    let (mut request, scope) = match tokio::time::timeout_at(deadline, admission::request(&service, request)).await {
         Ok(Ok(value)) => value,
-        Ok(Err(error)) => return admission_refusal(error, version),
+        Ok(Err(error)) => {
+            let error = if checkpoint.is_some() { event_time_checkpoint_error(error) } else { error };
+            return admission_refusal(error, version);
+        }
         // No handler or owned data task has started. A previous attempt can
         // still be running, so callers must keep the original operation ID.
-        Err(_) => return admission_refusal(Error(StatusCode::TOO_MANY_REQUESTS, "busy", "admission deadline exceeded; retry the original operation identity".into()), version),
+        Err(_) => {
+            let error = if let Some(wait) = &checkpoint {
+                event_time_checkpoint_error(wait.timeout_error())
+            } else {
+                Error(StatusCode::TOO_MANY_REQUESTS, "busy", "admission deadline exceeded; retry the original operation identity".into())
+            };
+            return admission_refusal(error, version);
+        }
     };
+    if let Some(wait) = &checkpoint {
+        request.extensions_mut().insert(wait.0.clone());
+    }
     if request.uri().path().ends_with("/query")
         && request.uri().query().is_some_and(|q| !q.is_empty())
     {
@@ -1863,6 +2037,8 @@ async fn request_admitted(
     }
     let principal = request.extensions().get::<Principal>().cloned();
     let collection = request.extensions().get::<admission::RoutedCollection>().cloned();
+    let event_time_read = request.extensions().get::<axum::extract::MatchedPath>()
+        .is_some_and(|path| path.as_str() == EVENT_TIME_QUERY_PATH);
     let run = async move {
         match principal {
             Some(principal) => AUTHENTICATED.scope(principal.0, next.run(request)).await,
@@ -1873,12 +2049,17 @@ async fn request_admitted(
         match tokio::time::timeout_at(deadline, scope.clone().run(
             REQUEST_DEADLINE.scope(deadline, ROUTED_COLLECTION.scope(collection, run)))).await {
             Ok(response) => response,
-            Err(_) => Error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "outcome_unknown",
-                "request deadline exceeded; retry the original operation identity".into(),
-            )
-            .into_response(),
+            Err(_) if event_time_read => Error(StatusCode::TOO_MANY_REQUESTS, "busy",
+                "event-time query deadline exceeded".into()).into_response(),
+            Err(_) => {
+                let error = if let Some(wait) = &checkpoint {
+                    event_time_checkpoint_error(wait.timeout_error())
+                } else {
+                    Error(StatusCode::SERVICE_UNAVAILABLE, "outcome_unknown",
+                        "request deadline exceeded; retry the original operation identity".into())
+                };
+                error.into_response()
+            }
         };
     let (parts, body) = response.into_parts();
     Response::from_parts(
@@ -1911,6 +2092,8 @@ pub fn router(service: Arc<Service>) -> Router {
         .route("/api/v1/index/{id}/doc/{record_id}", get(read))
         .route("/api/v1/index/{id}/ingest", get(ingest_progress).post(ingest))
         .route("/api/v1/index/{id}/query", post(query))
+        .route(EVENT_TIME_QUERY_PATH, post(event_time_query))
+        .route(EVENT_TIME_CHECKPOINT_PATH, post(event_time_checkpoint))
         .route("/api/v1/index/{id}/iterator", post(iterate))
         .route("/api/v1/index/{id}/batch", post(batch))
         .route("/api/v1/index/{id}/group/replace", post(replace_group))
@@ -2008,7 +2191,7 @@ mod tests {
         assert!(service.record("tenant","c").await.is_ok());
         drop(service);std::fs::remove_dir_all(root).unwrap();
     }
-    fn master_headers()->HeaderMap{
+    pub(super) fn master_headers()->HeaderMap{
         let mut headers=HeaderMap::new();headers.insert("apikey",STANDARD.encode(Sha256::digest(b"anyseek-unit-test-secret")).parse().unwrap());headers
     }
     pub(super) async fn setup() -> (Arc<Service>,PathBuf,HeaderMap) {
@@ -2189,16 +2372,20 @@ mod tests {
         let response=app.clone().oneshot(request).await.unwrap();let status=response.status();
         let value=serde_json::from_slice(&axum::body::to_bytes(response.into_body(),MAX_RESPONSE).await.unwrap()).unwrap();(status,value)
     }
-    async fn namespace_api(app:&Router, method:&str, path:&str, tenant:&str, value:Option<Value>) -> (StatusCode, Value) {
+    pub(super) async fn namespace_api(app:&Router, method:&str, path:&str, tenant:&str, value:Option<Value>) -> (StatusCode, Value) {
+        let response = namespace_response(app, method, path, tenant, value).await;
+        let code=response.status();
+        let raw=axum::body::to_bytes(response.into_body(),MAX_RESPONSE).await.unwrap();
+        (code,serde_json::from_slice(&raw).unwrap())
+    }
+    pub(super) async fn namespace_response(app:&Router, method:&str, path:&str, tenant:&str, value:Option<Value>) -> Response {
         use tower::ServiceExt;
         let master=master_headers();
         let body=value.map(|v|serde_json::to_vec(&v).unwrap()).unwrap_or_default();
         let request=axum::http::Request::builder().method(method).uri(path)
             .header("apikey",master["apikey"].clone()).header(TENANT_HEADER,tenant)
             .header("content-type","application/json").body(Body::from(body)).unwrap();
-        let response=app.clone().oneshot(request).await.unwrap();let code=response.status();
-        let raw=axum::body::to_bytes(response.into_body(),MAX_RESPONSE).await.unwrap();
-        (code,serde_json::from_slice(&raw).unwrap())
+        app.clone().oneshot(request).await.unwrap()
     }
     #[tokio::test]
     async fn group_http_replaces_replays_clears_and_preserves_independent_routes() {
@@ -2706,6 +2893,7 @@ mod tests {
         for error in [RecordError::DurablePending(1 + count as u64),RecordError::OutcomeUnknown("injected".into())] {
             let response=protected_data::<Value>(Err(error.clone().into()),Some(data.clone())).unwrap();
             assert_eq!(response.status(),StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(response.headers()[ERROR_CODE_HEADER], Error::from(error.clone()).1);
             let value:Value=serde_json::from_slice(&axum::body::to_bytes(response.into_body(),4096).await.unwrap()).unwrap();
             assert_eq!(value["code"],Error::from(error.clone()).1); assert_eq!(value.as_object().unwrap().len(),2);
             let mut body=protected_data::<Value>(Err(error.into()),Some(data.clone())).unwrap().into_body();
@@ -3115,7 +3303,7 @@ mod tests {
 fn openapi_document() -> Value {
     use utoipa::OpenApi;
     #[derive(utoipa::OpenApi)]
-    #[openapi(components(schemas(CreateIndexRequest, SearchRequestObject, CollectionCreate)))]
+    #[openapi(components(schemas(CreateIndexRequest, SearchRequestObject, CollectionCreate, EventTimeRequest, EventTimeCheckpointRequest)))]
     struct Api;
     let mut doc = serde_json::to_value(Api::openapi()).unwrap();
     doc["openapi"] = json!("3.1.0");
@@ -3131,6 +3319,24 @@ fn openapi_document() -> Value {
     schemas.insert("TemporalFilter".into(),json!({"type":"object","additionalProperties":false,"properties":{"event":{"anyOf":[{"$ref":"#/components/schemas/TimeRange"},{"type":"null"}]},"ingested":{"anyOf":[{"$ref":"#/components/schemas/TimeRange"},{"type":"null"}]},"valid_at_ms":{"type":["integer","null"]}}}));
     schemas.get_mut("RecordWrite").unwrap()["properties"]["temporal"]=json!({"anyOf":[{"$ref":"#/components/schemas/TemporalMetadata"},{"type":"null"}]});
     schemas.get_mut("SearchRequestObject").unwrap()["properties"]["temporal"]=json!({"anyOf":[{"$ref":"#/components/schemas/TemporalFilter"},{"type":"null"}]});
+    schemas.get_mut("EventTimeRequest").unwrap()["properties"]["temporal"] = json!({
+        "type":"object","additionalProperties":false,"required":["event"],"properties":{
+            "event":{"type":"object","additionalProperties":false,"required":["from_ms","to_ms"],
+                "description":"Nonempty half-open UTC milliseconds range",
+                "properties":{"from_ms":{"type":"integer","minimum":-62135596800000i64},
+                              "to_ms":{"type":"integer","maximum":253402300800000i64}}},
+            "ingested":{"anyOf":[{"$ref":"#/components/schemas/TimeRange"},{"type":"null"}]},
+            "valid_at_ms":{"type":["integer","null"]}
+        }});
+    schemas.insert("EventTimeResult".into(), json!({
+        "type":"object","required":["visible_seq","evaluation_time_ms","hits"],"properties":{
+            "visible_seq":{"type":"integer","minimum":0},"evaluation_time_ms":{"type":"integer","minimum":0},
+            "hits":{"type":"array","maxItems":128,"description":"Descending event time, then ascending record ID. Documents contain only requested stored fields.",
+                "items":{"type":"object","required":["record_id","version","document","temporal","ingested_at_ms"],
+                    "properties":{"record_id":{"type":"string"},"version":{"type":"integer","minimum":1},
+                        "document":{"type":"object"},"temporal":{"$ref":"#/components/schemas/TemporalMetadata"},
+                        "ingested_at_ms":{"type":"integer","minimum":0},"expired_at_ms":{"type":["integer","null"]}}}}
+        }}));
     schemas.insert("GroupRecord".into(),json!({"type":"object","additionalProperties":false,"required":["record_id","document"],"properties":{
         "record_id":{"type":"string"},"document":{"type":"object"},"temporal":{"anyOf":[{"$ref":"#/components/schemas/TemporalMetadata"},{"type":"null"}]}}}));
     schemas.insert("GroupReplace".into(),json!({"type":"object","additionalProperties":false,"required":["operation_id","group_id","expected_group_version","records"],"properties":{
@@ -3175,6 +3381,10 @@ fn openapi_document() -> Value {
             "Retrieve records and statistics from one view",
             Some(json!({"$ref":"#/components/schemas/SearchRequestObject"})),
         ),
+        (EVENT_TIME_QUERY_PATH, "post", "Query an opted-in pure event-time window",
+            Some(json!({"$ref":"#/components/schemas/EventTimeRequest"}))),
+        (EVENT_TIME_CHECKPOINT_PATH, "post", "Service administration: build a bounded local event-time checkpoint. Omit the tenant header and name the tenant in the body.",
+            Some(json!({"$ref":"#/components/schemas/EventTimeCheckpointRequest"}))),
         ("/api/v1/index/{id}/ingest", "post", "Commit 1..64 independent commands; continue after business rejection; indexes asynchronous",
             Some(json!({"type":"object","additionalProperties":false,"required":["records"],"properties":{"records":{"type":"array","minItems":1,"maxItems":64,"items":{"$ref":"#/components/schemas/RecordWrite"}}}}))),
         ("/api/v1/index/{id}/ingest", "get", "Record committed_seq and asynchronous lexical_seq/vector_seq", None),
@@ -3302,11 +3512,29 @@ fn openapi_document() -> Value {
                     "committed_seq":{"type":["integer","null"],"minimum":0},"lexical_seq":{"type":"integer","minimum":0},"vector_seq":{"type":"integer","minimum":0},
                     "index_error":{"type":["string","null"]},"recovery_required":{"type":"boolean"}}}}}});
         }
+        if path.ends_with("/event-time/query") {
+            operation["responses"]["200"] = json!({"description":"Exact bounded latest-first window at one cut",
+                "content":{"application/json":{"schema":{"$ref":"#/components/schemas/EventTimeResult"}}}});
+            operation["responses"]["400"] = json!({"description":"Invalid request (rejected), projection unavailable (event_time_unavailable), or work budget exceeded (event_time_budget)"});
+            operation["responses"]["429"] = json!({"description":"Temporary admission, publication, or deadline refusal (busy)"});
+            operation["responses"]["503"] = json!({"description":"Storage integrity or recovery failure (storage_error or recovery_required)"});
+        }
+        if path == EVENT_TIME_CHECKPOINT_PATH {
+            operation["description"] = json!("No operation ID. After a timeout, query the current projection before explicitly starting a new build. A successful query can use a previous projection and does not confirm the refresh.");
+            operation["responses"]["default"] = json!({"description":"JSON code/message error"});
+            operation["responses"]["200"] = json!({"description":"Published checkpoint cut",
+                "content":{"application/json":{"schema":{"type":"object","required":["indexed_seq"],
+                    "properties":{"indexed_seq":{"type":"integer","minimum":0}}}}}});
+            operation["responses"]["403"] = json!({"description":"Tenant-scoped credentials cannot request administrative construction"});
+            operation["responses"]["429"] = json!({"description":"Busy. A timeout before checkpoint admission does not start a build."});
+            operation["responses"]["503"] = json!({"description":"Build failure or outcome_unknown. After admission the wait can end while the build continues."});
+        }
         let mut params = vec![
             json!({"name":"apikey","in":"header","required":path!="/api/v1/live","schema":{"type":"string"}}),
         ];
         if !matches!(path, "/api/v1/live" | "/api/v1/backups" | "/api/v1/backups/{id}"
-            | "/api/v1/service-backups" | "/api/v1/service-restores" | "/api/v1/catalog/operation/{epoch}/{nonce}") {
+            | "/api/v1/service-backups" | "/api/v1/service-restores" | EVENT_TIME_CHECKPOINT_PATH
+            | "/api/v1/catalog/operation/{epoch}/{nonce}") {
             params.push(json!({"name":"X-AnySeek-Tenant","in":"header","required":true,
                 "description":"Tenant namespace supplied by the authenticated gateway; not a user credential.",
                 "schema":{"type":"string","pattern":"^[a-z0-9][a-z0-9_-]{0,62}$"}}));

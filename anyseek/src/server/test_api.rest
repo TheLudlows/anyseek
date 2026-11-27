@@ -188,3 +188,18 @@ apikey: {{master_key}}
 Content-Type: application/json
 
 {"operation_id":{"epoch":{{epoch}},"nonce":"rest-delete-collection"}}
+
+### Event-time projection for an existing local collection (service administrator)
+POST {{base_url}}/api/v1/event-time-checkpoints
+apikey: {{master_key}}
+Content-Type: application/json
+
+{"tenant_id":"{{tenant_id}}","collection_id":"{{collection_id}}"}
+
+### Read a half-open UTC event-time window from the selected projection
+POST {{base_url}}/api/v1/index/{{collection_id}}/event-time/query
+apikey: {{master_key}}
+X-AnySeek-Tenant: {{tenant_id}}
+Content-Type: application/json
+
+{"temporal":{"event":{"from_ms":1735689600000,"to_ms":1735776000000}},"length":10,"fields":["body"]}

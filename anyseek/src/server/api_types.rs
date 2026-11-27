@@ -13,6 +13,26 @@ use utoipa::ToSchema;
 /// Initial HTTP ANN budget; calibrated on the fixed MIRACL Chinese train subset.
 pub const DEFAULT_NPROBE: usize = 200;
 
+/// Query one authenticated event-time projection. Both event endpoints are required.
+#[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct EventTimeRequest {
+    /// Event range with optional ingestion and validity predicates.
+    #[schema(value_type = Object)]
+    pub temporal: crate::record::TemporalFilter,
+    /// Maximum matches in descending event time and then ascending record ID.
+    #[serde(default = "length_api")]
+    #[schema(default = 10, minimum = 1, maximum = 128)]
+    pub length: usize,
+    /// Stored fields to include. An empty list selects all stored fields.
+    #[serde(default)]
+    pub fields: Vec<String>,
+    /// Common metadata predicates combined with AND.
+    #[serde(default, rename = "filter")]
+    #[schema(value_type = Vec<api_schema::FacetFilter>, max_items = 32)]
+    pub facet_filter: Vec<FacetFilter>,
+}
+
 /// Search text, vectors, or both. Empty input browses documents. Pending writes are visible.
 #[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
 #[serde(deny_unknown_fields)]

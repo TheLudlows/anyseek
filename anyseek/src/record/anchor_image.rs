@@ -18,6 +18,9 @@ pub(super) struct Image {
     pub base: state_chunks::Descriptor,
     pub deltas: Vec<Block>,
     pub digest: [u8; 32],
+    // Populated only after the selected file closure and base binding pass.
+    #[serde(skip)]
+    pub(super) event_time: Option<Arc<crate::storage::disk_records::event_time::Projection>>,
 }
 
 impl Image {
@@ -70,7 +73,11 @@ impl Image {
     ) -> Result<State, RecordError> {
         self.owners()?;
         let base = directory(&self.base_owner)?;
-        let decoded = if let Some(local) = local { self.base.read_local(&base, local, authority)? } else { self.base.read(&base, pool, authority)? };
+        let decoded = if let Some(local) = local {
+            self.base.read_local(&base, local, authority, self.event_time.clone())?
+        } else {
+            self.base.read(&base, pool, authority)?
+        };
         let mut state = decoded.state;
         for block in &self.deltas {
             Self::apply_block(&block.delta, &directory(&block.owner)?, pool, authority, self.config(), &mut state)?;
