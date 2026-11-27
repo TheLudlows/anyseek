@@ -353,6 +353,7 @@ impl Reference {
                 base_owner:id.clone(),
                 base:state_chunks::Descriptor::write_encoded(&prepared,config,encoded,&mut pool,event_time.map(|limits|(id.as_str(),limits)))?,
                 deltas:Vec::new(),digest:encoded.digest(),
+                event_time:None,
             },
         };
         let payloads=pool.finish().map_err(storage)?;
@@ -515,13 +516,13 @@ impl Reference {
         if self.segments.iter().any(|s|!ids.insert(&s.id)){return Err(storage("duplicate selected segment"));}
         let path=directory(root,&self.id)?;
         if files(&path,closure_limit(authority_budget)?)?.as_slice()!=self.files.as_slice(){return Err(storage("anchor closure checksum mismatch"));}
-        let (manifest,mut manifest_lease)=read_manifest(&path.join("manifest"),authority_budget)?;
+        let (mut manifest,mut manifest_lease)=read_manifest(&path.join("manifest"),authority_budget)?;
         if manifest.format!=9{return Err(storage("unsupported anchor format"));}
         let owners=manifest.state.owners()?;
         if owners.last()!=Some(&self.id.as_str()) || self.state_blocks.len()+1!=owners.len() {
             return Err(storage("state block closure count or head mismatch"));
         }
-        Self::verify_event_time(&path, &self.id, &self.files, &manifest.state)?;
+        let mut projection = Self::open_event_time(&path, &self.id, &self.files, &manifest.state)?;
         for (block,owner) in self.state_blocks.iter().zip(&owners) {
             if block.id!=*owner || block.id==self.id {
                 return Err(storage("state block closure order mismatch"));
@@ -530,8 +531,11 @@ impl Reference {
             if files(&path,closure_limit(authority_budget)?)?.as_slice()!=block.files.as_slice() {
                 return Err(storage("state block closure checksum mismatch"));
             }
-            Self::verify_event_time(&path, &block.id, &block.files, &manifest.state)?;
+            if let Some(sealed) = Self::open_event_time(&path, &block.id, &block.files, &manifest.state)? {
+                projection = Some(sealed);
+            }
         }
+        manifest.state.event_time = projection;
         validate_config(manifest.state.config())?;
         let mut limits=budget(manifest.state.config())?;limits.bytes=limits.bytes.min(authority_budget);
         // PoolReader retains a separate copy of the closure while Manifest is
@@ -553,16 +557,20 @@ impl Reference {
         }
         Ok(Some(descriptor))
     }
-    fn verify_event_time(path: &Path, owner: &str, files: &Inventory, state: &anchor_image::Image) -> Result<(), RecordError> {
+    fn open_event_time(path: &Path, owner: &str, files: &Inventory, state: &anchor_image::Image) -> Result<Option<Arc<event_time::Projection>>, RecordError> {
         if let Some(descriptor) = Self::event_time_descriptor(files)? {
             if state.base_owner != owner {
                 return Err(storage("event-time projection is outside its selected State base"));
             }
             let binding = state.base.record_rows()?.event_time_binding(owner)?;
-            event_time::verify(path, &binding, state.config().max_record_bytes,
+            let projection = event_time::Projection::open(path, &binding, state.config().max_record_bytes,
                 descriptor.bytes, descriptor.sha256).map_err(state_rows::read_error)?;
+            return Ok(Some(Arc::new(projection)));
         }
-        Ok(())
+        Ok(None)
+    }
+    pub(super) fn selected_owner(&self) -> &str {
+        &self.id
     }
     // Only for a service archive whose exact journal/closure was already fully
     // opened and validated. Recheck every bound byte without reopening readers.

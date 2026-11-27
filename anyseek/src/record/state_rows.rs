@@ -45,6 +45,7 @@ pub(super) struct Descriptor {
 /// A selected immutable row directory and the GC pins for its physical files.
 pub(super) struct Base {
     pub(super) checkpoint: Arc<Checkpoint>,
+    pub(super) event_time: Option<Arc<event_time::Projection>>,
     count: u64,
     _pin: Arc<package_pins::Pin>,
 }
@@ -160,9 +161,13 @@ impl Descriptor {
         committed_cut: u64,
         config: &RecordConfig,
         pool: &PoolReader,
+        event_time: Option<Arc<event_time::Projection>>,
     ) -> Result<Base, RecordError> {
         if self.generation != identity(lineage)? || self.committed_cut != committed_cut {
             return Err(storage("disk records differ from their selected State cut"));
+        }
+        if event_time.as_ref().is_some_and(|projection| projection.cut() != committed_cut) {
+            return Err(storage("event-time projection differs from its selected Record cut"));
         }
         let payloads = self
             .objects
@@ -193,6 +198,7 @@ impl Descriptor {
             .map_err(storage)?;
         Ok(Base {
             checkpoint,
+            event_time,
             count: self.count,
             _pin: pin,
         })
@@ -207,7 +213,7 @@ impl Descriptor {
         pool: &PoolReader,
         mut accept: impl FnMut(String, Record) -> Result<(), RecordError>,
     ) -> Result<(), RecordError> {
-        let base = self.open(root, lineage, committed_cut, config, pool)?;
+        let base = self.open(root, lineage, committed_cut, config, pool, None)?;
         base.visit(|id, row| decode(id, row, |record| accept(id.to_owned(), record)))
     }
 }

@@ -39,6 +39,7 @@ pub use committed::{CommittedBatch, CommittedItem, CommittedProgress, Independen
 mod index_consumers;
 mod publication;
 mod query;
+mod event_time_view;
 #[cfg(test)]
 mod disk_read_fixture;
 mod query_output;

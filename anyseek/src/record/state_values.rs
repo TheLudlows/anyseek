@@ -476,6 +476,15 @@ impl Records {
     pub(super) fn has_sealed_base(&self) -> bool {
         self.base.is_some()
     }
+    pub(super) fn event_time_base(&self) -> Option<&Arc<state_rows::Base>> {
+        self.base.as_ref().filter(|base| base.event_time.is_some())
+    }
+    // Every changed identity since the sealed base, including tombstones,
+    // is present exactly once. The validated manifest replay, WAL recovery
+    // and live commits all use the same replacement path.
+    pub(super) fn recent_records(&self) -> impl ExactSizeIterator<Item = &Shared<Record>> {
+        self.values.values()
+    }
     #[cfg(test)]
     pub(super) fn recent_count(&self) -> usize {
         self.values.len()

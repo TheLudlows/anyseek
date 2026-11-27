@@ -372,41 +372,94 @@ fn open(
     Ok(index)
 }
 
-pub(crate) fn verify(
-    root: &Path,
-    expected: &Binding,
-    max_id_bytes: usize,
-    descriptor_bytes: u64,
-    descriptor_sha256: Digest,
-) -> io::Result<()> {
-    open(
-        root,
-        expected,
-        max_id_bytes,
-        descriptor_bytes,
-        descriptor_sha256,
-    )
-    .map(|_| ())
+pub(crate) struct Projection {
+    index: primary::Index,
+    cut: u64,
+    _memory: MemoryLease,
 }
 
-#[cfg(test)]
-pub(crate) fn lookup_for_test(
-    root: &Path,
-    binding: &Binding,
-    max_id_bytes: usize,
-    descriptor_bytes: u64,
-    descriptor_sha256: Digest,
-    event_ms: i64,
+impl Projection {
+    pub(crate) fn open(
+        root: &Path,
+        expected: &Binding,
+        max_id_bytes: usize,
+        descriptor_bytes: u64,
+        descriptor_sha256: Digest,
+    ) -> io::Result<Self> {
+        let memory = reserve_memory(1024 + 2 * root.as_os_str().len() as u64)?;
+        let index = open(
+            root,
+            expected,
+            max_id_bytes,
+            descriptor_bytes,
+            descriptor_sha256,
+        )?;
+        Ok(Self {
+            index,
+            cut: expected.cut,
+            _memory: memory,
+        })
+    }
+
+    pub(crate) fn cut(&self) -> u64 {
+        self.cut
+    }
+
+    pub(crate) fn visit<E>(
+        &self,
+        window: std::ops::Range<i64>,
+        error: impl Fn(io::Error) -> E,
+        mut accept: impl FnMut(&str, i64, RowRef) -> Result<bool, E>,
+    ) -> Result<(), E> {
+        if window.is_empty() {
+            return Err(error(invalid("empty event-time window")));
+        }
+        // Start at the greatest included integer timestamp. Even a large tie
+        // at the exclusive endpoint requires no reads of its candidate rows.
+        let start = format!("{:016x}", key_prefix(window.end - 1));
+        let mut cursor = self.index.cursor(&start, false).map_err(&error)?;
+        while let Some((key, reference)) = cursor.next().map_err(&error)? {
+            let key = key.as_str();
+            let (prefix, id) = key
+                .split_at_checked(TIME_BYTES)
+                .filter(|(_, id)| !id.is_empty())
+                .ok_or_else(|| error(invalid("invalid event-time candidate key")))?;
+            let time = u64::from_str_radix(prefix, 16)
+                .map(|value| (!value ^ (1 << 63)) as i64)
+                .map_err(|_| error(invalid("invalid event-time candidate timestamp")))?;
+            if time < window.start {
+                break;
+            }
+            if time >= window.end {
+                return Err(error(invalid("event-time candidate is out of order")));
+            }
+            if !accept(id, time, reference)? {
+                break;
+            }
+        }
+        Ok(())
+    }
+}
+
+pub(crate) fn locate<'a>(
+    base: &'a Checkpoint,
     id: &str,
-) -> io::Result<Option<RowRef>> {
-    open(
-        root,
-        binding,
-        max_id_bytes,
-        descriptor_bytes,
-        descriptor_sha256,
-    )?
-    .find(&make_key(event_ms, id, id.len() + TIME_BYTES)?)
+    time: i64,
+    reference: RowRef,
+    evaluation: u64,
+) -> io::Result<Located<'a>> {
+    if base.primary.find(id)? != Some(reference) {
+        return Err(invalid(
+            "event-time candidate differs from selected canonical row",
+        ));
+    }
+    let row = base.row(id, reference, evaluation)?;
+    if !row.metadata.is_live() || row.metadata.temporal.event_time_ms != Some(time) {
+        return Err(invalid(
+            "event-time candidate differs from selected row metadata",
+        ));
+    }
+    Ok(row)
 }
 
 #[cfg(test)]
