@@ -275,6 +275,24 @@ fn sealed_and_recent_records_share_order_version_and_expiration() {
         ["d", &long_a, &long_x]
     );
     assert!(view.recent_bytes <= 4096);
+
+    let successor = view
+        .prepare_successor(
+            10,
+            vec![
+                change("c", tombstone(4, None, None), None),
+                change("d", body_metadata(7, None), Some(BASE_BODY)),
+            ],
+        )
+        .unwrap();
+    assert_eq!(view.get("c", 21).unwrap().unwrap().metadata.version, 3);
+    assert_eq!(view.get("d", 21).unwrap().unwrap().metadata.version, 6);
+    assert_eq!(successor.get("d", 21).unwrap().unwrap().metadata.version, 7);
+    assert!(successor.matches("c", &ExpectedVersion::Match(4), 21).unwrap());
+    assert_eq!(
+        page_ids(&successor.page("", 5, 21).unwrap()),
+        ["d", &long_a, &long_x]
+    );
 }
 
 #[test]

@@ -1,5 +1,6 @@
 //! Offline tool for capturing and restoring a retained local Record WAL window.
-use anyseek::record::{LocalArchiveWindow, RecordPartition};
+use anyseek::record::{LocalArchivePart, LocalArchiveWindow, RecordPartition};
+use serde::de::DeserializeOwned;
 use std::{error::Error, io::Read, path::Path};
 
 #[tokio::main(flavor = "current_thread")]
@@ -17,12 +18,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             println!("{}", serde_json::to_string(&witness)?);
         }
         Some((mode, [backup, archive, destination, budget, cut, witness])) if mode == "restore" => {
-            let mut raw = Vec::new();
-            std::fs::File::open(witness)?.take(4097).read_to_end(&mut raw)?;
-            if raw.len() > 4096 {
-                return Err("archive witness exceeds 4096 bytes".into());
-            }
-            let witness: LocalArchiveWindow = serde_json::from_slice(&raw)?;
+            let witness: LocalArchiveWindow = read_json(witness, 4096)?;
             RecordPartition::restore_local_archive(
                 Path::new(backup),
                 Path::new(archive),
@@ -33,7 +29,25 @@ async fn main() -> Result<(), Box<dyn Error>> {
             )
             .await?;
         }
-        _ => return Err("usage: local_archive_cut capture SOURCE BACKUP ARCHIVE BUDGET | restore BACKUP ARCHIVE DESTINATION BUDGET CUT WITNESS".into()),
+        Some((mode, [backup, destination, budget, cut, manifest])) if mode == "restore-chain" => {
+            let parts: Vec<LocalArchivePart> = read_json(manifest, 256 * 1024)?;
+            RecordPartition::restore_local_archive_chain(
+                Path::new(backup), &parts, Path::new(destination),
+                budget.parse()?, cut.parse()?,
+            ).await?;
+        }
+        _ => return Err("usage: local_archive_cut capture SOURCE BACKUP ARCHIVE BUDGET | restore BACKUP ARCHIVE DESTINATION BUDGET CUT WITNESS | restore-chain BACKUP DESTINATION BUDGET CUT MANIFEST".into()),
     }
     Ok(())
+}
+
+fn read_json<T: DeserializeOwned>(path: &str, limit: u64) -> Result<T, Box<dyn Error>> {
+    let mut raw = Vec::new();
+    std::fs::File::open(path)?
+        .take(limit + 1)
+        .read_to_end(&mut raw)?;
+    if raw.len() as u64 > limit {
+        return Err("archive manifest exceeds its byte limit".into());
+    }
+    Ok(serde_json::from_slice(&raw)?)
 }

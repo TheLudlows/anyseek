@@ -16,6 +16,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for option in ("origence-repo", "origence-binary", "anyseek-binary", "archive-tool"):
         parser.add_argument("--" + option, type=lambda value: Path(value).resolve(), required=True)
+    parser.add_argument("--chain", action="store_true", help="capture A–B and B–C in separate retained WAL generations")
     args = parser.parse_args()
     sys.dont_write_bytecode = True
     sys.path.insert(0, str(args.origence_repo / "tools"))
@@ -39,9 +40,12 @@ def main():
                 ))
             super().reply(status, value, upstream_headers)
 
-    def archive(*values):
+    def archive(*values, ok=True):
         result = subprocess.run([args.archive_tool, *map(str, values)],
-                                check=True, capture_output=True, timeout=120)
+                                capture_output=True, timeout=120)
+        if ok and result.returncode:
+            raise subprocess.CalledProcessError(result.returncode, result.args, result.stdout, result.stderr)
+        assert (result.returncode == 0) == ok
         return result.stdout
 
     with tempfile.TemporaryDirectory(prefix="anyseek-origence-cut-") as directory:
@@ -90,8 +94,25 @@ def main():
             saved_backend = root / "anyseek-at-b"
             shutil.copytree(authority, saved_authority)
             shutil.copytree(backend, saved_backend)
+            private_collection = collection.rsplit("/", 1)[1]
+            candidates = list((backend / "collections").glob(f"*/{private_collection}/*"))
+            assert len(candidates) == 1
+            source = candidates[0]
+            base = backend / ("backup-" + backup["backup_id"])
+            budget = 256 * 1024 * 1024
+            window = root / "archive"
+            if args.chain:
+                first_path = root / "first"
+                first = json.loads(archive("capture", source, base, first_path, budget))
+                assert (first["base_seq"], first["last_seq"]) == (backup["visible_seq"], cut)
             with native(args.anyseek_binary, backend, port, secret) as (upstream, _):
                 proxy.upstream = upstream
+                if args.chain:
+                    expect(request(upstream, collection, "PATCH", headers=headers), 200)
+                    middle_backup = expect(request(upstream, collection + "/backup", "POST", headers=headers,
+                                                   body={"operation_id": {"epoch": int(time.time()) // 86400,
+                                                                          "nonce": "synthetic-middle"}}), 200)
+                    assert middle_backup["visible_seq"] == cut
                 with Host(args.origence_binary, env, token, forbidden, []) as origence:
                     target = route + "/" + members["turn_id"]
                     expect(request(origence.base, target, "DELETE", token), 200)
@@ -100,21 +121,39 @@ def main():
                                          and row[3]["receipt"]["record_count"] == 0 for row in proxy.groups))
                     _, _, _, receipt_c = proxy.groups[-1]
                     assert receipt_c["receipt"]["seq"] == cut + 1
-            private_collection = collection.rsplit("/", 1)[1]
-            candidates = list((backend / "collections").glob(f"*/{private_collection}/*"))
-            assert len(candidates) == 1
-            source = candidates[0]
-            base = backend / ("backup-" + backup["backup_id"])
-            window = root / "archive"
-            witness = root / "witness.json"
-            budget = 256 * 1024 * 1024
-            witness.write_bytes(archive("capture", source, base, window, budget))
-            info = json.loads(witness.read_bytes())
-            assert (info["base_seq"], info["last_seq"]) == (backup["visible_seq"], cut + 1)
+            assert any(anchor.joinpath("primary-pages").is_file()
+                       and anchor.joinpath("records-0000000000000000").is_file()
+                       for anchor in source.glob("anchor-*"))
+            if args.chain:
+                middle = backend / ("backup-" + middle_backup["backup_id"])
+                second = json.loads(archive("capture", source, middle, window, budget))
+                assert (second["base_seq"], second["last_seq"]) == (cut, cut + 1)
+                info = {"base_seq": first["base_seq"], "last_seq": second["last_seq"]}
+                manifest = root / "parts.json"
+                parts = [{"path": str(first_path), "witness": first},
+                         {"path": str(window), "witness": second}]
+                rejected = root / "rejected-partition"
+                # Even though B is in the first part, an incomplete declared
+                # chain cannot publish a new partition.
+                manifest.write_text(json.dumps([parts[0], dict(parts[1], path=str(root / "missing"))]))
+                archive("restore-chain", base, rejected, budget, cut, manifest, ok=False)
+                assert not rejected.exists()
+                manifest.write_text(json.dumps(parts[1:]))
+                archive("restore-chain", base, rejected, budget, cut, manifest, ok=False)
+                assert not rejected.exists()
+                manifest.write_text(json.dumps(parts))
+            else:
+                witness = root / "witness.json"
+                witness.write_bytes(archive("capture", source, base, window, budget))
+                info = json.loads(witness.read_bytes())
+                assert (info["base_seq"], info["last_seq"]) == (backup["visible_seq"], cut + 1)
             # Restore the same private partition identity into the isolated B Catalog.
             partition = saved_backend / source.relative_to(backend)
             partition.rename(root / "original-b-partition")
-            archive("restore", base, window, partition, budget, cut, witness)
+            if args.chain:
+                archive("restore-chain", base, partition, budget, cut, manifest)
+            else:
+                archive("restore", base, window, partition, budget, cut, witness)
             with native(args.anyseek_binary, saved_backend, port, secret) as (upstream, _):
                 proxy.upstream = upstream
                 replayed = expect(request(upstream, group_path, "POST", headers=headers, body=write_b), 200)

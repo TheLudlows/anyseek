@@ -21,7 +21,7 @@ struct Block {
     sha256: Digest,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Descriptor {
     pages: u64,

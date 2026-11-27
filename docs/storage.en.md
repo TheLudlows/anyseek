@@ -28,7 +28,7 @@ One authenticated checkpoint descriptor selects the collection generation, prima
 
 The recent delta accepts consecutive committed decisions, with newer records and tombstones overriding sealed rows. Admission and validation are atomic for each byte-bounded batch. A rejection preserves the prior cut. Compaction may change row addresses and retain payload references. The directory and segments switch together under one root. Old readers retain their original root.
 
-The component tests standalone files using an injected range reader. [#225](https://github.com/TheLudlows/anyseek/issues/225) owns shared range I/O. [#224](https://github.com/TheLudlows/anyseek/issues/224) owns State, WAL, checkpoint publication, GET, and search integration.
+New full checkpoint bases store current record metadata in the disk directory. State frames carry non-record metadata and operation history. Both reference the same payload pool and are authenticated by the same anchor. Existing full descriptors 6 and 8 can still be opened. Cold open currently decodes the selected base into live State before replaying the WAL. Readback from a pinned directory and recent-tail publication are under integration in [#224](https://github.com/TheLudlows/anyseek/issues/224).
 
 ## Authority and data ownership
 
@@ -146,7 +146,7 @@ target/debug/examples/local_archive_cut capture SOURCE BACKUP ARCHIVE BUDGET_BYT
 target/debug/examples/local_archive_cut restore BACKUP ARCHIVE NEW_ROOT BUDGET_BYTES TARGET_SEQ witness.json
 ```
 
-Restore checks the entire window and base backup, replays through the selected business decision, and atomically publishes a new path. A group decision includes its members and original receipt at the same sequence. Later changes and maintenance at the target's same sequence are left outside the restored cut. The caller manages source paths, service catalog, and any paired Origence SQLite backup. This entry point uses a single retained local journal generation. [#224](https://github.com/TheLudlows/anyseek/issues/224)
+Restore checks the entire window and base backup, replays through the selected business decision, and atomically publishes a new path. A group decision includes its members and original receipt at the same sequence. Later changes and maintenance at the target's same sequence are left outside the restored cut. The caller manages source paths, service catalog, and any paired Origence SQLite backup. Use `restore-chain BACKUP NEW_ROOT BUDGET_BYTES TARGET_SEQ parts.json` for up to 64 ordered captures. Each entry in the JSON list carries `path` and `witness`. The recovery tool verifies each matching boundary and every listed part, including parts after the target cut. Capture each generation before its live journal is reclaimed. [#224](https://github.com/TheLudlows/anyseek/issues/224)
 
 ## Maintenance publication and failure boundaries
 

@@ -15,6 +15,18 @@ pub struct LocalArchiveWindow {
     pub archive_sha256: [u8; 32],
 }
 
+/// An ordered archive part and the witness saved at capture time.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LocalArchivePart {
+    /// Path of the certified retained journal window.
+    pub path: PathBuf,
+    /// Independently retained identity of that complete window.
+    pub witness: LocalArchiveWindow,
+}
+
+const MAX_PARTS: usize = 64;
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Header {
@@ -22,6 +34,7 @@ struct Header {
     base_seq: u64,
     last_seq: u64,
     base_sha256: [u8; 32],
+    end_sha256: [u8; 32],
 }
 
 impl RecordPartition {
@@ -53,18 +66,36 @@ impl RecordPartition {
         cut: u64,
         witness: &LocalArchiveWindow,
     ) -> Result<(), RecordError> {
-        let (backup, archive, destination) = (
-            backup.to_owned(),
-            archive.to_owned(),
-            destination.to_owned(),
-        );
-        let witness = witness.clone();
+        let archive = LocalArchivePart {
+            path: archive.into(),
+            witness: witness.clone(),
+        };
+        Self::restore_local_archive_chain(backup, &[archive], destination, budget, cut).await
+    }
+
+    /// Restore from a complete, ordered list of retained local windows. Check
+    /// every window and its boundary even after finding the requested cut.
+    /// A gap, wrong base, missing part, or mismatched endpoint fails before
+    /// publication. At a boundary the decisive operation is the cutoff.
+    pub async fn restore_local_archive_chain(
+        backup: &Path,
+        parts: &[LocalArchivePart],
+        destination: &Path,
+        budget: u64,
+        cut: u64,
+    ) -> Result<(), RecordError> {
+        if !(1..=MAX_PARTS).contains(&parts.len()) {
+            return Err(RecordError::Rejected(
+                "local archive part count outside 1..=64".into(),
+            ));
+        }
+        let (backup, destination, parts) =
+            (backup.to_owned(), destination.to_owned(), parts.to_vec());
         crate::resources::spawn(async move {
-            let (config, mut state) = crate::resources::spawn_blocking(move || {
-                recover(&backup, &archive, budget, cut, &witness)
-            })
-            .await
-            .map_err(storage)??;
+            let (config, mut state) =
+                crate::resources::spawn_blocking(move || recover(&backup, &parts, budget, cut))
+                    .await
+                    .map_err(storage)??;
             state.history.scope = format!("{:032x}", rand::random::<u128>());
             snapshot::create(&destination, config, state).await
         })
@@ -145,6 +176,17 @@ fn replay(config: &RecordConfig, state: &mut State, frame: &[u8]) -> Result<(), 
     }
 }
 
+// Independent backup export changes only the history namespace. Canonicalize
+// that namespace and the backup flag without dropping receipts or GC state.
+fn boundary_digest(config: &RecordConfig, state: &mut State) -> Result<[u8; 32], RecordError> {
+    let scope = std::mem::take(&mut state.history.scope);
+    let independent = std::mem::replace(&mut state.independent_snapshot, false);
+    let result = checkpoint_codec::json_digest(&(config, &*state));
+    state.history.scope = scope;
+    state.independent_snapshot = independent;
+    result
+}
+
 fn capture(
     source: &Path,
     backup: &Path,
@@ -153,7 +195,7 @@ fn capture(
 ) -> Result<LocalArchiveWindow, RecordError> {
     // Own the source and base through certification. Open scans their persisted
     // witnesses and never guesses a cut from a caller-supplied sequence.
-    let (backup_config, backup_state, _backup_owner) = read_backup(backup, budget)?;
+    let (backup_config, mut backup_state, _backup_owner) = read_backup(backup, budget)?;
     let _frames = crate::storage::build_budget::reserve_memory(budget).map_err(memory_error)?;
     let (_source_owner, source_frames) = PartitionJournal::open(source, budget).map_err(storage)?;
     let (base, suffix) = source_frames
@@ -161,11 +203,9 @@ fn capture(
         .ok_or_else(|| storage("archive source has no frames"))?;
     let (config, mut state) = decode_checkpoint(base, source, budget)?;
     let base_seq = state.seq;
-    state.history.scope.clone_from(&backup_state.history.scope);
-    state.independent_snapshot = true;
-    let base_sha256 = checkpoint_codec::json_digest(&(&config, &state))?;
+    let base_sha256 = boundary_digest(&config, &mut state)?;
     if base_seq != backup_state.seq
-        || base_sha256 != checkpoint_codec::json_digest(&(&backup_config, &backup_state))?
+        || base_sha256 != boundary_digest(&backup_config, &mut backup_state)?
     {
         return Err(RecordError::Rejected(
             "backup does not match the retained journal base cut".into(),
@@ -179,10 +219,11 @@ fn capture(
     validate_restored_state(&config, &state)?;
     let last_seq = state.seq;
     let header = serde_json::to_vec(&Header {
-        format: 1,
+        format: 2,
         base_seq,
         last_seq,
         base_sha256,
+        end_sha256: boundary_digest(&config, &mut state)?,
     })
     .map_err(storage)?;
     let witness = LocalArchiveWindow {
@@ -225,47 +266,64 @@ fn discard(path: &Path) {
 
 fn recover(
     backup: &Path,
-    archive: &Path,
+    parts: &[LocalArchivePart],
     budget: u64,
     cut: u64,
-    expected: &LocalArchiveWindow,
 ) -> Result<(RecordConfig, State), RecordError> {
-    if !(expected.base_seq..=expected.last_seq).contains(&cut) {
-        return Err(RecordError::Rejected(
-            "requested cut outside archive window".into(),
-        ));
-    }
     let (config, mut state, _backup_owner) = read_backup(backup, budget)?;
-    let _frames = crate::storage::build_budget::reserve_memory(budget).map_err(memory_error)?;
-    let (_archive_owner, frames) = PartitionJournal::open(archive, budget).map_err(storage)?;
-    let (raw, suffix) = frames
-        .split_first()
-        .ok_or_else(|| storage("archive has no header"))?;
-    if raw.len() > 4096 || hash_frames(frames.iter().map(Vec::as_slice)) != expected.archive_sha256
-    {
-        return Err(storage("archive window differs from its retained witness"));
-    }
-    let header: Header = serde_json::from_slice(raw).map_err(storage)?;
-    if header.format != 1
-        || header.base_seq != expected.base_seq
-        || header.last_seq != expected.last_seq
-        || state.seq != expected.base_seq
-        || header.base_sha256 != checkpoint_codec::json_digest(&(&config, &state))?
-    {
-        return Err(storage(
-            "archive window does not match the supplied base backup",
+    if cut < state.seq {
+        return Err(RecordError::Rejected(
+            "requested cut precedes archive base".into(),
         ));
     }
-    // Capture has already semantically replayed the entire suffix, and the
-    // independently retained hash compared above certifies that same suffix.
-    for frame in suffix {
-        if state.seq == cut {
-            break;
+    let (mut endpoint, mut digest) = (state.seq, boundary_digest(&config, &mut state)?);
+    for LocalArchivePart { path, witness } in parts {
+        // Bound transient memory to one retained generation. Fully authenticate
+        // its bytes even if the requested cut is in an earlier part.
+        let _frames = crate::storage::build_budget::reserve_memory(budget).map_err(memory_error)?;
+        let (_archive_owner, frames) = PartitionJournal::open(path, budget).map_err(storage)?;
+        let (raw, suffix) = frames
+            .split_first()
+            .ok_or_else(|| storage("archive has no header"))?;
+        if raw.len() > 4096
+            || hash_frames(frames.iter().map(Vec::as_slice)) != witness.archive_sha256
+        {
+            return Err(storage("archive window differs from its retained witness"));
         }
-        replay(&config, &mut state, frame)?;
+        let header: Header = serde_json::from_slice(raw).map_err(storage)?;
+        if header.format != 2
+            || header.base_seq != witness.base_seq
+            || header.last_seq != witness.last_seq
+            || header.last_seq < header.base_seq
+            || header.base_seq != endpoint
+            || header.base_sha256 != digest
+        {
+            return Err(storage(
+                "archive windows do not form a continuous chain from the supplied backup",
+            ));
+        }
+        if state.seq != cut {
+            for frame in suffix {
+                replay(&config, &mut state, frame)?;
+                if state.seq == cut {
+                    break;
+                }
+            }
+            if state.seq != cut
+                && (state.seq != header.last_seq
+                    || boundary_digest(&config, &mut state)? != header.end_sha256)
+            {
+                return Err(storage(
+                    "archive replay differs from its certified endpoint",
+                ));
+            }
+        }
+        (endpoint, digest) = (header.last_seq, header.end_sha256);
     }
     if state.seq != cut {
-        return Err(storage("archive window does not reach the requested cut"));
+        return Err(RecordError::Rejected(
+            "requested cut outside the archived chain".into(),
+        ));
     }
     validate_restored_state(&config, &state)?;
     Ok((config, state))

@@ -186,6 +186,23 @@ impl Checkpoint {
         })
     }
 
+    /// Visit every authenticated base row in key order, including tombstones.
+    /// The callback borrows one row at a time and must admit any retained value.
+    pub(crate) fn visit_sealed<E>(
+        &self,
+        error: impl Fn(io::Error) -> E,
+        mut accept: impl FnMut(&str, Located<'_>) -> Result<(), E>,
+    ) -> Result<(), E> {
+        let mut rows = self.primary.cursor("", false).map_err(&error)?;
+        while let Some((id, reference)) = rows.next().map_err(&error)? {
+            accept(
+                id.as_str(),
+                self.row(id.as_str(), reference, 0).map_err(&error)?,
+            )?;
+        }
+        Ok(())
+    }
+
     fn payload(&self, address: &PayloadAddress) -> io::Result<BodyBytes> {
         let (extent, file) = self
             .payloads
@@ -236,13 +253,24 @@ impl Located<'_> {
         if !self.metadata.visible(self.at_ms) {
             return Ok(None);
         }
+        self.with_canonical_body(use_body)?
+            .map(Some)
+            .ok_or_else(|| invalid("live record has no body"))
+    }
+
+    /// Load the selected bytes for checkpoint verification and replay, even
+    /// when the original live row has crossed a request's TTL boundary.
+    pub(crate) fn with_canonical_body<T>(
+        &self,
+        use_body: impl FnOnce(&[u8]) -> T,
+    ) -> io::Result<Option<T>> {
         match self.body.as_ref() {
             Some(Body::Sealed(checkpoint, address)) => {
                 let bytes = checkpoint.payload(address)?;
                 Ok(Some(use_body(bytes.as_ref())))
             }
             Some(Body::Recent(bytes)) => Ok(Some(use_body(bytes))),
-            None => Err(invalid("live record has no body")),
+            None => Ok(None),
         }
     }
 
@@ -267,6 +295,13 @@ struct RecentRow {
     _memory: MemoryLease,
 }
 
+// The overlay retains every batch still needed by this published root. A
+// checkpoint seals the cut before exceeding either the byte or depth budget.
+const MAX_RECENT_BATCHES: usize = 64;
+type RecentBatch = BTreeMap<String, RecentRow>;
+type RecentCursor<'a> =
+    std::iter::Peekable<std::collections::btree_map::Range<'a, String, RecentRow>>;
+
 /// Single-root read view. Fill its bounded tail from already committed decisions
 /// before sharing it with readers. Its Arc retains the selected file owner.
 pub(crate) struct View {
@@ -274,8 +309,7 @@ pub(crate) struct View {
     visible_seq: u64,
     recent_limit: usize,
     recent_bytes: usize,
-    recent: BTreeMap<Arc<str>, Arc<RecentRow>>,
-    _retained_map: Option<MemoryLease>,
+    recent: Vec<Arc<RecentBatch>>,
 }
 
 pub(crate) struct Page<'a> {
@@ -291,8 +325,7 @@ impl View {
             checkpoint,
             recent_limit,
             recent_bytes: 0,
-            recent: BTreeMap::new(),
-            _retained_map: None,
+            recent: Vec::new(),
         }
     }
 
@@ -313,19 +346,12 @@ impl View {
         seq: u64,
         changes: Vec<CommittedChange>,
     ) -> io::Result<Self> {
-        let retained_map_bytes = self
-            .recent
-            .len()
-            .checked_mul(128)
-            .ok_or_else(|| invalid("recent map budget overflow"))?;
-        let memory = reserve_memory(retained_map_bytes as u64)?;
         let mut next = Self {
             checkpoint: self.checkpoint.clone(),
             visible_seq: self.visible_seq,
             recent_limit: self.recent_limit,
             recent_bytes: self.recent_bytes,
             recent: self.recent.clone(),
-            _retained_map: Some(memory),
         };
         next.install_committed(seq, changes)?;
         Ok(next)
@@ -341,9 +367,14 @@ impl View {
         if self.visible_seq.checked_add(1) != Some(seq) {
             return Err(invalid("nonconsecutive committed record decision"));
         }
-        let mut prepared = BTreeMap::new();
+        if !changes.is_empty() && self.recent.len() >= MAX_RECENT_BATCHES {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "recent decision depth exceeded",
+            ));
+        }
+        let mut prepared = RecentBatch::new();
         let mut bytes = self.recent_bytes;
-        let mut batch_bytes = 0usize;
         for change in changes {
             let CommittedChange { id, metadata, body } = change;
             if id.is_empty()
@@ -362,15 +393,7 @@ impl View {
                 .checked_add(body.as_ref().map_or(0, Vec::capacity))
                 .and_then(|bytes| bytes.checked_add(size_of::<RecentRow>() + 128))
                 .ok_or_else(|| invalid("recent record budget overflow"))?;
-            let previous = self
-                .recent
-                .get(id.as_str())
-                .map_or(0, |row| row._memory.bytes() as usize);
             bytes = bytes
-                .checked_sub(previous)
-                .and_then(|bytes| bytes.checked_add(charge))
-                .ok_or_else(|| invalid("recent record budget overflow"))?;
-            batch_bytes = batch_bytes
                 .checked_add(charge)
                 .filter(|bytes| *bytes <= self.recent_limit)
                 .ok_or_else(|| {
@@ -381,28 +404,24 @@ impl View {
                 })?;
             let memory = reserve_memory(charge as u64)?;
             prepared.insert(
-                Arc::<str>::from(id),
-                Arc::new(RecentRow {
+                id,
+                RecentRow {
                     metadata,
                     body,
                     _memory: memory,
-                }),
+                },
             );
         }
-        if bytes > self.recent_limit {
-            return Err(io::Error::new(
-                io::ErrorKind::WouldBlock,
-                "recent record byte budget exceeded",
-            ));
+        if !prepared.is_empty() {
+            self.recent.push(Arc::new(prepared));
         }
-        self.recent.extend(prepared);
         self.recent_bytes = bytes;
         self.visible_seq = seq;
         Ok(())
     }
 
     pub(crate) fn located(&self, id: &str, at_ms: u64) -> io::Result<Option<Located<'_>>> {
-        if let Some(row) = self.recent.get(id) {
+        if let Some(row) = self.recent.iter().rev().find_map(|batch| batch.get(id)) {
             return Ok(Some(recent_location(row, at_ms)));
         }
         self.checkpoint
@@ -451,12 +470,18 @@ impl View {
         entries.try_reserve_exact(limit).map_err(io::Error::other)?;
         let mut disk = self.checkpoint.primary.cursor(after, true)?;
         let mut next_disk = disk.next()?;
-        let mut tail = self
+        let mut tail: Vec<_> = self
             .recent
-            .range::<str, _>((Excluded(after), Unbounded))
-            .peekable();
+            .iter()
+            .map(|batch| {
+                batch
+                    .range::<str, _>((Excluded(after), Unbounded))
+                    .peekable()
+            })
+            .collect();
+        let mut next_tail = next_recent(&mut tail);
         let has_more = loop {
-            let use_disk = match (&next_disk, tail.peek()) {
+            let use_disk = match (&next_disk, &next_tail) {
                 (None, None) => break false,
                 (Some(_), None) => true,
                 (None, Some(_)) => false,
@@ -475,7 +500,8 @@ impl View {
                 let row = self.checkpoint.row(id.as_str(), reference, at_ms)?;
                 (id, row)
             } else {
-                let (id, row) = tail.next().expect("selected recent record");
+                let (id, row) = next_tail.take().expect("selected recent record");
+                next_tail = next_recent(&mut tail);
                 (primary::KeyOwned::Borrowed(id), recent_location(row, at_ms))
             };
             if row.metadata.visible(at_ms) {
@@ -491,6 +517,22 @@ impl View {
             _memory: memory,
         })
     }
+}
+
+fn next_recent<'a>(tail: &mut [RecentCursor<'a>]) -> Option<(&'a str, &'a RecentRow)> {
+    let key = tail
+        .iter_mut()
+        .filter_map(|cursor| cursor.peek().map(|(id, _)| id.as_str()))
+        .min()?;
+    let mut selected = None;
+    // Oldest to newest, consuming all entries for this ID. The latest
+    // tombstone remains a real entry and shadows every earlier version.
+    for cursor in tail {
+        if cursor.peek().is_some_and(|(id, _)| id.as_str() == key) {
+            selected = cursor.next();
+        }
+    }
+    selected.map(|(id, row)| (id.as_str(), row))
 }
 
 fn recent_location(row: &RecentRow, at_ms: u64) -> Located<'_> {

@@ -10,7 +10,7 @@
 
 每个向量/元数据组件记录包必须完整保存与 keys 一一对应的 revisions 和 fingerprint（SHA-256）。加载时统一检查数量及活动身份；缺失字段、空 fingerprint 或身份数量不一致均会导致加载失败。空组件也显式保存空身份数组。
 
-`record/anchor.rs` 认证不可变 anchor、Segment 和 payload 闭包。完整原始 Document（含输入向量）保存在规范 payload pool；记录与操作回执通过引用共享。派生 Segment 不再存一份完整搜索正文，量化向量不能替代原始输入。全文使用锁定的 Tantivy 0.27.0 原生包，向量和元数据使用独立组件。数据访问统一使用 RecordPartition。当前持久化格式为 RecordCheckpointV19、完整和增量 state descriptor 6/7（包含分组状态时为 8/9）、私有向量和元数据 descriptor 3、anchor manifest 9、检索 package manifest 3。
+`record/anchor.rs` 认证不可变 anchor、Segment 和 payload 闭包。完整原始 Document（含输入向量）保存在规范 payload pool；记录与操作回执通过引用共享。派生 Segment 不再存一份完整搜索正文，量化向量不能替代原始输入。全文使用锁定的 Tantivy 0.27.0 原生包，向量和元数据使用独立组件。数据访问统一使用 RecordPartition。当前持久化格式为 RecordCheckpointV19、完整和增量 state descriptor 10/7（包含分组状态时为 11/9）、私有向量和元数据 descriptor 3、anchor manifest 9、检索 package manifest 3。
 
 `record/view.rs` 在 partition guard 下捕获冻结段与可变 tail 的派生拓扑，在 guard 外评分，最终回到当前权威状态重验版本、删除及 TTL。全文按选中的活动身份构建跨段 N/df/字段长度上下文，每个通道先形成全局排名再融合。异步消费者可处于不同进度，不能将权威 visible_seq 当作完整索引水位，也不能承诺查询、回表及返回统计来自同一不可变业务快照；最终重验可能缩短结果页。
 
@@ -28,7 +28,7 @@
 
 近期增量按已提交序号连续装入，通过较新记录和墓碑覆盖封存行。增量整批校验和按字节准入，拒绝时保留先前切点。压实可以重排记录行并沿用原正文引用。目录和段随同一个根切换，旧读者持有原来的根。
 
-当前组件通过注入的范围读操作验证独立文件。公共范围读取由 [#225](https://github.com/TheLudlows/anyseek/issues/225) 提供。State、WAL、checkpoint 发布、GET 和搜索回表的接入由 [#224](https://github.com/TheLudlows/anyseek/issues/224) 负责。
+新建完整 checkpoint 的当前记录元数据保存在磁盘目录。State 帧保存其余元数据和操作历史。两者引用同一个正文池，由同一 anchor 认证。已有完整 descriptor 6 和 8 仍可打开。冷启动目前会将选中的基线解码为运行时 State，再重放 WAL。固定目录回表和近期增量发布继续在 [#224](https://github.com/TheLudlows/anyseek/issues/224) 集成。
 
 ## 权威与数据归属
 
@@ -159,7 +159,7 @@ target/debug/examples/local_archive_cut capture SOURCE BACKUP ARCHIVE BUDGET_BYT
 target/debug/examples/local_archive_cut restore BACKUP ARCHIVE NEW_ROOT BUDGET_BYTES TARGET_SEQ witness.json
 ```
 
-恢复先复核整段窗口和基础备份，再重放到指定业务决定（含该决定）并原子发布新路径。组写的成员和原回执属于同一个提交序号；目标决定后的变更及同序号维护不纳入输出。原始路径、服务目录和 Origence SQLite 配套备份由调用方管理。该入口使用单个已保留的本地日志代次，支持说明见 [#224](https://github.com/TheLudlows/anyseek/issues/224)。
+恢复先复核整段窗口和基础备份，再重放到指定业务决定（含该决定）并原子发布新路径。组写的成员和原回执属于同一个提交序号；目标决定后的变更及同序号维护不纳入输出。原始路径、服务目录和 Origence SQLite 配套备份由调用方管理。多代恢复使用 `restore-chain BACKUP NEW_ROOT BUDGET_BYTES TARGET_SEQ parts.json`。JSON 列表按顺序记录最多 64 段，每项含 `path` 和 `witness`。工具核验所有相邻边界和清单中的全部段，包括目标切点之后的段。每个代次需在其活动日志回收前捕获，见 [#224](https://github.com/TheLudlows/anyseek/issues/224)。
 
 ## 维护发布与失败边界
 

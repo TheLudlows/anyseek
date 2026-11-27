@@ -105,6 +105,10 @@ impl Writer {
         self.end=end;
         Ok(position)
     }
+    pub(crate) fn payload_ref(&self, position: usize) -> io::Result<PayloadRef> {
+        self.payloads.get(position).cloned().ok_or_else(|| invalid("payload identity outside segment"))
+    }
+
     pub fn finish(mut self) -> io::Result<Descriptor> {
         if self.poisoned { return Err(invalid("segment writer requires discard")); }
         if self.file.metadata()?.len()!=self.end {return Err(invalid("incomplete segment write"));}

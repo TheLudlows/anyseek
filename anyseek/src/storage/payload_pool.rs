@@ -1,6 +1,6 @@
 //! Immutable payload objects shared by successive authenticated state anchors.
 //! Authenticated partition publication selects a complete reference closure.
-use super::segment::{Descriptor, Reader, Writer};
+use super::segment::{Descriptor, PayloadRef, Reader, Writer};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -46,6 +46,7 @@ pub(crate) struct Budget {
 }
 
 pub(crate) struct PoolReader {
+    root: PathBuf,
     closure: Closure,
     readers: BTreeMap<String, Reader>,
     budget: Budget,
@@ -86,10 +87,18 @@ impl PoolReader {
             );
         }
         Ok(Self {
+            root: root.into(),
             closure,
             readers,
             budget,
         })
+    }
+    pub(crate) fn root(&self) -> &Path {
+        &self.root
+    }
+    pub(crate) fn extent(&self, id: &str) -> io::Result<u64> {
+        self.closure.objects.get(id).map(|d| d.bytes)
+            .ok_or_else(|| invalid("payload object outside authenticated closure"))
     }
     pub fn read(&self, reference: &Reference) -> io::Result<Vec<u8>> {
         self.read_limited(reference, self.budget.body_bytes)
@@ -219,6 +228,17 @@ impl PoolBuilder {
             }
         }
     }
+    pub(crate) fn payload_ref(&self, reference: &Reference) -> io::Result<PayloadRef> {
+        if reference.object == self.id {
+            self.writer.as_ref().ok_or_else(|| invalid("missing prepared payload object"))?
+                .payload_ref(reference.position)
+        } else {
+            self.prior.closure.objects.get(&reference.object)
+                .and_then(|object| object.payloads.get(reference.position)).cloned()
+                .ok_or_else(|| invalid("payload reference outside authenticated closure"))
+        }
+    }
+
     pub fn finish(self) -> io::Result<Closure> {
         if self.poisoned {
             return Err(invalid("payload pool requires discard"));
