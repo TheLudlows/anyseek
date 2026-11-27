@@ -705,7 +705,8 @@ mod tests {
         let mut delete=write("delete","b","",ExpectedVersion::Match(1));delete.document=None;p.write(delete).await.unwrap();
         std::fs::remove_file(root.join(".test-indexer-pause")).unwrap();job.finish().await.unwrap();
         assert!(p.inner.lock().await.anchor.as_ref().unwrap().retained_packages().iter().any(|package|package.id==selected));
-        for mode in [SearchMode::Lexical,SearchMode::Vector{similarity_threshold:None,ann_mode:crate::vector_similarity::AnnMode::All}] {
+        for mode in [SearchMode::Lexical,SearchMode::Vector{similarity_threshold:None,ann_mode:crate::vector_similarity::AnnMode::All},
+            SearchMode::Hybrid{similarity_threshold:None,ann_mode:crate::vector_similarity::AnnMode::All,rrf:Default::default()}] {
             let result=query(&p,mode).await;assert_eq!(result.count_total,2);assert!(result.hits.iter().all(|hit|hit.record.record_id!="b"));
         }
         drop(p);let p=RecordPartition::open(&root,config().max_journal_bytes).await.unwrap();

@@ -1,4 +1,4 @@
-//! Manual before/after profile for the private vector topology cleanup.
+//! Manual before/after profile for vector and filtered hybrid queries over multiple components.
 #[path = "common/records.rs"] mod records;
 use anyseek::{record::RecordQuery, search::{QueryType, ResultType, SearchMode, RrfOptions},
     vector::Embedding, vector_similarity::AnnMode};
@@ -16,26 +16,35 @@ async fn segment_query_profile() {
         "clustering":"None","inference":{"External":{"dimensions":3,"precision":"F32","quantization":"None","similarity":"Cosine"}}})).unwrap();
     let schema = serde_json::from_value(json!([
         {"field":"body","field_type":"Text","store":true,"index_lexical":true},
-        {"field":"vector","field_type":"Json","store":false,"index_lexical":false,"index_vector":true}
+        {"field":"vector","field_type":"Json","store":false,"index_lexical":false,"index_vector":true},
+        {"field":"bucket","field_type":"Int","store":false,"index_lexical":false,"facet":true}
     ])).unwrap();
     let p = records::create(&root,meta,schema).await;
     for batch in 0..4 {
         records::insert(&p,(0..30).map(|i|serde_json::from_value(json!({
             "body":if (i+batch)%3==0 {"alpha beta"} else {"alpha gamma"},
-            "vector":[1.0,(i%7) as f32/10.0,batch as f32/10.0]
+            "vector":[1.0,(i%7) as f32/10.0,batch as f32/10.0], "bucket":i%4
         })).unwrap()).collect()).await.unwrap();
         if batch < 3 {p.compact_journal().await.unwrap();}
     }
     let mut rows = Vec::new();
-    for (label,mode,vector) in [
-        ("lexical",SearchMode::Lexical,None),
-        ("vector",SearchMode::Vector {similarity_threshold:None,ann_mode:AnnMode::All},Some(Embedding::F32(vec![1.0,0.0,0.0]))),
-        ("hybrid",SearchMode::Hybrid {similarity_threshold:None,ann_mode:AnnMode::All,rrf:RrfOptions::default()},Some(Embedding::F32(vec![1.0,0.0,0.0])))
+    let vector = SearchMode::Vector { similarity_threshold: None, ann_mode: AnnMode::All };
+    let hybrid = SearchMode::Hybrid { similarity_threshold: None, ann_mode: AnnMode::All, rrf: RrfOptions::default() };
+    let embedding = Embedding::F32(vec![1.0, 0.0, 0.0]);
+    let filters: Vec<anyseek::search::FacetFilter> = serde_json::from_value(json!([
+        {"Int":{"field":"bucket","filter":{"start":1,"end":2}}}
+    ])).unwrap();
+    for (label, mode, vector, filters) in [
+        ("lexical", SearchMode::Lexical, None, vec![]),
+        ("vector", vector.clone(), Some(embedding.clone()), vec![]),
+        ("hybrid", hybrid.clone(), Some(embedding.clone()), vec![]),
+        ("filtered_vector", vector, Some(embedding.clone()), filters.clone()),
+        ("filtered_hybrid", hybrid, Some(embedding), filters),
     ] {
         let mut samples = Vec::new(); let mut expected = None;
         for i in 0..120 {
             let query = RecordQuery {text:"alpha beta".into(),vector:vector.clone(),mode:mode.clone(),query_type:QueryType::Union,
-                offset:0,length:10,result_type:ResultType::TopkCount,fields:vec![],filters:vec![],sort:vec![],temporal:None};
+                offset:0,length:10,result_type:ResultType::TopkCount,fields:vec![],filters:filters.clone(),sort:vec![],temporal:None};
             let start = Instant::now(); let result = p.query(query).await.unwrap(); let elapsed = start.elapsed().as_micros();
             let hits = json!(result.hits.iter().map(|h| (&h.record.record_id,h.score.to_bits(),
                 h.channels.iter().map(|c|(&c.channel,c.rank,c.raw_score.map(f32::to_bits),c.rrf_contribution.map(f32::to_bits))).collect::<Vec<_>>())).collect::<Vec<_>>());

@@ -70,7 +70,7 @@ Lexical、Vector、Hybrid 共用稳定 Record 身份。Hybrid 在各路跨组件
 | --- | --- | --- |
 | RecordPartition | 规范数据、版本/TTL、回执、ordinal 到稳定身份映射 | 权威提交与恢复 |
 | VectorIndex / RetrievalView | 拓扑、全局 Top-K/候选预算、读取 pin | 捕获视图，旋转/合并时替换拓扑 |
-| VectorSegment | 文件/mmap、ANN 聚类与量化、物理行身份、活动 mask、组件 admission | 单组件构建、冻结、合并及最终释放 |
+| VectorSegment | 显式范围文件读取和写入、ANN 聚类与量化、物理行身份、活动 mask、组件 admission | 单组件构建、冻结、合并及最终释放 |
 | Tantivy runtime | 原生 Searcher、可查增量、原生文件、writer 和目录 owner | 全文发布、物化与固定读者 |
 
 VectorIndex 的 schema、距离和量化配置是逻辑查询配置；组件中的配置用于解释本地文件。`indexed_*`、`committed_doc_count`、`uncommitted`、`failed` 描述组件进度，`active`、`delete_hashset` 与退休 token 表达派生活动状态。组件 admission 汇总已持有和待转移的租约；切段关闭旧代次的新准入，已获额度的工作可按原绑定完成。
@@ -108,7 +108,7 @@ S3 权威备份在单写者保护下先等待已接受的索引 I/O 结束，再
 | 权威发布未知或不健康 | 读写失败封锁，响应缺席不证明未提交 | 恢复权威后再重建缓存 |
 | 进程 panic | API 断连，仅持久权威可恢复 | 重启、重开、原身份查账或重试 |
 
-独立消费不等于独立故障隔离。不得手工推进 cursor、清空共享错误槽以开放部分结果、删除在用缓存或复用失败 writer；恢复失败的 partition 必须保持不可用。回归覆盖消费者错误、metadata mmap 增长失败、部分向量提交、权威部分帧及重开，执行结果以对应源码的验收记录为准。
+独立消费不等于独立故障隔离。不得手工推进 cursor、清空共享错误槽以开放部分结果、删除在用缓存或复用失败 writer；恢复失败的 partition 必须保持不可用。回归覆盖消费者错误、元数据文件写入失败、部分向量提交、权威部分帧及重开，执行结果以对应源码的验收记录为准。
 
 阻塞 worker 持有查询 admission、资源 scope、句柄和 package pin，直到工作 join，客户端取消不撤回这些资源。checkpoint 的 journal 安装也把 partition/writer guard 与 I/O 租约移交给阻塞 worker，仍持发布锁；移出异步 executor 不代表消除发布暂停或已证明吞吐提升。
 
@@ -120,7 +120,7 @@ SIGINT/SIGTERM 先建立停止准入边界，再启动 HTTP graceful shutdown。
 
 1. join 周期维护协调器，停止新的自动 checkpoint/cache 维护与未获准入的重试；已接受消费者完成原有有界 flush/merge。
 2. 排空 HTTP、索引和阻塞 executor 中的 owned activity，包括取消后的任务、body 丢弃后仍持有的 frame，以及尚未交付的任务结果。仅保存状态的已完成 handle 不算在途工作。
-3. join 索引消费者、全文物化和原生 writer，释放 partition、读者、package pin、mmap 与 Catalog。
+3. join 索引消费者、全文物化和原生 writer，释放 partition、读者、package pin、索引文件句柄与 Catalog。
 4. 最后释放服务根锁，仅完整成功后报告 `Shutdown complete`，此时才可立即重开或回收目录。
 
 关闭不强制 checkpoint、TTL sweep 或 GC，也不增加持久性承诺。传输 owner 未释放会让关闭继续等待；重复调用共用同一完成状态。消费者健康错误可通过重开恢复；worker join、原生 writer 终止失败或遗留 partition owner 会报告关闭未完成并保留根锁至进程退出，可执行程序返回非零。
