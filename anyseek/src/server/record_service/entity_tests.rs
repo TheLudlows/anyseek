@@ -135,12 +135,62 @@ async fn local_entity_sdk_discovers_isolated_paths_after_reopen() {
             .expect("reverse discovery");
         assert_path(&reverse, "target", "app:A", "seed");
     }
-    let error = engine
+    let anchor = format!("n:{}", "é".repeat(127));
+    let kind = "é".repeat(64);
+    let empty = engine
+        .query_entity_paths("tenant-a", "graph", Out, &anchor, &kind, 32)
+        .await
+        .unwrap();
+    assert!(empty.seeds().is_empty() && empty.neighbors().is_empty());
+
+    let long_anchor = format!("{anchor}x");
+    let long_kind = format!("{kind}x");
+    for (anchor, kind, limit) in [
+        (long_anchor.as_str(), "link", 32),
+        ("app:A", long_kind.as_str(), 32),
+        ("", "link", 32),
+        ("app:", "link", 32),
+        ("app:A", "", 32),
+        ("app:A", "bad kind", 32),
+        ("app:A", "link", 0),
+    ] {
+        let error = engine
+            .query_entity_paths("tenant-a", "graph", Out, anchor, kind, limit)
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(error.kind(), LocalErrorKind::Rejected);
+    }
+
+    let absent = engine
         .query_entity_paths("other", "graph", Out, "app:A", "link", 32)
         .await
         .err()
         .unwrap();
-    assert_eq!(error.kind(), LocalErrorKind::NotFound);
+    let invalid = engine
+        .query_entity_paths("other", "graph", Out, &long_anchor, &long_kind, 32)
+        .await
+        .err()
+        .unwrap();
+    assert_eq!(absent.kind(), LocalErrorKind::NotFound);
+    assert_eq!(
+        (invalid.kind(), invalid.code()),
+        (absent.kind(), absent.code())
+    );
+    engine.shutdown().await.unwrap();
+    drop(engine);
+
+    let mut service = Service::open(&root, 200.try_into().unwrap(), None, false)
+        .await
+        .unwrap();
+    Arc::get_mut(&mut service).unwrap().request_timeout = Duration::ZERO;
+    let engine = LocalEngine::from_test_service(service);
+    let expired = engine
+        .query_entity_paths("tenant-a", "graph", Out, &long_anchor, "link", 32)
+        .await
+        .err()
+        .unwrap();
+    assert_eq!(expired.code(), "busy");
     engine.shutdown().await.unwrap();
 }
 

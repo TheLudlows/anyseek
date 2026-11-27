@@ -155,6 +155,10 @@ pub(crate) struct PreparedEntityPaths {
 }
 
 impl RecordPartition {
+    pub(crate) fn validate_entity_path_keys(anchor: &str, kind: &str) -> Result<(), RecordError> {
+        entity::Range::validate(anchor, kind).map_err(state_rows::entity_error)
+    }
+
     /// Capture the current local Record cut and pin its optional adjacency sidecar.
     /// A missing sidecar or oversized suffix requires an explicit new build.
     pub async fn capture_entity_adjacency(&self) -> Result<EntityAdjacencyView, RecordError> {

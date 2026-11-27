@@ -287,11 +287,14 @@ impl LocalEngine {
                 let partition = service.record(&tenant, &id).await?;
                 let generation = partition.generation;
                 let for_read = partition.clone();
-                let anchor = anchor.to_owned();
-                let kind = kind.to_owned();
+                // Only copy bounded keys. Report invalid input inside the
+                // authorization guard so a retired generation stays hidden.
+                let keys = RecordPartition::validate_entity_path_keys(anchor, kind)
+                    .map(|()| (anchor.to_owned(), kind.to_owned()));
                 let found = service
                     .catalog
                     .authorized_generation(tenant.clone(), id.clone(), generation, move |_| async move {
+                        let (anchor, kind) = keys?;
                         for_read
                             .prepare_entity_paths(direction, &anchor, &kind, visit_limit, deadline)
                             .await

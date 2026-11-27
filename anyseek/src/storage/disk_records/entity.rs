@@ -108,10 +108,15 @@ pub(crate) struct Range {
 }
 
 impl Range {
-    pub(crate) fn new(direction: EntityDirection, anchor: &str, kind: &str) -> io::Result<Self> {
+    pub(crate) fn validate(anchor: &str, kind: &str) -> io::Result<()> {
         if !entity_id(anchor) || !token(kind, 128) {
             return Err(reject("invalid entity adjacency range"));
         }
+        Ok(())
+    }
+
+    pub(crate) fn new(direction: EntityDirection, anchor: &str, kind: &str) -> io::Result<Self> {
+        Self::validate(anchor, kind)?;
         Ok(Self {
             bounds: Bounds::prefix(prefix(direction, anchor, kind)),
             direction,
