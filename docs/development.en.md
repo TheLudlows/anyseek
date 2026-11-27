@@ -143,6 +143,8 @@ This table describes retrieval fixtures only. Production capacity, timeouts, fai
 
 The 576/522 append/late-hit and 400/160 ranking fixtures retain fixed sizes. Independent boundaries such as 65,536, 10,001, >16 MiB, 64→65, 128→129, and 8192-package are not replaced by small fixtures. `scripts/check_lexical_partition.py` verifies the Windows lexical split. Update the manifest, matrix, and remainder exclusions when renaming or repartitioning cases.
 
+The lexical fixtures explicitly build a checkpoint after writing. If background maintenance holds the build slot, the fixture retries `Busy` within a bounded window and checks that the completed checkpoint covers the full sequence for that phase. Reopen, membership, scoring, and ranking assertions still run.
+
 ## API and internal modules
 
 ```sh

@@ -3,7 +3,7 @@ mod scale;
 // Retained literal membership/score corpora; both length policies run in full.
 #[path = "common/records.rs"]
 mod records;
-use anyseek::record::{RecordPartition, RecordQuery};
+use anyseek::record::{RecordError, RecordPartition, RecordQuery};
 // Literal document membership and an independent BM25 formula are the oracles.
 // Explicit score sorting shares engine code: it is a consistency check, not an oracle.
 use anyseek::{
@@ -18,7 +18,7 @@ use serde_json::json;
 use std::{
     collections::BTreeSet,
     path::{Path, PathBuf},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 struct Progress {
@@ -44,11 +44,33 @@ impl Progress {
 }
 
 async fn checkpoint(index: &RecordPartition) {
+    let expected_seq = index.statistics().await.unwrap().visible_seq;
     let started = Instant::now();
-    eprintln!("[lexical-progress] checkpoint begin");
-    index.compact_journal().await.unwrap();
+    let retry_window = Duration::from_secs(300);
+    let mut busy_retries = 0;
+    eprintln!("[lexical-progress] checkpoint begin seq={expected_seq}");
+    let seq = loop {
+        match index.compact_journal().await {
+            Ok(seq) => break seq,
+            // A full fixture can finish writing while an automatic cache
+            // merge owns the partition build slot. Wait for that owner to
+            // finish, and keep all other errors fatal to the fixture.
+            Err(RecordError::Busy) if started.elapsed() < retry_window => {
+                if busy_retries == 0 {
+                    eprintln!("[lexical-progress] checkpoint Busy; retrying seq={expected_seq}");
+                }
+                busy_retries += 1;
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            Err(error) => panic!(
+                "checkpoint at seq {expected_seq} failed after {busy_retries} Busy retries ({:.3}s): {error:?}",
+                started.elapsed().as_secs_f64()
+            ),
+        }
+    };
+    assert_eq!(seq, expected_seq, "checkpoint must include all fixture writes");
     eprintln!(
-        "[lexical-progress] checkpoint complete elapsed={:.3}s",
+        "[lexical-progress] checkpoint complete seq={seq} busy_retries={busy_retries} elapsed={:.3}s",
         started.elapsed().as_secs_f64()
     );
 }
