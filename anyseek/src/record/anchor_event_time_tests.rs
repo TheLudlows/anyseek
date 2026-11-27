@@ -221,7 +221,7 @@ async fn event_time_checkpoint_rejects_wrong_binding_and_corrupt_selected_page()
     );
 }
 
-use super::super::event_time_view::Window;
+use super::super::event_time_view::{IndexChannels, Window};
 use std::{
     ops::Range,
     sync::atomic::{AtomicU64, Ordering},
@@ -238,7 +238,7 @@ async fn read_window(
     limit: usize,
 ) -> Result<Window, RecordError> {
     partition
-        .read_event_time_window(range, limit, native_deadline())
+        .read_event_time_window(range, limit, IndexChannels::None, native_deadline())
         .await
 }
 
@@ -393,7 +393,114 @@ async fn wait_file(path: &Path) {
 }
 
 #[tokio::test]
-async fn event_time_window_refuses_cursor_lag_and_replaced_publication_at_same_sequence() {
+async fn event_time_window_requires_only_selected_index_cursors() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("records");
+    let p = RecordPartition::create(&root, config()).await.unwrap();
+    p.write(dated("first", "base", 25, ExpectedVersion::Absent))
+        .await
+        .unwrap();
+    assert_eq!(build(&p).await, 1);
+
+    let lexical_gate = root.join(".test-lexical-consumer-pause");
+    let vector_gate = root.join(".test-vector-consumer-pause");
+    let lexical_started = root.join(".test-lexical-consumer-started");
+    let vector_started = root.join(".test-vector-consumer-started");
+    for (cut, id, ready, lagging, resume, paused) in [
+        (
+            2,
+            "first-tail",
+            IndexChannels::Lexical,
+            IndexChannels::Vector,
+            &lexical_gate,
+            &vector_gate,
+        ),
+        (
+            3,
+            "second-tail",
+            IndexChannels::Vector,
+            IndexChannels::Lexical,
+            &vector_gate,
+            &lexical_gate,
+        ),
+    ] {
+        std::fs::write(&lexical_gate, b"pause").unwrap();
+        std::fs::write(&vector_gate, b"pause").unwrap();
+        let batch = p
+            .commit_writes(vec![dated(id, id, 25 + cut, ExpectedVersion::Absent)])
+            .await
+            .unwrap();
+        assert!(
+            matches!(batch.results.as_slice(), [CommittedItem::Committed(receipt)] if receipt.seq == cut as u64)
+        );
+        wait_file(&lexical_started).await;
+        wait_file(&vector_started).await;
+        let cut = cut as u64;
+        let progress = p.committed_progress().await;
+        assert_eq!(progress.committed_seq, Some(cut));
+        assert_eq!(
+            (progress.lexical_seq, progress.vector_seq),
+            (cut - 1, cut - 1)
+        );
+        let deadline = native_deadline();
+        let pure = p
+            .read_event_time_window(0..30, 1, IndexChannels::None, deadline)
+            .await
+            .unwrap();
+        assert_eq!(pure.cut, cut);
+        assert_eq!(hit_ids(&pure), [id]);
+        assert!(matches!(
+            p.read_event_time_window(0..30, 1, ready, deadline).await,
+            Err(RecordError::Busy)
+        ));
+
+        std::fs::remove_file(resume).unwrap();
+        tokio::time::timeout_at(deadline, async {
+            loop {
+                let progress = p.committed_progress().await;
+                let (published, paused_seq) = if ready == IndexChannels::Lexical {
+                    (progress.lexical_seq, progress.vector_seq)
+                } else {
+                    (progress.vector_seq, progress.lexical_seq)
+                };
+                assert_eq!(paused_seq, cut - 1);
+                if published == cut {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .unwrap();
+
+        let selected = p
+            .read_event_time_window(0..30, 1, ready, deadline)
+            .await
+            .unwrap();
+        assert_eq!(selected.cut, cut);
+        assert_eq!(hit_ids(&selected), [id]);
+        for channels in [lagging, IndexChannels::LexicalAndVector] {
+            assert!(matches!(
+                p.read_event_time_window(0..30, 1, channels, deadline).await,
+                Err(RecordError::Busy)
+            ));
+        }
+
+        std::fs::remove_file(paused).unwrap();
+        p.inner.lock().await.index.drain_indexes().await.unwrap();
+        let mixed = p
+            .read_event_time_window(0..30, 1, IndexChannels::LexicalAndVector, deadline)
+            .await
+            .unwrap();
+        assert_eq!(mixed.cut, cut);
+        assert_eq!(hit_ids(&mixed), [id]);
+        std::fs::remove_file(&lexical_started).unwrap();
+        std::fs::remove_file(&vector_started).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn event_time_window_refuses_replaced_publication_at_same_sequence() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("records");
     let p = RecordPartition::create(&root, config()).await.unwrap();
@@ -409,48 +516,25 @@ async fn event_time_window_refuses_cursor_lag_and_replaced_publication_at_same_s
         let _publication = p.inner.lock().await;
         let deadline = NativeDeadline::now() + std::time::Duration::from_millis(5);
         assert!(matches!(
-            p.read_event_time_window(0..30, 2, deadline).await,
+            p.read_event_time_window(0..30, 2, IndexChannels::LexicalAndVector, deadline)
+                .await,
             Err(RecordError::Busy)
         ));
     }
 
-    let lane_stop = root.join(".test-lexical-consumer-pause");
-    std::fs::write(&lane_stop, b"pause").unwrap();
-    let batch = p
-        .commit_writes(vec![dated("later", "tail", 27, ExpectedVersion::Absent)])
-        .await
-        .unwrap();
-    assert!(matches!(
-        batch.results.as_slice(),
-        [CommittedItem::Committed(_)]
-    ));
-    wait_file(&root.join(".test-lexical-consumer-started")).await;
-    let progress = p.committed_progress().await;
-    assert_eq!(progress.committed_seq, Some(2));
-    assert_eq!(progress.lexical_seq, 1);
-    assert!(matches!(
-        read_window(&p, 0..30, 2).await,
-        Err(RecordError::Busy)
-    ));
-    std::fs::remove_file(lane_stop).unwrap();
-    p.inner.lock().await.index.drain_indexes().await.unwrap();
-    assert_eq!(
-        hit_ids(&read_window(&p, 0..30, 2).await.unwrap()),
-        ["tail", "base"]
-    );
-
     let delivery = root.join(".test-event-time-delivery-pause");
     std::fs::write(&delivery, b"pause").unwrap();
     let reader = p.clone();
-    let pending = tokio::spawn(async move { read_window(&reader, 0..30, 2).await });
+    let pending = tokio::spawn(async move {
+        reader
+            .read_event_time_window(0..30, 2, IndexChannels::LexicalAndVector, native_deadline())
+            .await
+    });
     wait_file(&root.join(".test-event-time-delivery-started")).await;
-    assert_eq!(build(&p).await, 2);
+    assert_eq!(build(&p).await, 1);
     std::fs::remove_file(delivery).unwrap();
     assert!(matches!(pending.await.unwrap(), Err(RecordError::Busy)));
-    assert_eq!(
-        hit_ids(&read_window(&p, 0..30, 2).await.unwrap()),
-        ["tail", "base"]
-    );
+    assert_eq!(hit_ids(&read_window(&p, 0..30, 2).await.unwrap()), ["base"]);
 }
 
 #[tokio::test]

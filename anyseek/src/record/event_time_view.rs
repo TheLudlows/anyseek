@@ -19,6 +19,16 @@ const MAX_BASE_VISITS: usize = 4096;
 const MAX_RESULTS: usize = 128;
 const MAX_RESULT_ID_BYTES: usize = 8 * 1024 * 1024;
 
+/// Index publications that must share the time window's canonical cut.
+/// The native time consumer only proves their readiness at that cut.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum IndexChannels {
+    None,
+    Lexical,
+    Vector,
+    LexicalAndVector,
+}
+
 pub(crate) struct Window {
     pub(crate) cut: u64,
     pub(crate) evaluation_time_ms: u64,
@@ -53,18 +63,36 @@ fn unavailable(reason: &str) -> RecordError {
     RecordError::Rejected(format!("event-time view unavailable: {reason}"))
 }
 
-fn common_cut(partition: &RecordPartition, inner: &Inner) -> Result<u64, RecordError> {
-    if !inner.healthy || partition.indexes.error().is_some() {
+fn common_cut(
+    partition: &RecordPartition,
+    inner: &Inner,
+    channels: IndexChannels,
+) -> Result<u64, RecordError> {
+    if !inner.healthy {
         return Err(RecordError::RecoveryRequired);
     }
-    let lexical = partition.indexes.lexical.load(Ordering::Acquire);
-    let vector = partition.indexes.vector.load(Ordering::Acquire);
-    // There is no retained overlay for a lower cut. The cache cursors are
-    // independent evidence and must both agree with the overlay we can pin.
-    if lexical != vector || lexical != inner.state.seq {
+    let cut = inner.state.seq;
+    if channels == IndexChannels::None {
+        return Ok(cut);
+    }
+    // Index publication failures still fence the shared index pipeline.
+    if partition.indexes.error().is_some() {
+        return Err(RecordError::RecoveryRequired);
+    }
+    // The overlay cannot rewind. Each requested index must independently
+    // prove publication at the canonical cut we can pin.
+    if (matches!(
+        channels,
+        IndexChannels::Lexical | IndexChannels::LexicalAndVector
+    ) && partition.indexes.lexical.load(Ordering::Acquire) != cut)
+        || (matches!(
+            channels,
+            IndexChannels::Vector | IndexChannels::LexicalAndVector
+        ) && partition.indexes.vector.load(Ordering::Acquire) != cut)
+    {
         return Err(RecordError::Busy);
     }
-    Ok(lexical)
+    Ok(cut)
 }
 
 impl RecordPartition {
@@ -78,6 +106,7 @@ impl RecordPartition {
         &self,
         window: Range<i64>,
         limit: usize,
+        channels: IndexChannels,
         deadline: Deadline,
     ) -> Result<Window, RecordError> {
         if window.is_empty() || limit == 0 || limit > MAX_RESULTS {
@@ -93,7 +122,7 @@ impl RecordPartition {
         let mut inner = timeout_at(deadline, self.inner.lock())
             .await
             .map_err(|_| RecordError::Busy)?;
-        let view = View::capture(self, &mut inner, admission, limit)?;
+        let view = View::capture(self, &mut inner, admission, limit, channels)?;
         drop(inner);
 
         let task = crate::resources::spawn_blocking(move || {
@@ -111,7 +140,7 @@ impl RecordPartition {
             .map_err(|_| RecordError::Busy)?;
         let evaluation = inner.observe_time()?;
         if Deadline::now() >= deadline
-            || common_cut(self, &inner)? != view.cut
+            || common_cut(self, &inner, channels)? != view.cut
             || inner
                 .anchor
                 .as_ref()
@@ -138,9 +167,10 @@ impl View {
         inner: &mut Inner,
         admission: OwnedSemaphorePermit,
         limit: usize,
+        channels: IndexChannels,
     ) -> Result<Self, RecordError> {
         let evaluation = inner.observe_time()?;
-        let cut = common_cut(partition, inner)?;
+        let cut = common_cut(partition, inner, channels)?;
         let records = &inner.state.records;
         let base = records
             .event_time_base()
