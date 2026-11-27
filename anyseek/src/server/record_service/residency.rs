@@ -9,7 +9,7 @@ pub(super) fn pressure_deadline(deadline: Instant) -> Instant {
 
 pub(super) struct Output {
     pub(super) bytes: Bytes,
-    pub(super) _data: DataOutputPermit,
+    pub(super) _data: TransportData,
 }
 
 impl AsRef<[u8]> for Output {

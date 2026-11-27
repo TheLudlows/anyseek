@@ -345,7 +345,7 @@ async fn entity_delivery_reuses_budget_and_refuses_a_new_root_at_the_same_cut() 
     let work = selected.work.clone();
     let before = work.remaining();
     let io = work.remaining_io();
-    let result = selected.deliver(&p).await.unwrap();
+    let (result, _) = selected.deliver(&p).await.unwrap();
     expect(&result, "seed", "app:B", "target", 1);
     assert_eq!(work.remaining(), before - 4);
     assert_eq!(work.remaining_io(), io);

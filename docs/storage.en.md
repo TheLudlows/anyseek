@@ -46,6 +46,8 @@ New sidecars also store canonical `entity_ids` membership keys in the same order
 
 An embedding host can call `LocalEngine::build_entity_adjacency` and `LocalEngine::query_entity_paths` for an already authorized, isolated local collection. Handoff reacquires authorization for the same Catalog generation and checks the current base, Record cut, group publication, and TTL of the returned roles inside the Record publication barrier. One visit limit spans all ranges. Discovery, canonical validation, and final checks share a single `QueryWork` and the original deadline. A request that has already reached its deadline before admission returns `busy` immediately. A changed publication or reached TTL returns `busy` for the whole read.
 
+The HTTP endpoint uses the same read contract and rechecks generation, publication, and TTL at header and data-frame handoff. See the [one-hop entity API](../anyseek/src/server/README.en.md#opt-in-one-hop-entity-queries).
+
 ## Authority and data ownership
 
 In S3 mode, SQLite is the mutable commit coordination authority for Record partitions. It stores head/owner epoch, commit and index watermarks, immutable references, bounded idempotency coordination, dependencies, pins, retirement, and backup/restore coordination. Object storage holds text, original vectors, indexes, and WAL contents. Local Record logs, payloads, and indexes are rebuildable cache, while Catalog and S3 SQLite metadata are durable authority.

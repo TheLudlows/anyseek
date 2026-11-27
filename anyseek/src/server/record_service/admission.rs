@@ -45,7 +45,7 @@ fn classify(path: &str, method: &Method) -> Lane {
     if !path.starts_with("/api/v1/") || path == "/api/v1/live" { return Lane::Public; }
     match (path, method) {
         ("/api/v1/index", &Method::POST) | ("/api/v1/restore" | "/api/v1/service-restores", &Method::POST) => Lane::Recovery,
-        ("/api/v1/service-backups" | "/api/v1/index/{id}/backup" | EVENT_TIME_CHECKPOINT_PATH, &Method::POST)
+        ("/api/v1/service-backups" | "/api/v1/index/{id}/backup" | EVENT_TIME_CHECKPOINT_PATH | entity::CHECKPOINT_PATH, &Method::POST)
             | ("/api/v1/index/{id}", &Method::PATCH) | ("/api/v1/backups/{id}", &Method::DELETE) => Lane::Background,
         ("/api/v1/index/{id}", &Method::DELETE) | ("/api/v1/backups", &Method::GET)
             | ("/api/v1/catalog/operation/{epoch}/{nonce}", &Method::GET) => Lane::Control,
@@ -64,8 +64,11 @@ pub(super) async fn request(service: &Service, request: axum::extract::Request) 
         if path == EVENT_TIME_CHECKPOINT_PATH && principal != MASTER {
             return Err(Error(StatusCode::FORBIDDEN, "unauthorized", "event-time checkpoints require service administration".into()));
         }
+        if path == entity::CHECKPOINT_PATH && principal != MASTER {
+            return Err(Error(StatusCode::FORBIDDEN, "unauthorized", "entity checkpoints require service administration".into()));
+        }
         let global = matches!(path.as_str(), "/api/v1/live" | "/api/v1/backups" | "/api/v1/backups/{id}"
-            | "/api/v1/service-backups" | "/api/v1/service-restores" | EVENT_TIME_CHECKPOINT_PATH
+            | "/api/v1/service-backups" | "/api/v1/service-restores" | EVENT_TIME_CHECKPOINT_PATH | entity::CHECKPOINT_PATH
             | "/api/v1/catalog/operation/{epoch}/{nonce}");
         if !global && principal == MASTER {
             return Err(bad("X-AnySeek-Tenant is required for tenant data requests"));

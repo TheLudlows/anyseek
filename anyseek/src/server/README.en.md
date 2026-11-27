@@ -311,6 +311,14 @@ Search filters TTL at capture time and revalidates candidates using the latest t
 
 `/doc/{record_id}/status` retains the current technical version, visible/deleted/expired state, and pending_vector_fields. See the [Record contract](../../../docs/record-model.en.md) for all boundaries and the [roadmap and acceptance evidence](../../../docs/roadmap.en.md) for verification status.
 
+### Opt-in one-hop entity queries
+
+Service administrators build a certified entity sidecar for a local collection without archival using `POST /api/v1/entity-checkpoints`. Use the service credential, omit `X-AnySeek-Tenant`, and supply `tenant_id` and `collection_id` in JSON. Success returns `indexed_seq`. A timeout before build admission returns 429 `busy`. A timeout after admission returns 503 `outcome_unknown` and the build may continue. A full checkpoint that replaces the base may require an explicit rebuild.
+
+The trusted gateway supplies `X-AnySeek-Tenant` for an authorized isolated collection. Call `POST /api/v1/index/{id}/entity/query` with a body such as `{"direction":"out","anchor":"app:A","kind":"link","visit_limit":32}`. `out` and `in` select outgoing and incoming edges. The anchor is a namespaced ID of up to 256 UTF-8 bytes, and the edge type is up to 128 bytes. The visit limit is 1 through 256, subject to the collection candidate limit. The response contains `visible_seq`, `seeds`, and `neighbors`. Each neighbor has `declarations` and `members`, and each identity includes its canonical Record version.
+
+The request shares 65,536 logical work units, 2,048 positioned reads, 16 MiB of positioned read bytes, and the original deadline. A missing sidecar, invalid range, or exceeded work budget returns 400 `rejected`. An unavailable original generation returns 403 `unauthorized`. TTL expiry, a changed Record cut or group publication, or a deadline before handoff returns 429 `busy`. The data frame rechecks generation, publication, and TTL even after response headers have been sent. Invalidation terminates the body before any result data is sent.
+
 ### Opt-in event-time windows
 
 Service administrators build a projection for a local collection with `POST /api/v1/event-time-checkpoints`. Use the service credential, omit `X-AnySeek-Tenant`, and supply `tenant_id` and `collection_id` in JSON. The gateway must restrict this operation to administrators. Existing background and partition admission limit construction. Success returns `indexed_seq`. The host authorizes the local SDK's `build_event_time_projection(tenant, collection)`. This build enables the current certified base. Incremental checkpoints can reuse it, and an ordinary full checkpoint (including the ordinary PATCH) selects a new base without the projection. The same administrative operation can rebuild it after reopening. Remote and archive collections do not support this option.

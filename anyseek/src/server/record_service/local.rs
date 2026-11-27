@@ -289,31 +289,10 @@ impl LocalEngine {
         tokio::time::timeout_at(
             deadline,
             self.run(tenant, collection, Lane::Foreground, async move |service, tenant, id| {
-                let partition = service.record(&tenant, &id).await?;
-                let generation = partition.generation;
-                let for_read = partition.clone();
-                // Only copy bounded keys. Report invalid input inside the
-                // authorization guard so a retired generation stays hidden.
-                let keys = RecordPartition::validate_entity_path_keys(anchor, kind)
-                    .map(|()| (anchor.to_owned(), kind.to_owned()));
-                let found = service
-                    .catalog
-                    .authorized_generation(tenant.clone(), id.clone(), generation, move |_| async move {
-                        let (anchor, kind) = keys?;
-                        for_read
-                            .prepare_entity_paths(direction, &anchor, &kind, visit_limit, deadline)
-                            .await
-                    })
-                    .await??;
-                #[cfg(test)]
-                service.cold.test.entity_handoff.wait().await;
-                let result = service
-                    .catalog
-                    .authorized_generation(tenant, id, generation, move |_| async move {
-                        found.deliver(&partition).await
-                    })
-                    .await??;
-                Ok(result)
+                let (paths, _) = entity::query_collection(
+                    &service, tenant, id, direction, (anchor, kind), visit_limit, deadline,
+                ).await?;
+                Ok(paths)
             }),
         )
         .await
@@ -349,7 +328,7 @@ impl LocalEngine {
     /// An explicit new call starts a separate attempt.
     pub async fn build_event_time_projection(&self, tenant: &str, collection: &str) -> Result<u64, LocalError> {
         let deadline = tokio::time::Instant::now() + self.service()?.request_timeout;
-        let wait = EventTimeCheckpointWait::default();
+        let wait = ProjectionCheckpointWait::default();
         let admission = wait.0.clone();
         let result = tokio::time::timeout_at(deadline, self.run(tenant, collection, Lane::Background,
             async move |service, tenant, collection| {

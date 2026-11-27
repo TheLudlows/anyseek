@@ -310,6 +310,14 @@ impl Inner {
     fn is_healthy(&self) -> bool {
         self.healthy && !self.failed.load(Ordering::Acquire)
     }
+    fn authorized_entry(&self, id: &str, generation: Option<u64>) -> Result<&CollectionEntry, CatalogError> {
+        if !self.is_healthy() {
+            return Err(CatalogError::RecoveryRequired);
+        }
+        self.state.collection(id)
+            .filter(|entry| entry.active && !entry.deleted && generation.is_none_or(|value| value == entry.generation))
+            .ok_or(CatalogError::Unauthorized)
+    }
     fn compact(&mut self, now: u64) -> Result<(), CatalogError> {
         let mut next = self.state.clone();
         next.epoch_watermark = now.max(next.epoch_watermark);
@@ -350,6 +358,32 @@ pub struct Catalog {
     inner: Arc<Mutex<Inner>>,
     admission: Arc<Semaphore>,
     execution: Arc<execution::Execution>,
+}
+
+/// Recheck an authenticated collection incarnation at a short transport handoff.
+pub(crate) struct CatalogFrameGeneration {
+    inner: std::sync::Weak<Mutex<Inner>>,
+    id: String,
+    generation: u64,
+}
+
+pub(crate) struct CatalogFrameGuard {
+    _inner: tokio::sync::OwnedMutexGuard<Inner>,
+}
+
+impl CatalogFrameGeneration {
+    pub(crate) fn try_pin(&self) -> Result<Option<CatalogFrameGuard>, CatalogError> {
+        let owner = self.inner.upgrade().ok_or(CatalogError::RecoveryRequired)?;
+        let Ok(inner) = owner.try_lock_owned() else { return Ok(None); };
+        inner.authorized_entry(&self.id, Some(self.generation))?;
+        Ok(Some(CatalogFrameGuard { _inner: inner }))
+    }
+
+    pub(crate) async fn wait_active(&self) -> Result<(), CatalogError> {
+        let owner = self.inner.upgrade().ok_or(CatalogError::RecoveryRequired)?;
+        owner.lock().await.authorized_entry(&self.id, Some(self.generation))?;
+        Ok(())
+    }
 }
 fn backup_id(id: &str) -> Result<(), CatalogError> {
     if id.len() != 64
@@ -678,15 +712,15 @@ impl Catalog {
     ) -> Result<CollectionEntry, CatalogError> {
         let id = scope(tenant, collection)?;
         let inner = self.inner.lock().await;
-        if !inner.is_healthy() {
-            return Err(CatalogError::RecoveryRequired);
-        }
-        inner
-            .state
-            .collection(&id)
-            .filter(|e| e.active && !e.deleted)
-            .cloned()
-            .ok_or(CatalogError::Unauthorized)
+        inner.authorized_entry(&id, None).cloned()
+    }
+
+    pub(crate) fn frame_generation(&self, tenant: &str, collection: &str, generation: u64) -> Result<CatalogFrameGeneration, CatalogError> {
+        Ok(CatalogFrameGeneration {
+            inner: Arc::downgrade(&self.inner),
+            id: scope(tenant, collection)?,
+            generation,
+        })
     }
     /// List active collections belonging to an already authenticated tenant.
     pub async fn listing(&self, tenant: &str) -> Result<Vec<CollectionEntry>, CatalogError> {
@@ -758,15 +792,7 @@ impl Catalog {
             let _admission = admission;
             let _execution = execution.read(&id).await?;
             let inner = owner.lock().await;
-            if !inner.is_healthy() {
-                return Err(CatalogError::RecoveryRequired);
-            }
-            let entry = inner
-                .state
-                .collection(&id)
-                .filter(|e| e.active && !e.deleted && generation.is_none_or(|g| g == e.generation))
-                .ok_or(CatalogError::Unauthorized)?
-                .clone();
+            let entry = inner.authorized_entry(&id, generation)?.clone();
             let mut guard = CollectionWork {
                 failed: inner.failed.clone(),
                 complete: false,

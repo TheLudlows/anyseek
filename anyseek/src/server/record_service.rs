@@ -7,6 +7,7 @@ mod cold;
 mod residency;
 mod shutdown;
 mod diagnostics;
+mod entity;
 pub(crate) mod local;
 #[cfg(test)]
 #[path = "record_service/entity_tests.rs"]
@@ -194,9 +195,15 @@ async fn owned<T: Send + 'static>(
 }
 
 /// Keep data-validity checks at the transport handoff; credentials are checked at admission.
+#[derive(Clone)]
+enum TransportData {
+    Record(DataOutputPermit),
+    Entity(Arc<entity::Output>),
+}
+
 struct DataBody {
     bytes: Option<Bytes>,
-    data: Option<DataOutputPermit>,
+    data: Option<TransportData>,
     pending: Option<(anyseek::resources::Task<Result<(), Error>>, futures::future::AbortHandle)>,
     deadline: Option<tokio::time::Instant>,
 }
@@ -259,14 +266,31 @@ impl http_body::Body for DataBody {
         }
     }
 }
+
+fn transport_data(response: &Response) -> Option<TransportData> {
+    let extensions = response.extensions();
+    if let Some(data) = extensions.get::<Arc<entity::Output>>() {
+        return Some(TransportData::Entity(data.clone()));
+    }
+    extensions.get::<DataOutputPermit>().cloned().map(TransportData::Record)
+}
+
 fn response<T: Serialize>(value: T) -> Result<Response, Error> {
     protected(Ok(value))
 }
-fn deliver<T>(data: Option<&DataOutputPermit>, handoff: impl FnOnce() -> T) -> Result<T, Error> {
-    match data { Some(data)=>data.deliver(handoff).map_err(Error::from),None=>Ok(handoff()) }
+fn deliver<T>(data: Option<&TransportData>, handoff: impl FnOnce() -> T) -> Result<T, Error> {
+    match data {
+        Some(TransportData::Record(data)) => data.deliver(handoff).map_err(Error::from),
+        Some(TransportData::Entity(data)) => data.deliver(handoff),
+        None => Ok(handoff()),
+    }
 }
-async fn deliver_after_publication<T>(data: Option<&DataOutputPermit>, handoff: impl FnOnce() -> T) -> Result<T, Error> {
-    match data { Some(data)=>data.deliver_after_publication(handoff).await.map_err(Error::from),None=>Ok(handoff()) }
+async fn deliver_after_publication<T>(data: Option<&TransportData>, handoff: impl FnOnce() -> T) -> Result<T, Error> {
+    match data {
+        Some(TransportData::Record(data)) => data.deliver_after_publication(handoff).await.map_err(Error::from),
+        Some(TransportData::Entity(data)) => data.deliver_after_publication(handoff).await,
+        None => Ok(handoff()),
+    }
 }
 fn protected<T: Serialize>(result: Result<T, Error>) -> Result<Response, Error> {
     protected_data(result, None)
@@ -274,20 +298,20 @@ fn protected<T: Serialize>(result: Result<T, Error>) -> Result<Response, Error> 
 fn protected_data<T: Serialize>(
     result: Result<T, Error>, data: Option<DataOutputPermit>,
 ) -> Result<Response, Error> {
-    let response = encode_data_response(result, data)?;
-    let data = response.extensions().get::<DataOutputPermit>().cloned();
+    let response = encode_data_response(result, data.map(TransportData::Record))?;
+    let data = transport_data(&response);
     deliver(data.as_ref(), || response)
 }
 async fn protected_after_publication<T: Serialize>(
     result: Result<T, Error>,
     data: DataOutputPermit,
 ) -> Result<Response, Error> {
-    let response = encode_data_response(result, Some(data))?;
-    let data = response.extensions().get::<DataOutputPermit>().cloned();
+    let response = encode_data_response(result, Some(TransportData::Record(data)))?;
+    let data = transport_data(&response);
     deliver_after_publication(data.as_ref(), || response).await
 }
 fn encode_data_response<T: Serialize>(
-    result: Result<T, Error>, data: Option<DataOutputPermit>,
+    result: Result<T, Error>, data: Option<TransportData>,
 ) -> Result<Response, Error> {
     // Persistence outcome errors contain no result body. Preserve their retry
     // classification after a data fence. Successful data and other errors keep the data barrier.
@@ -334,7 +358,11 @@ fn encode_data_response<T: Serialize>(
     if let Some(code) = code {
         response.headers_mut().insert(ERROR_CODE_HEADER, header::HeaderValue::from_static(code));
     }
-    if let Some(data) = data { response.extensions_mut().insert(data); }
+    match data {
+        Some(TransportData::Record(data)) => { response.extensions_mut().insert(data); }
+        Some(TransportData::Entity(data)) => { response.extensions_mut().insert(data); }
+        None => {}
+    }
     Ok(response)
 }
 
@@ -1744,12 +1772,12 @@ enum CheckpointAdmission {
     Closed,
 }
 
-type EventTimeAdmission = Arc<std::sync::Mutex<CheckpointAdmission>>;
+type ProjectionAdmission = Arc<std::sync::Mutex<CheckpointAdmission>>;
 
 #[derive(Default)]
-struct EventTimeCheckpointWait(EventTimeAdmission);
+struct ProjectionCheckpointWait(ProjectionAdmission);
 
-impl EventTimeCheckpointWait {
+impl ProjectionCheckpointWait {
     // Admission and waiter exit serialize around the synchronous try-start.
     // Catalog authorization owns its task and can outlive a dropped waiter.
     fn stop_waiting(&self) -> bool {
@@ -1772,7 +1800,7 @@ impl EventTimeCheckpointWait {
     }
 }
 
-impl Drop for EventTimeCheckpointWait {
+impl Drop for ProjectionCheckpointWait {
     fn drop(&mut self) {
         self.stop_waiting();
     }
@@ -1796,7 +1824,7 @@ fn event_time_checkpoint_error(mut error: Error) -> Error {
 
 async fn event_time_checkpoint(
     State(s): State<Arc<Service>>,
-    Extension(admission): Extension<EventTimeAdmission>,
+    Extension(admission): Extension<ProjectionAdmission>,
     headers: HeaderMap,
     bytes: Bytes,
 ) -> Result<Response, Error> {
@@ -1810,7 +1838,15 @@ async fn event_time_checkpoint(
 
 async fn build_event_time_collection(
     s: &Arc<Service>, tenant: String, id: String, deadline: tokio::time::Instant,
-    admission: EventTimeAdmission,
+    admission: ProjectionAdmission,
+) -> Result<(u64, ResidencyPin), Error> {
+    build_projection_collection(s, tenant, id, deadline, admission, RecordPartition::start_event_time_checkpoint).await
+}
+
+async fn build_projection_collection(
+    s: &Arc<Service>, tenant: String, id: String, deadline: tokio::time::Instant,
+    admission: ProjectionAdmission,
+    start: fn(&RecordPartition, std::time::Duration) -> Result<anyseek::record::IndexJob, RecordError>,
 ) -> Result<(u64, ResidencyPin), Error> {
     anyseek::catalog::validate_tenant(&tenant)?;
     anyseek::catalog::validate_name(&id)?;
@@ -1827,7 +1863,7 @@ async fn build_event_time_collection(
         if !matches!(*admission, CheckpointAdmission::Waiting) || remaining.is_zero() {
             return Err(RecordError::Busy);
         }
-        let job = partition.start_event_time_checkpoint(remaining)?;
+        let job = start(&partition, remaining)?;
         *admission = CheckpointAdmission::Accepted;
         Ok(job)
     }).await??;
@@ -2069,7 +2105,7 @@ impl QueryResponse {
 // Keep source/data validity checks at headers and body handoff; no credential recheck.
 async fn delivery_gate(request: axum::extract::Request, next: axum::middleware::Next) -> Response {
     let response = next.run(request).await;
-    let data = response.extensions().get::<DataOutputPermit>().cloned();
+    let data = transport_data(&response);
     match deliver_after_publication(data.as_ref(), || response).await { Ok(response)=>response, Err(error)=>error.into_response() }
 
 }
@@ -2131,24 +2167,31 @@ async fn request_admitted(
 ) -> Response {
     let version = request.version();
     let deadline = tokio::time::Instant::now() + service.request_timeout;
+    let path = request.extensions().get::<axum::extract::MatchedPath>()
+        .map(axum::extract::MatchedPath::as_str);
+    let event_checkpoint = request.method() == axum::http::Method::POST && path == Some(EVENT_TIME_CHECKPOINT_PATH);
     let checkpoint = (request.method() == axum::http::Method::POST
-        && request.extensions().get::<axum::extract::MatchedPath>()
-            .is_some_and(|path| path.as_str() == EVENT_TIME_CHECKPOINT_PATH))
-        .then(EventTimeCheckpointWait::default);
-    let event_time_read = request.extensions().get::<axum::extract::MatchedPath>()
-        .is_some_and(|path| path.as_str() == EVENT_TIME_QUERY_PATH);
+        && matches!(path, Some(EVENT_TIME_CHECKPOINT_PATH | entity::CHECKPOINT_PATH)))
+        .then(ProjectionCheckpointWait::default);
+    let event_time_read = path == Some(EVENT_TIME_QUERY_PATH);
+    let entity_read = path == Some(entity::QUERY_PATH);
+    if entity_read && tokio::time::Instant::now() >= deadline {
+        return admission_refusal(RecordError::Busy.into(), version);
+    }
+    let checkpoint_error = |error| if event_checkpoint { event_time_checkpoint_error(error) } else { error };
     let read_timeout = || Error(StatusCode::TOO_MANY_REQUESTS, "busy", "event-time query deadline exceeded".into());
     let (mut request, scope) = match tokio::time::timeout_at(deadline, admission::request(&service, request)).await {
         Ok(Ok(value)) => value,
         Ok(Err(error)) => {
-            let error = if checkpoint.is_some() { event_time_checkpoint_error(error) } else { error };
-            return admission_refusal(error, version);
+            return admission_refusal(checkpoint_error(error), version);
         }
         // No handler or owned data task has started. A previous attempt can
         // still be running, so callers must keep the original operation ID.
         Err(_) => {
             let error = if let Some(wait) = &checkpoint {
-                event_time_checkpoint_error(wait.timeout_error())
+                checkpoint_error(wait.timeout_error())
+            } else if entity_read {
+                RecordError::Busy.into()
             } else if event_time_read {
                 read_timeout()
             } else {
@@ -2178,10 +2221,11 @@ async fn request_admitted(
         match tokio::time::timeout_at(deadline, scope.clone().run(
             REQUEST_DEADLINE.scope(deadline, EVENT_TIME_READ.scope(read.clone(), ROUTED_COLLECTION.scope(collection, run))))).await {
             Ok(response) => response,
+            Err(_) if entity_read => Error::from(RecordError::Busy).into_response(),
             Err(_) if read.load(std::sync::atomic::Ordering::Acquire) => read_timeout().into_response(),
             Err(_) => {
                 let error = if let Some(wait) = &checkpoint {
-                    event_time_checkpoint_error(wait.timeout_error())
+                    checkpoint_error(wait.timeout_error())
                 } else {
                     Error(StatusCode::SERVICE_UNAVAILABLE, "outcome_unknown",
                         "request deadline exceeded; retry the original operation identity".into())
@@ -2222,6 +2266,8 @@ pub fn router(service: Arc<Service>) -> Router {
         .route("/api/v1/index/{id}/query", post(query))
         .route(EVENT_TIME_QUERY_PATH, post(event_time_query))
         .route(EVENT_TIME_CHECKPOINT_PATH, post(event_time_checkpoint))
+        .route(entity::QUERY_PATH, post(entity::query))
+        .route(entity::CHECKPOINT_PATH, post(entity::checkpoint))
         .route("/api/v1/index/{id}/iterator", post(iterate))
         .route("/api/v1/index/{id}/batch", post(batch))
         .route("/api/v1/index/{id}/group/replace", post(replace_group))
@@ -3149,7 +3195,7 @@ mod tests {
                     let entered = entered.clone();
                     async move {
                         entered.store(true, std::sync::atomic::Ordering::Release);
-                        encode_data_response(Ok(json!({"body":"must not escape"})), Some(data)).unwrap()
+                        encode_data_response(Ok(json!({"body":"must not escape"})), Some(TransportData::Record(data))).unwrap()
                     }
                 })), service.clone())
             } else { router(service.clone()) };
@@ -3431,7 +3477,12 @@ mod tests {
 fn openapi_document() -> Value {
     use utoipa::OpenApi;
     #[derive(utoipa::OpenApi)]
-    #[openapi(components(schemas(CreateIndexRequest, SearchRequestObject, CollectionCreate, EventTimeRequest, EventTimeCheckpointRequest, TimeVectorRequest, TimeVectorRecall, TimeTextRequest, TimeAnnRequest)))]
+    #[openapi(components(schemas(
+        CreateIndexRequest, SearchRequestObject, CollectionCreate, EventTimeRequest,
+        EventTimeCheckpointRequest, TimeVectorRequest, TimeVectorRecall, TimeTextRequest,
+        TimeAnnRequest, entity::EntityPathRequest, entity::EntityCheckpointRequest,
+        anyseek::record::EntityCandidatePaths
+    )))]
     struct Api;
     let mut doc = serde_json::to_value(Api::openapi()).unwrap();
     doc["openapi"] = json!("3.1.0");
@@ -3538,6 +3589,10 @@ fn openapi_document() -> Value {
             Some(json!({"$ref":"#/components/schemas/EventTimeRequest"}))),
         (EVENT_TIME_CHECKPOINT_PATH, "post", "Service administration: build a bounded local event-time checkpoint. Omit the tenant header and name the tenant in the body.",
             Some(json!({"$ref":"#/components/schemas/EventTimeCheckpointRequest"}))),
+        (entity::QUERY_PATH, "post", "Query an opted-in directed entity hop in the authenticated tenant collection",
+            Some(json!({"$ref":"#/components/schemas/EntityPathRequest"}))),
+        (entity::CHECKPOINT_PATH, "post", "Service administration: build a bounded local entity checkpoint. Omit the tenant header and name the tenant in the body.",
+            Some(json!({"$ref":"#/components/schemas/EntityCheckpointRequest"}))),
         ("/api/v1/index/{id}/ingest", "post", "Commit 1..64 independent commands; continue after business rejection; indexes asynchronous",
             Some(json!({"type":"object","additionalProperties":false,"required":["records"],"properties":{"records":{"type":"array","minItems":1,"maxItems":64,"items":{"$ref":"#/components/schemas/RecordWrite"}}}}))),
         ("/api/v1/index/{id}/ingest", "get", "Record committed_seq and asynchronous lexical_seq/vector_seq", None),
@@ -3676,8 +3731,17 @@ fn openapi_document() -> Value {
             operation["description"] = json!("The explicit recall.time mode requires all=true and returns two-channel RRF at one local cut. The default query contract is unchanged.");
             operation["responses"]["200"]["description"] = json!("Ordinary query response or bounded time/vector result");
         }
-        if path == EVENT_TIME_CHECKPOINT_PATH {
-            operation["description"] = json!("No operation ID. After a timeout, query the current projection before explicitly starting a new build. A successful query can use a previous projection and does not confirm the refresh.");
+        if path == entity::QUERY_PATH {
+            operation["responses"]["200"] = json!({"description":"Canonical record identities and versions at one authorized cut",
+                "content":{"application/json":{"schema":{"$ref":"#/components/schemas/EntityCandidatePaths"}}}});
+            operation["responses"]["400"] = json!({"description":"Invalid keys, unavailable sidecar, or exhausted visit or work budget (rejected); no partial paths"});
+            operation["responses"]["403"] = json!({"description":"The original collection generation is unavailable to this tenant (unauthorized)"});
+            operation["responses"]["429"] = json!({"description":"Temporary admission, publication, expiry, or deadline refusal (busy)"});
+        }
+        if matches!(path, EVENT_TIME_CHECKPOINT_PATH | entity::CHECKPOINT_PATH) {
+            if path == EVENT_TIME_CHECKPOINT_PATH {
+                operation["description"] = json!("No operation ID. After a timeout, query the current projection before explicitly starting a new build. A successful query can use a previous projection and does not confirm the refresh.");
+            }
             operation["responses"]["default"] = json!({"description":"JSON code/message error"});
             operation["responses"]["200"] = json!({"description":"Published checkpoint cut",
                 "content":{"application/json":{"schema":{"type":"object","required":["indexed_seq"],
@@ -3690,7 +3754,7 @@ fn openapi_document() -> Value {
             json!({"name":"apikey","in":"header","required":path!="/api/v1/live","schema":{"type":"string"}}),
         ];
         if !matches!(path, "/api/v1/live" | "/api/v1/backups" | "/api/v1/backups/{id}"
-            | "/api/v1/service-backups" | "/api/v1/service-restores" | EVENT_TIME_CHECKPOINT_PATH
+            | "/api/v1/service-backups" | "/api/v1/service-restores" | EVENT_TIME_CHECKPOINT_PATH | entity::CHECKPOINT_PATH
             | "/api/v1/catalog/operation/{epoch}/{nonce}") {
             params.push(json!({"name":"X-AnySeek-Tenant","in":"header","required":true,
                 "description":"Tenant namespace supplied by the authenticated gateway; not a user credential.",
