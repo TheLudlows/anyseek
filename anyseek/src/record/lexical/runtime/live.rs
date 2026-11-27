@@ -79,7 +79,16 @@ impl Runtime {
         let mut snapshot=(**base).clone();
         let mut identities=(*base.identities).clone();
         snapshot.overlay=Vec::with_capacity(rows.len());
-        for row in rows {snapshot.identity_id_bytes=snapshot.identity_id_bytes.checked_add(row.identity.id.len() as u64).ok_or_else(||storage("visible identity bytes overflow"))?;let ordinal=identities.len();identities.0.push(row.identity.clone());snapshot.overlay.push((ordinal,row.clone()));snapshot.cut.sequence=snapshot.cut.sequence.max(row.identity.revision);}
+        for row in rows {
+            snapshot.identity_id_bytes = snapshot.identity_id_bytes.checked_add(row.identity.id.len() as u64)
+                .ok_or_else(|| storage("visible identity bytes overflow"))?;
+            let ordinal = identities.len();
+            identities.0.push(row.identity.clone());
+            snapshot.overlay.push((ordinal, row.clone()));
+            snapshot.cut.sequence = snapshot.cut.sequence.max(row.identity.revision);
+            let totals = Arc::make_mut(&mut snapshot.field_totals);
+            scoring::FieldLengths::add_document(totals, &row.lengths);
+        }
         snapshot.identities=Arc::new(identities);Ok(Arc::new(snapshot))
     }
     pub(crate) async fn append_visible(self:&Arc<Self>,identity:Identity,document:&Document,reservation:Reservation,count_update:bool,cursors:Option<Arc<Cursors>>)->Result<(),RecordError>{

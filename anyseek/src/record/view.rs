@@ -10,6 +10,7 @@ pub(super) struct RotationBudget {
 pub(super) struct RetrievalView {
     query: VectorIndexArc,
     tail: VectorIndexArc,
+    pub(super) physical_versions: usize,
     // Ordered like query components after the mutable tail, before certified packages.
     pub(super) pending_seals: Vec<segment::Package>,
     pub(super) detached_cache: bool,
@@ -23,7 +24,7 @@ pub(super) struct RetrievalView {
     vector: Option<index_consumers::Consumer>,
     reserved_rows: Option<usize>,
     component_bytes: u64,
-    retired: Vec<Arc<crate::active::Retired>>,
+    retired: Vec<(Arc<crate::active::Retired>, Arc<lexical::visibility::PublishedSegment>)>,
     lexical: Option<index_consumers::Consumer>,
     cursors: Option<Arc<index_consumers::Cursors>>,
     owner: std::sync::Weak<Mutex<Inner>>,
@@ -128,10 +129,11 @@ impl RetrievalView {
         root.segments[0].admission.can_grow(bytes)
     }
 
-    pub(super) fn single(index: VectorIndexArc) -> Self {
+    pub(super) fn single(index: VectorIndexArc, ordinals: &[String]) -> Self {
         Self {
             query: index.clone(),
             tail: index,
+            physical_versions: ordinals.iter().filter(|key| !key.is_empty()).count(),
             pending_seals: Vec::new(),
             detached_cache: false,
             merge_address_memory: None,
@@ -225,10 +227,10 @@ impl RetrievalView {
         for shard in &shards {
             shard.active.as_ref().ok_or_else(|| storage("missing segment statistics"))?;
         }
-        // No await or fallible work after this point. Existing statistics and
-        // shared retirement masks remain owned by their original components.
         drop(tail);
         drop(shards);
+        lexical::visibility::PublishedSegment::publish(&root.segments[0]).await;
+        // Existing statistics and retirement masks stay with their components.
         // No new plan can target the sealed generation; existing credits may finish.
         root.segments[0].admission.close();
         root.segments.insert(0, tail_segment);
@@ -365,7 +367,7 @@ impl RetrievalView {
             let mut shard=component.vector.write().await;
             let active=shard.active.as_mut().ok_or_else(||storage("component statistics missing"))?;
             let mask=active.retired.get_or_insert_with(Default::default).clone();
-            self.retired.push(mask);
+            self.retired.push((mask, component.visibility.clone()));
         }
         drop(root);
         let root=self.tail.read().await;
@@ -410,16 +412,22 @@ impl RetrievalView {
     }
     pub(super) async fn retire(&self,ordinal:usize) -> Result<(),RecordError> {
         if !self.retired.is_empty() {
-            return self.retired[ordinal%self.retired.len()].insert(ordinal/self.retired.len()).map_err(storage);
+            let (mask, visibility) = &self.retired[ordinal % self.retired.len()];
+            let local = ordinal / self.retired.len();
+            mask.insert(local).map_err(storage)?;
+            visibility.retire(local);
+            return Ok(());
         }
         let root=self.query.read().await;
         let n=root.segments.len();
-        let mut shard=root.segments[ordinal%n].vector.write().await;
+        let segment = &root.segments[ordinal % n];
+        let mut shard = segment.vector.write().await;
         let local=ordinal/n;
         shard.delete_hashset.insert(local);
         let active = shard.active.as_mut().ok_or_else(||storage("missing view statistics"))?;
         if let Some(mask) = &active.retired { mask.insert(local).map_err(storage)?; }
         active.retire(local);
+        segment.visibility.retire(local);
         Ok(())
     }
     #[cfg(test)]

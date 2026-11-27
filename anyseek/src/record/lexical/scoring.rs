@@ -7,6 +7,29 @@ fn decoded(length: u64) -> f32 {
     DOCUMENT_LENGTH_COMPRESSION[int_to_byte4(length as u32) as usize] as f32
 }
 
+#[derive(Clone, Copy, Default)]
+pub(super) struct FieldLengths {
+    sum: u64,
+    nonempty: u64,
+}
+
+impl FieldLengths {
+    pub(super) fn add_document(totals: &mut [Self], lengths: &[u64]) {
+        debug_assert_eq!(totals.len(), lengths.len());
+        for (total, &length) in totals.iter_mut().zip(lengths) {
+            total.sum += decoded(length) as u64;
+            total.nonempty += u64::from(length > 0);
+        }
+    }
+    pub(super) fn remove_document(totals: &mut [Self], lengths: &[u64]) {
+        debug_assert_eq!(totals.len(), lengths.len());
+        for (total, &length) in totals.iter_mut().zip(lengths) {
+            total.sum -= decoded(length) as u64;
+            total.nonempty -= u64::from(length > 0);
+        }
+    }
+}
+
 // Owned by one query over one selected corpus; never cached across views.
 struct QueryStatistics<'a> {
     terms: BTreeSet<&'a String>,
@@ -17,8 +40,8 @@ struct QueryStatistics<'a> {
 
 impl<'a> QueryStatistics<'a> {
     fn build(
-        corpus: &[&ActiveView<'_>],
-        groups: &'a [super::query::ScoreGroup],
+        corpus: &[ActiveView<'_>],
+        groups: &'a [query::ScoreGroup],
         field_count: usize,
         normalization: FieldLengthNormalization,
     ) -> Result<Self, RecordError> {
@@ -32,30 +55,29 @@ impl<'a> QueryStatistics<'a> {
             .enumerate()
             .map(|(slot, term)| (term.as_str(), slot))
             .collect();
-        let mut sums = vec![0u64; field_count];
-        let mut nonempty = vec![0u64; field_count];
+        let mut totals = vec![FieldLengths::default(); field_count];
         let population: usize = corpus.iter().map(|v| v.live.len()).sum();
         for view in corpus {
-            for (segment, addresses) in view.snapshot.addresses.iter().enumerate() {
-                for (doc, ordinal) in addresses.iter().enumerate() {
-                    if !view.live.contains(ordinal) {
-                        continue;
-                    }
-                    for (field, length) in view.snapshot.lengths[segment][doc].iter().enumerate() {
-                        sums[field] += decoded(*length) as u64;
-                        nonempty[field] += u64::from(*length > 0);
-                    }
+            let fields = match &view.live {
+                LiveSelection::Published(live) => &live.fields,
+                LiveSelection::Ordinals(live) if live.len() == view.snapshot.identities.len() => {
+                    &view.snapshot.field_totals
                 }
+                LiveSelection::Ordinals(live) => {
+                    for &ordinal in live {
+                        FieldLengths::add_document(&mut totals, view.snapshot.lengths_for(ordinal));
+                    }
+                    continue;
+                }
+            };
+            for (total, field) in totals.iter_mut().zip(fields) {
+                total.sum += field.sum;
+                total.nonempty += field.nonempty;
             }
-        }
-        for view in corpus {
-            for (ordinal,row) in &view.snapshot.overlay {if view.live.contains(ordinal){
-                for (field,length) in row.lengths.iter().enumerate(){sums[field]+=decoded(*length) as u64;nonempty[field]+=u64::from(*length>0);}
-            }}
         }
         let mut averages = vec![1.0f32; field_count];
         if normalization == FieldLengthNormalization::Shared {
-            let sum = sums.iter().sum::<u64>();
+            let sum = totals.iter().map(|total| total.sum).sum::<u64>();
             let mean = if sum == 0 {
                 1.0
             } else {
@@ -63,11 +85,11 @@ impl<'a> QueryStatistics<'a> {
             };
             averages.fill(mean);
         } else {
-            for ((average, sum), count) in averages.iter_mut().zip(sums).zip(nonempty) {
-                *average = if count == 0 || sum == 0 {
+            for (average, total) in averages.iter_mut().zip(totals) {
+                *average = if total.nonempty == 0 || total.sum == 0 {
                     1.0
                 } else {
-                    sum as f32 / count as f32
+                    total.sum as f32 / total.nonempty as f32
                 };
             }
         }
@@ -76,33 +98,24 @@ impl<'a> QueryStatistics<'a> {
             // DF counts each active stable revision once across all fields.
             let mut df = 0usize;
             for view in corpus {
-                let mut present = BTreeSet::new();
-                for (segment_id, segment) in
-                    view.snapshot.searcher.segment_readers().iter().enumerate()
+                // Single-field postings already count unique documents. Reuse
+                // the dictionary's DF when all physical revisions are selected.
+                if let [field] = view.snapshot.fields.as_slice()
+                    && view.live.len() == view.snapshot.identities.len()
                 {
-                    for field in view.snapshot.fields.iter() {
-                        if let Some(mut postings) = segment
-                            .inverted_index(*field)
-                            .map_err(storage)?
-                            .read_postings(
-                                &Term::from_field_text(*field, word),
-                                IndexRecordOption::Basic,
-                            )
-                            .map_err(storage)?
-                        {
-                            while postings.doc() != TERMINATED {
-                                let ordinal =
-                                    view.snapshot.addresses[segment_id][postings.doc() as usize];
-                                if view.live.contains(&ordinal) {
-                                    present.insert(ordinal);
-                                }
-                                postings.advance();
-                            }
+                    let term = Term::from_field_text(*field, word);
+                    for segment in view.snapshot.searcher.segment_readers() {
+                        let inverted = segment.inverted_index(*field).map_err(storage)?;
+                        if let Some(info) = inverted.get_term_info(&term).map_err(storage)? {
+                            df += info.doc_freq as usize;
                         }
                     }
+                    df += view.snapshot.overlay.iter().filter(|(_, row)| {
+                        row.postings[0].contains_key(word.as_str())
+                    }).count();
+                    continue;
                 }
-                for (ordinal,row) in &view.snapshot.overlay {if view.live.contains(ordinal) && row.postings.iter().any(|field|field.contains_key(word.as_str())){present.insert(*ordinal);}}
-                df += present.len();
+                df += view.document_frequency(word)?;
             }
             let n = population as f32;
             let df = df as f32;
@@ -113,7 +126,7 @@ impl<'a> QueryStatistics<'a> {
 }
 
 pub(super) fn validate_bounds(
-    groups: &[super::query::ScoreGroup],
+    groups: &[query::ScoreGroup],
     boosts: &[f32],
     field_count: usize,
 ) -> Result<(), RecordError> {
@@ -127,6 +140,53 @@ pub(super) fn validate_bounds(
 }
 
 impl ActiveView<'_> {
+    fn document_frequency(&self, word: &str) -> Result<usize, RecordError> {
+        let mut frequency = 0;
+        for (segment_id, segment) in self.snapshot.searcher.segment_readers().iter().enumerate() {
+            let mut postings = Vec::with_capacity(self.snapshot.fields.len());
+            for &field in self.snapshot.fields.iter() {
+                let inverted = segment.inverted_index(field).map_err(storage)?;
+                if let Some(posting) = inverted.read_postings(
+                    &Term::from_field_text(field, word),
+                    IndexRecordOption::Basic,
+                ).map_err(storage)? {
+                    postings.push(posting);
+                }
+            }
+            let addresses = &self.snapshot.addresses[segment_id];
+            // A native ordinal belongs to exactly one physical document.
+            // Stream the union of the fields rather than allocating a set
+            // proportional to the document frequency.
+            if let [posting] = postings.as_mut_slice() {
+                while posting.doc() != TERMINATED {
+                    frequency += usize::from(self.live.contains(&addresses[posting.doc() as usize]));
+                    posting.advance();
+                }
+                continue;
+            }
+            use std::{cmp::Reverse, collections::BinaryHeap};
+            let mut cursors = BinaryHeap::from(postings.iter().enumerate()
+                .filter(|(_, posting)| posting.doc() != TERMINATED)
+                .map(|(slot, posting)| Reverse((posting.doc(), slot))).collect::<Vec<_>>());
+            let mut previous = TERMINATED;
+            while let Some(Reverse((doc, slot))) = cursors.pop() {
+                if doc != previous {
+                    frequency += usize::from(self.live.contains(&addresses[doc as usize]));
+                    previous = doc;
+                }
+                let next = postings[slot].advance();
+                if next != TERMINATED {
+                    cursors.push(Reverse((next, slot)));
+                }
+            }
+        }
+        frequency += self.snapshot.overlay.iter().filter(|(ordinal, row)| {
+            self.live.contains(ordinal) && row.postings.iter().any(|field| field.contains_key(word))
+        }).count();
+        Ok(frequency)
+    }
+
+
     #[cfg(test)]
     pub(super) fn bm25f_unigram_probe(
         &self,
@@ -161,11 +221,11 @@ impl ActiveView<'_> {
         accepts: impl Fn(&Identity) -> bool,
     ) -> Result<(usize, Vec<Hit>), RecordError> {
         validate_bounds(groups, boosts, self.snapshot.fields.len())?;
-        let statistics = QueryStatistics::build(&[self], groups, boosts.len(), normalization)?;
+        let statistics = QueryStatistics::build(std::slice::from_ref(self), groups, boosts.len(), normalization)?;
         let mut hits = Vec::new();
         let count = self.score_groups_in(
-            &statistics, query, groups, boosts, accepts,
-            &mut |identity, score| hits.push(Hit { identity: identity.clone(), score }),
+            &statistics, query, groups, boosts, |_, identity| accepts(identity),
+            &mut |_, identity, score| hits.push(Hit { identity: identity.clone(), score }),
         )?;
         sort_probe_hits(&mut hits, limit);
         Ok((count, hits))
@@ -177,8 +237,8 @@ impl ActiveView<'_> {
         query: &dyn Query,
         groups: &[super::query::ScoreGroup],
         boosts: &[f32],
-        accepts: impl Fn(&Identity) -> bool,
-        collect: &mut impl FnMut(&Identity, f32),
+        accepts: impl Fn(usize, &Identity) -> bool,
+        collect: &mut impl FnMut(usize, &Identity, f32),
     ) -> Result<usize, RecordError> {
         if self.live.is_empty() {
             return Ok(0);
@@ -214,7 +274,7 @@ impl ActiveView<'_> {
                 let doc = scorer.doc();
                 let ordinal = self.snapshot.addresses[segment_id][doc as usize];
                 let identity = &self.snapshot.identities[ordinal];
-                if self.live.contains(&ordinal) && accepts(identity) {
+                if self.live.contains(&ordinal) && accepts(ordinal, identity) {
                     count += 1;
                     let mut score = 0.0f32;
                     for fields in &mut postings {
@@ -244,7 +304,7 @@ impl ActiveView<'_> {
                                 }
                                 let tf = posting.term_freq() as f32;
                                 let length =
-                                    decoded(self.snapshot.lengths[segment_id][doc as usize][field]);
+                                    decoded(self.snapshot.lengths_for(ordinal)[field]);
                                 let denominator =
                                     1.2 * (1.0 - 0.75 + 0.75 * (length / averages[field]));
                                 score += boosts[field]
@@ -256,7 +316,7 @@ impl ActiveView<'_> {
                     if !score.is_finite() {
                         return Err(storage("nonfinite BM25F score"));
                     }
-                    collect(identity, score);
+                    collect(ordinal, identity, score);
                 }
                 scorer.advance();
             }
@@ -264,9 +324,8 @@ impl ActiveView<'_> {
         if !self.snapshot.overlay.is_empty() {
             let predicate=query.downcast_ref::<super::query::Compiled>().ok_or_else(||storage("visible delta requires shared query compiler"))?;
             for (ordinal,row) in &self.snapshot.overlay {
-                // Match before admission callbacks, just like the native scorer.
-                // Hybrid channel accounting happens in accepts and must not see nonmatches.
-                if !self.live.contains(ordinal) || !predicate.matches(row,&self.snapshot.fields) || !accepts(&row.identity){continue;}
+                // Match before filter and scoring callbacks, just like the native scorer.
+                if !self.live.contains(ordinal) || !predicate.matches(row,&self.snapshot.fields) || !accepts(*ordinal, &row.identity){continue;}
                 count+=1;let mut score=0.0f32;
                 for group in groups {
                     if !row.postings.iter().enumerate().any(|(field,terms)|
@@ -280,7 +339,7 @@ impl ActiveView<'_> {
                     }
                 }
                 if !score.is_finite(){return Err(storage("nonfinite delta BM25F score"));}
-                collect(&row.identity,score);
+                collect(*ordinal, &row.identity, score);
             }
         }
         Ok(count)
@@ -317,19 +376,10 @@ impl<'a> CorpusView<'a> {
         cut: Cut,
         mut matches: impl FnMut(&'a Identity) -> bool,
     ) -> Result<Self, RecordError> {
-        if snapshots.is_empty() {
-            return Err(storage("empty native corpus"));
-        }
+        Self::validate_snapshots(snapshots, cut)?;
         let mut found = BTreeMap::new();
         let mut views = Vec::with_capacity(snapshots.len());
         for snapshot in snapshots {
-            // Validate even when no identities match this package.
-            if snapshot.cut.sequence > cut.sequence
-                || snapshot.cut.evaluation_time_ms > cut.evaluation_time_ms
-                || snapshot.names != snapshots[0].names
-            {
-                return Err(storage("native corpus cut/schema mismatch"));
-            }
             let mut live = BTreeSet::new();
             for (ordinal, identity) in snapshot.identities.iter().enumerate() {
                 if !matches(identity) { continue; }
@@ -340,19 +390,64 @@ impl<'a> CorpusView<'a> {
                 }
                 live.insert(ordinal);
             }
-            views.push(snapshot.with_live(live));
+            views.push(ActiveView { snapshot, live: LiveSelection::Ordinals(live) });
         }
         Ok(Self { views })
     }
-    /// Execute the same predicate and active identity gate without score postings,
-    /// corpus statistics, candidate buffers, or ordering.
+    pub(super) fn from_selections(
+        snapshots: &[&'a Snapshot],
+        selections: Vec<LiveSelection>,
+        cut: Cut,
+    ) -> Result<Self, RecordError> {
+        Self::validate_snapshots(snapshots, cut)?;
+        debug_assert_eq!(snapshots.len(), selections.len());
+        let views = snapshots.iter().zip(selections).map(|(snapshot, live)| ActiveView { snapshot, live }).collect();
+        Ok(Self { views })
+    }
+
+    pub(super) fn validate_snapshots(snapshots: &[&Snapshot], cut: Cut) -> Result<(), RecordError> {
+        let Some(first) = snapshots.first() else {
+            return Err(storage("empty native corpus"));
+        };
+        if snapshots.iter().any(|snapshot| {
+            snapshot.cut.sequence > cut.sequence
+                || snapshot.cut.evaluation_time_ms > cut.evaluation_time_ms
+                || snapshot.names != first.names
+        }) {
+            return Err(storage("native corpus cut/schema mismatch"));
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
     pub(super) fn count(
         &self,
         query: &dyn Query,
         accepts: impl Fn(&Identity) -> bool,
     ) -> Result<usize, RecordError> {
+        self.count_where(query, |_, _, identity| accepts(identity))
+    }
+
+    pub(super) fn count_where(
+        &self,
+        query: &dyn Query,
+        accepts: impl Fn(usize, usize, &Identity) -> bool,
+    ) -> Result<usize, RecordError> {
         let mut count = 0;
-        for view in &self.views {
+        self.visit(query, |slot, ordinal, identity| {
+            count += usize::from(accepts(slot, ordinal, identity));
+            Ok(())
+        })?;
+        Ok(count)
+    }
+
+    /// Visit visible physical matches before applying caller-specific filters.
+    pub(super) fn visit(
+        &self,
+        query: &dyn Query,
+        mut visit: impl FnMut(usize, usize, &Identity) -> Result<(), RecordError>,
+    ) -> Result<(), RecordError> {
+        for (slot, view) in self.views.iter().enumerate() {
             if view.live.is_empty() {
                 continue;
             }
@@ -363,18 +458,23 @@ impl<'a> CorpusView<'a> {
                 let mut scorer = weight.scorer(segment, 1.0).map_err(storage)?;
                 while scorer.doc() != TERMINATED {
                     let ordinal = view.snapshot.addresses[segment_id][scorer.doc() as usize];
-                    if view.live.contains(&ordinal) && accepts(&view.snapshot.identities[ordinal]) {
-                        count += 1;
+                    if view.live.contains(&ordinal) {
+                        visit(slot, ordinal, &view.snapshot.identities[ordinal])?;
                     }
                     scorer.advance();
                 }
             }
+            if !view.snapshot.overlay.is_empty() {
+                let predicate = query.downcast_ref::<super::query::Compiled>()
+                    .ok_or_else(|| storage("visible delta requires shared query compiler"))?;
+                for (ordinal, row) in &view.snapshot.overlay {
+                    if view.live.contains(ordinal) && predicate.matches(row, &view.snapshot.fields) {
+                        visit(slot, *ordinal, &row.identity)?;
+                    }
+                }
+            }
         }
-        for view in &self.views {if !view.snapshot.overlay.is_empty(){
-            let predicate=query.downcast_ref::<super::query::Compiled>().ok_or_else(||storage("visible delta requires shared query compiler"))?;
-            for (ordinal,row) in &view.snapshot.overlay {if view.live.contains(ordinal) && predicate.matches(row,&view.snapshot.fields) && accepts(&row.identity){count+=1;}}
-        }}
-        Ok(count)
+        Ok(())
     }
 
     /// Stream every accepted score into one query-owned collector across all views.
@@ -384,16 +484,16 @@ impl<'a> CorpusView<'a> {
         groups: &[super::query::ScoreGroup],
         boosts: &[f32],
         normalization: FieldLengthNormalization,
-        accepts: impl Fn(&Identity) -> bool,
-        mut collect: impl FnMut(&Identity, f32),
+        accepts: impl Fn(usize, usize, &Identity) -> bool,
+        mut collect: impl FnMut(usize, usize, &Identity, f32),
     ) -> Result<usize, RecordError> {
-        validate_bounds(groups, boosts, self.views[0].snapshot.fields.len())?;
-        let references: Vec<_> = self.views.iter().collect();
-        let statistics = QueryStatistics::build(&references, groups, boosts.len(), normalization)?;
+        let statistics = QueryStatistics::build(&self.views, groups, boosts.len(), normalization)?;
         let mut count = 0usize;
-        for view in &self.views {
+        for (slot, view) in self.views.iter().enumerate() {
             let matched = view.score_groups_in(
-                &statistics, query, groups, boosts, &accepts, &mut collect,
+                &statistics, query, groups, boosts,
+                |ordinal, identity| accepts(slot, ordinal, identity),
+                &mut |ordinal, identity, score| collect(slot, ordinal, identity, score),
             )?;
             count = count.checked_add(matched)
                 .ok_or_else(|| storage("native corpus count overflow"))?;
@@ -411,9 +511,11 @@ impl<'a> CorpusView<'a> {
         limit: usize,
         accepts: impl Fn(&Identity) -> bool,
     ) -> Result<(usize, Vec<Hit>), RecordError> {
+        validate_bounds(groups, boosts, self.views[0].snapshot.fields.len())?;
         let mut hits = Vec::new();
-        let count = self.collect_scores(query, groups, boosts, normalization, accepts,
-            |identity, score| hits.push(Hit { identity: identity.clone(), score }))?;
+        let count = self.collect_scores(query, groups, boosts, normalization,
+            |_, _, identity| accepts(identity),
+            |_, _, identity, score| hits.push(Hit { identity: identity.clone(), score }))?;
         sort_probe_hits(&mut hits, limit);
         Ok((count, hits))
     }

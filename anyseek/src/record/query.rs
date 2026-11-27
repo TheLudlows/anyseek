@@ -471,6 +471,15 @@ mod tests {
         let identities = handle.candidates(result.results).await.unwrap().into_iter()
             .map(|candidate| candidate.identity.id).collect::<BTreeSet<_>>();
         assert_eq!(identities, BTreeSet::from(["a".into(), "b".into()]));
+
+        let result = lexical::runtime_query::search(&handle.index, "alpha".into(), None, SearchMode::Lexical,
+            QueryType::Intersection, 0, 10, ResultType::TopkCount, vec![], vec![],
+            vec![ResultSort { field: "_id".into(), order: crate::search::SortOrder::Descending }],
+            lexical::Cut { sequence: u64::MAX, evaluation_time_ms: u64::MAX }).await.unwrap();
+        assert_eq!(result.result_count_total, 2);
+        let ids = handle.candidates(result.results).await.unwrap().into_iter()
+            .map(|candidate| candidate.identity.id).collect::<Vec<_>>();
+        assert_eq!(ids, ["b", "a"]);
     }
 
     #[tokio::test]

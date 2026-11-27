@@ -56,6 +56,29 @@ pub(crate) fn validate_filters(
     Ok(())
 }
 
+/// Bound the temporary string-set expansion before copying IDs into a predicate.
+pub(crate) fn workspace_bytes(shard: &VectorSegment, filters: &[FacetFilter]) -> Result<u64, String> {
+    validate_filters(&shard.schema_map, filters)?;
+    let mut ids = 0u64;
+    for filter in filters {
+        let count = match filter {
+            FacetFilter::String { filter, .. } => filter.len() as u64,
+            FacetFilter::StringSet { field, filter } => {
+                let values = &shard.string_set_to_single_term_id_vec[shard.facets_map[field]];
+                filter.iter().filter_map(|value| values.get(value)).try_fold(0u64, |sum, matches| {
+                    sum.checked_add(matches.len() as u64)
+                        .ok_or_else(|| "metadata predicate memory overflow".to_owned())
+                })?
+            }
+            _ => 0,
+        };
+        ids = ids.checked_add(count).ok_or_else(|| "metadata predicate memory overflow".to_owned())?;
+    }
+    ids.checked_mul(16)
+        .and_then(|bytes| bytes.checked_add((shard.facets.len() + filters.len()) as u64 * 256))
+        .ok_or_else(|| "metadata predicate memory overflow".to_owned())
+}
+
 pub(crate) fn compile_filters(
     shard: &VectorSegment,
     filters: &[FacetFilter],

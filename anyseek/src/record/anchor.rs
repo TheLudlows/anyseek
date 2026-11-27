@@ -238,6 +238,7 @@ impl Frozen {
             active.retired.get_or_insert_with(Default::default);
             shard.active=Some(active);
         }
+        lexical::visibility::PublishedSegment::publish(&index.read().await.segments[0]).await;
         Ok(index)
     }
 }
@@ -802,7 +803,7 @@ impl Inner {
         // The newly verified shared cut replaces the predecessor proof owner;
         // do not retain an extra old State through subsequent publications.
         reference.previous_capture=None;
-        let mut index=view::RetrievalView::single(loaded.index);
+        let mut index=view::RetrievalView::single(loaded.index, &loaded.ordinals);
         let mut ordinals=loaded.ordinals;
         let mut locations=loaded.locations;
         let cache=root.join(format!("segment-{:032x}",rand::random::<u128>()));

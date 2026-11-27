@@ -1,8 +1,11 @@
 //! Record-only query execution: native lexical postings, existing vector/metadata
 //! component, possibly lagging native prefixes, and one global rank fusion.
 use super::*;
+use std::cmp::Ordering;
 use crate::{
+    component::RetrievalSegment,
     index::VectorIndexArc,
+    min_heap::Result as SearchHit,
     search::{
         ChannelExplanation, FacetFilter, QueryType, ResultObject, ResultSort, ResultSortIndex,
         ResultType, RrfOptions, SearchMode, SortOrder, rrf_contribution,
@@ -87,100 +90,22 @@ pub(crate) async fn search(
             .await?;
     }
     let root = index.read().await;
-    let shards = futures::future::join_all(root.segments.iter().map(|segment| segment.vector.read())).await;
-    if shards.iter().any(|shard|shard.failed) {return Err(RecordError::RecoveryRequired);}
-    if shards.is_empty() {
-        return Err(storage("empty retrieval view"));
-    }
-    let config = &root.segments[0].lexical.config;
-    // Admission precedes active identity maps, term/field scorers and Top-K buffers.
-    // The input bound is the selected live population, not retired physical history.
-    // Native clauses and their shared memory predicate both retain analyzed
-    // terms. Admit expansion from actual input bytes before compiling either.
-    let mut query_bytes = (text.len() as u64).checked_mul(64)
-        .and_then(|n|n.checked_mul(config.schema.len() as u64+1))
-        .and_then(|n|n.checked_add(65536)).ok_or_else(||storage("query predicate memory overflow"))?;
-    for shard in &shards {
-        let active = shard.active.as_ref().ok_or_else(|| storage("native metadata statistics absent"))?;
-        for (_, id) in active.keys.iter().enumerate().filter(|(ordinal, _)| active.is_live(*ordinal)) {
-            query_bytes = query_bytes.checked_add(1024 + id.len() as u64 * 8)
-                .ok_or_else(|| storage("native query memory overflow"))?;
-        }
-    }
-    query_bytes = query_bytes.checked_add(config.schema.len() as u64 * 100 * 512)
-        .ok_or_else(|| storage("native query memory overflow"))?;
-    let _memory = crate::storage::build_budget::reserve_memory(query_bytes).map_err(storage)?;
-    let _buffer = crate::resources::Scope::current().map(|scope| scope.bytes(query_bytes))
+    let first = root.segments.first().ok_or_else(|| storage("empty retrieval view"))?;
+    let config = &first.lexical.config;
+    // Charge analyzed terms and the predicate before compiling them. Document
+    // membership has its own admission, taken only when the query can match.
+    let query_bytes = (text.len() as u64).checked_mul(64)
+        .and_then(|n| n.checked_mul(config.schema.len() as u64 + 1))
+        .and_then(|n| n.checked_add(65536 + config.schema.len() as u64 * 100 * 512))
+        .ok_or_else(|| storage("query predicate memory overflow"))?;
+    let scope = crate::resources::Scope::current();
+    let _predicate_memory = crate::storage::build_budget::reserve_memory(query_bytes).map_err(storage)?;
+    let _predicate_buffer = scope.as_ref().map(|scope| scope.bytes(query_bytes))
         .transpose().map_err(|_| RecordError::Busy)?;
 
-    let mut snapshots = Vec::new();
-    for segment in &root.segments {
-        snapshots.push(segment.lexical.snapshot().await?);
-    }
-    let mut locations = BTreeMap::new();
-    let n = shards.len();
-    // Components expose stable logical identities. Native and vector rows can
-    // be reordered or merged independently; local ordinals are only addresses
-    // inside the vector engine, never the cross-index join key.
-    let mut vectors = BTreeMap::new();
-    for (slot, shard) in shards.iter().enumerate() {
-        let active = shard.active.as_ref().ok_or_else(|| storage("native metadata statistics absent"))?;
-        if active.revisions.len() != active.keys.len() {
-            return Err(storage("vector revision identities missing"));
-        }
-        let compiled = crate::metadata_filter::compile_filters(shard, &filters)
-            .map_err(RecordError::Rejected)?;
-        for (local, key) in active.keys.iter().enumerate().filter(|(local, _)| active.is_live(*local)) {
-            let (version, revision) = active.revisions[local];
-            let identity = Identity { id: key.clone(), version, revision };
-            if vectors.insert(identity, (local * n + slot,
-                !crate::metadata_filter::is_facet_filter(shard, &compiled, local))).is_some() {
-                return Err(storage("duplicate live vector revision identity"));
-            }
-        }
-    }
-    let sorts = sort
-        .iter()
-        .filter_map(|s| {
-            let idx = match s.field.as_str() {
-                "_id" => usize::MAX,
-                "_score" => usize::MAX - 1,
-                _ => *shards[0].facets_map.get(&s.field)?,
-            };
-            Some(ResultSortIndex { idx, order: s.order.clone() })
-        })
-        .collect::<Vec<_>>();
-    let detached = !hybrid && (result_type == ResultType::Count
-        || sort.iter().all(|s| matches!(s.field.as_str(), "_id" | "_score")));
-    // Borrow only query-owned identity strings. This small address map is
-    // covered by the per-live-row query admission above; no vector, metadata
-    // mmap or historical ActiveStatistics is copied. Hybrid and facet sorting
-    // retain their component guards until their existing comparators finish.
-    let keys = if detached && result_type != ResultType::Count {
-        vectors.iter().map(|(identity, (address, _))| (*address, identity.id.as_str()))
-            .collect::<BTreeMap<_, _>>()
-    } else { BTreeMap::new() };
-    let shards = if detached { drop(shards); Vec::new() } else { shards };
-    // root/Handle and the fixed native snapshots still retain topology and file
-    // pins. Only component guards end here, before analysis/statistics/scoring.
-    #[cfg(test)]
-    if detached {
-        if let Some(path) = Path::new(&root.index_path_string).parent() {
-            super::super::query::pause(path, ".test-lexical-capture-pause").await?;
-        }
-    }
-    let corpus = super::scoring::CorpusView::select_matching(
-        &snapshots.iter().map(Arc::as_ref).collect::<Vec<_>>(),
-        cut,
-        |identity| {
-            if let Some(&(address, accepts)) = vectors.get(identity) {
-                // Filters gate hits only; every joined row remains in BM25.
-                // Snapshot ownership keeps these borrowed map keys alive.
-                if accepts { locations.insert(identity, address); }
-                true
-            } else { false }
-        },
-    )?;
+    // The field layout is fixed for the captured topology. Compile the query
+    // before taking component guards, then capture membership and native cuts.
+    let native_fields = first.lexical.snapshot().await?.fields.clone();
     let names = config
         .schema
         .iter()
@@ -192,15 +117,15 @@ pub(crate) async fn search(
             names
                 .iter()
                 .position(|f| &f.field == name)
-                .map(|i| snapshots[0].fields[i])
+                .map(|i| native_fields[i])
         })
         .collect::<Vec<_>>();
-    let analyzer = &root.segments[0].lexical.analyzer;
+    let analyzer = &first.lexical.analyzer;
     let plan = analyzer
         .query_fields(
             &text,
             query_type,
-            &snapshots[0].fields,
+            &native_fields,
             &selected_fields,
             true,
         )
@@ -214,58 +139,214 @@ pub(crate) async fn search(
         .iter()
         .map(|f| if indexed_fields == 1 { 1.0 } else { f.boost })
         .collect::<Vec<_>>();
+    let browse = text.is_empty();
+    let mut result = ResultObject {
+        original_query: text.clone(),
+        query: text,
+        query_terms: plan.query_terms,
+        ..Default::default()
+    };
+
+    let shards = futures::future::join_all(root.segments.iter().map(|segment| segment.vector.read())).await;
+    if shards.iter().any(|shard| shard.failed) {
+        return Err(RecordError::RecoveryRequired);
+    }
+    let mut active_shards = Vec::with_capacity(shards.len());
+    for shard in &shards {
+        let active = shard.active.as_ref().ok_or_else(|| storage("native metadata statistics absent"))?;
+        if active.revisions.len() != active.keys.len() {
+            return Err(storage("vector revision identities missing"));
+        }
+        active_shards.push(active);
+    }
+    let mut snapshots = Vec::with_capacity(root.segments.len());
+    for segment in &root.segments {
+        snapshots.push(segment.lexical.snapshot().await?);
+    }
+    let views = snapshots.iter().map(Arc::as_ref).collect::<Vec<_>>();
+    scoring::validate_bounds(&plan.scores, &boosts, native_fields.len())?;
+    if !hybrid && !browse && !has_positive_terms(&views, &plan.scores)? {
+        scoring::CorpusView::validate_snapshots(&views, cut)?;
+        for shard in &shards {
+            crate::metadata_filter::validate_filters(&shard.schema_map, &filters)
+                .map_err(RecordError::Rejected)?;
+        }
+        return Ok(result);
+    }
+
+    let selections = capture_aligned(&root.segments, &snapshots, &active_shards);
+    let aligned = selections.is_some();
+    let mut vectors = BTreeMap::new();
+    let _identity_workspace = if aligned {
+        None
+    } else {
+        let mut bytes = 0u64;
+        for active in &active_shards {
+            for (_, id) in active.keys.iter().enumerate().filter(|(ordinal, _)| active.is_live(*ordinal)) {
+                bytes = bytes.checked_add(1024 + id.len() as u64 * 8)
+                    .ok_or_else(|| storage("native query memory overflow"))?;
+            }
+        }
+        crate::storage::build_budget::validate_single(query_bytes.checked_add(bytes)
+            .ok_or_else(|| storage("native query memory overflow"))?).map_err(storage)?;
+        let memory = crate::storage::build_budget::reserve_memory(bytes).map_err(storage)?;
+        let buffer = scope.as_ref().map(|scope| scope.bytes(bytes))
+            .transpose().map_err(|_| RecordError::Busy)?;
+        for (slot, (shard, active)) in shards.iter().zip(active_shards).enumerate() {
+            let compiled = crate::metadata_filter::compile_filters(shard, &filters)
+                .map_err(RecordError::Rejected)?;
+            for (local, key) in active.keys.iter().enumerate().filter(|(local, _)| active.is_live(*local)) {
+                let (version, revision) = active.revisions[local];
+                let identity = Identity { id: key.clone(), version, revision };
+                let row = VectorRow {
+                    address: local * shards.len() + slot,
+                    passes_filter: !crate::metadata_filter::is_facet_filter(shard, &compiled, local),
+                };
+                if vectors.insert(identity, row).is_some() {
+                    return Err(storage("duplicate live vector revision identity"));
+                }
+            }
+        }
+        Some((memory, buffer))
+    };
+    let n = shards.len();
+    let corpus = if let Some(selections) = selections {
+        Some(scoring::CorpusView::from_selections(&views, selections, cut)?)
+    } else {
+        None
+    };
+    let sorts = sort
+        .iter()
+        .filter_map(|s| {
+            let idx = match s.field.as_str() {
+                "_id" => usize::MAX,
+                "_score" => usize::MAX - 1,
+                _ => *shards[0].facets_map.get(&s.field)?,
+            };
+            Some(ResultSortIndex { idx, order: s.order.clone() })
+        })
+        .collect::<Vec<_>>();
+    let count_only = !hybrid && result_type == ResultType::Count;
+    // String-set filter expansion can depend on the metadata dictionary.
+    // Reserve its workspace before compiling the predicates.
+    let mut compiled = Vec::new();
+    let _filter_workspace = if aligned && !filters.is_empty() {
+        let mut bytes = 0u64;
+        for shard in &shards {
+            bytes = bytes.checked_add(crate::metadata_filter::workspace_bytes(shard, &filters)
+                .map_err(RecordError::Rejected)?)
+                .ok_or_else(|| storage("metadata predicate memory overflow"))?;
+        }
+        let workspace = crate::record::build_budget::admit_memory(bytes, scope.as_ref())?;
+        for shard in &shards {
+            compiled.push(crate::metadata_filter::compile_filters(shard, &filters)
+                .map_err(RecordError::Rejected)?);
+        }
+        Some(workspace)
+    } else {
+        None
+    };
+    // Count with a compiled filter can stream directly through the guarded
+    // facets. It has no ranking pass that would need to retain match addresses.
+    let detached = if count_only {
+        compiled.is_empty()
+    } else {
+        !hybrid && sort.iter().all(|s| matches!(s.field.as_str(), "_id" | "_score"))
+    };
+    let filtered = if detached && !compiled.is_empty() {
+        // Inspect metadata only for posting matches while the mmap is guarded,
+        // then release component guards before native scoring.
+        let mut accepted = FilteredMatches::default();
+        corpus.as_ref().expect("aligned corpus").visit(plan.predicate.as_ref(), |slot, ordinal, _| {
+            if !crate::metadata_filter::is_facet_filter(&shards[slot], &compiled[slot], ordinal) {
+                accepted.insert(ordinal * n + slot, scope.as_ref())?;
+            }
+            Ok(())
+        })?;
+        Some(accepted)
+    } else {
+        None
+    };
+    let shards = if detached { drop(shards); Vec::new() } else { shards };
+    #[cfg(test)]
+    if detached {
+        if let Some(path) = Path::new(&root.index_path_string).parent() {
+            super::super::query::pause(path, ".test-lexical-capture-pause").await?;
+        }
+    }
+    let corpus = match corpus {
+        Some(corpus) => corpus,
+        // BM25 uses every joined revision. Check the cached facet predicate
+        // only when collecting hits.
+        None => scoring::CorpusView::select_matching(&views, cut, |identity| vectors.contains_key(identity))?,
+    };
+    let accepts = |slot: usize, ordinal: usize, identity: &Identity| {
+        if !aligned {
+            vectors[identity].passes_filter
+        } else if let Some(filtered) = &filtered {
+            filtered.addresses.contains(&(ordinal * n + slot))
+        } else {
+            compiled.is_empty()
+                || !crate::metadata_filter::is_facet_filter(&shards[slot], &compiled[slot], ordinal)
+        }
+    };
+    let address = |slot: usize, ordinal: usize, identity: &Identity| {
+        if aligned { ordinal * n + slot } else { vectors[identity].address }
+    };
     // Lexical (including browse) has no score threshold. Hybrid/ANN retains
     // its channel counts, threshold evaluation and existing fusion contract.
-    if !hybrid && result_type == ResultType::Count {
-        super::scoring::validate_bounds(&plan.scores, &boosts, snapshots[0].fields.len())?;
-        let count = corpus.count(plan.predicate.as_ref(), |id| locations.contains_key(id))?;
-        return Ok(ResultObject {
-            original_query: text.clone(),
-            query: text,
-            query_terms: plan.query_terms,
-            result_count_total: count,
-            ..Default::default()
-        });
+    if count_only {
+        result.result_count_total = corpus.count_where(plan.predicate.as_ref(), accepts)?;
+        return Ok(result);
     }
-    let order = |a: crate::min_heap::Result, b: crate::min_heap::Result| {
-        if detached { captured_ordering(&keys, &sorts, b, a) }
-        else { crate::min_heap::result_ordering_root(&shards, text.is_empty(), &sorts, b, a) }
+    let guarded_order = |a, b| crate::min_heap::result_ordering_root(&shards, browse, &sorts, b, a);
+    let order = |a: SearchHit, a_key: &str, b: SearchHit, b_key: &str| {
+        if detached {
+            captured_ordering(&sorts, b, b_key, a, a_key)
+        } else {
+            guarded_order(a, b)
+        }
     };
     // The same user ordering selects candidates and orders the final result.
     // Hybrid reranks this bounded lexical set by score only before global RRF.
-    let limit = if hybrid { rrf.keyword_candidates.unwrap_or(offset + length) }
-        else { offset + length }.min(config.max_candidates);
+    let window = offset.saturating_add(length);
+    let limit = if hybrid { rrf.keyword_candidates.unwrap_or(window) }
+        else { window }.min(config.max_candidates);
+    let _candidate_workspace = if aligned {
+        let vector_candidates = if hybrid { vector_result.results.len() } else { 0 };
+        let bytes = (limit as u64).checked_add(vector_candidates as u64)
+            .and_then(|candidates| candidates.checked_mul(512))
+            .ok_or_else(|| storage("candidate workspace overflow"))?;
+        Some(crate::record::build_budget::admit_memory(bytes, scope.as_ref())?)
+    } else {
+        None
+    };
     let mut candidates = std::collections::BinaryHeap::new();
-    let lexical_counts = std::cell::RefCell::new(vec![0usize; n]);
-    let lex_count = corpus.collect_scores(
+    let mut lexical_counts = if hybrid { vec![0usize; n] } else { Vec::new() };
+    result.result_count_total = corpus.collect_scores(
         plan.predicate.as_ref(), &plan.scores, &boosts,
         config.index.field_length_normalization.clone(),
-        |id| {
-            let Some(&address) = locations.get(id) else { return false; };
-            lexical_counts.borrow_mut()[address % n] += 1;
-            true
-        },
-        |identity, score| {
-            let hit = crate::min_heap::Result {
-                doc_id: locations[identity], score,
+        accepts,
+        |slot, ordinal, identity, score| {
+            let doc_id = address(slot, ordinal, identity);
+            if hybrid {
+                lexical_counts[doc_id % n] += 1;
+            }
+            let hit = SearchHit {
+                doc_id,
+                score,
                 #[cfg(feature = "vb")]
                 lexical_score: score,
                 #[cfg(feature = "vb")]
                 source: crate::vector::ResultSource::Lexical,
                 ..Default::default()
             };
-            Candidate { hit, order: &order }.retain(&mut candidates, limit);
+            let key = views[slot].identities[ordinal].id.as_str();
+            Candidate { hit, key, order: &order }.retain(&mut candidates, limit);
         },
     )?;
     let mut lexical = candidates.into_sorted_vec().into_iter()
         .map(|candidate| candidate.hit).collect::<Vec<_>>();
-    let mut result = ResultObject {
-        original_query: text.clone(),
-        query: text.clone(),
-        query_terms: plan.query_terms,
-        result_count_total: lex_count,
-        ..Default::default()
-    };
     if hybrid {
         let mut fused = BTreeMap::<usize, crate::min_heap::Result>::new();
         lexical.sort_by(|a, b| {
@@ -309,12 +390,12 @@ pub(crate) async fn search(
             }
         }
         if vector_counts.len() != n { return Err(storage("vector count topology mismatch")); }
-        result.result_count_total = lexical_counts.into_inner().into_iter()
+        result.result_count_total = lexical_counts.into_iter()
             .zip(vector_counts).map(|(lexical, vector)| lexical.max(vector)).sum();
         result.observed_vector_count = vector_result.observed_vector_count;
         result.observed_cluster_count = vector_result.observed_cluster_count;
         result.results = fused.into_values().collect();
-        result.results.sort_by(|a, b| order(*a, *b));
+        result.results.sort_by(|a, b| guarded_order(*a, *b));
     } else {
         result.results = lexical;
     }
@@ -328,22 +409,103 @@ pub(crate) async fn search(
             .take(length)
             .collect()
     };
-    let returned = result.results.iter().map(|hit| hit.doc_id).collect::<BTreeSet<_>>();
-    result.explanations.retain(|id, _| returned.contains(id));
+    if !result.explanations.is_empty() {
+        let returned = result.results.iter().map(|hit| hit.doc_id).collect::<BTreeSet<_>>();
+        result.explanations.retain(|id, _| returned.contains(id));
+    }
     result.result_count = result.results.len();
     Ok(result)
+}
+
+struct VectorRow {
+    address: usize,
+    passes_filter: bool,
+}
+
+// Each frozen pair was verified at publication. Check each bounded
+// mutable prefix, where either consumer may have published further.
+fn capture_aligned(
+    segments: &[RetrievalSegment],
+    snapshots: &[Arc<Snapshot>],
+    active_shards: &[&crate::active::ActiveStatistics],
+) -> Option<Vec<LiveSelection>> {
+    let mut remaining = runtime::MUTABLE_TAIL_UPDATES;
+    let mut selections = Vec::with_capacity(snapshots.len());
+    for ((segment, snapshot), active) in segments.iter().zip(snapshots).zip(active_shards) {
+        if let Some(live) = segment.visibility.capture(snapshot, active.keys.len()) {
+            selections.push(LiveSelection::Published(live));
+            continue;
+        }
+        remaining = remaining.checked_sub(snapshot.identities.len().max(active.keys.len()))?;
+        if !visibility::aligned_prefix(snapshot, active) {
+            return None;
+        }
+        let common = snapshot.identities.len().min(active.keys.len());
+        let mut keys = BTreeSet::new();
+        let mut selected = BTreeSet::new();
+        for (ordinal, key) in active.keys.iter().enumerate().filter(|(ordinal, _)| active.is_live(*ordinal)) {
+            if !keys.insert(key) {
+                return None;
+            }
+            if ordinal < common {
+                selected.insert(ordinal);
+            }
+        }
+        selections.push(LiveSelection::Ordinals(selected));
+    }
+    Some(selections)
+}
+
+#[derive(Default)]
+struct FilteredMatches {
+    addresses: BTreeSet<usize>,
+    _memory: Vec<crate::resources::MemoryReservation>,
+}
+impl FilteredMatches {
+    fn insert(&mut self, address: usize, scope: Option<&crate::resources::Scope>) -> Result<(), RecordError> {
+        const CHUNK: usize = 64;
+        if self.addresses.len().is_multiple_of(CHUNK) {
+            self._memory.push(crate::record::build_budget::admit_memory((CHUNK * 128) as u64, scope)?);
+        }
+        self.addresses.insert(address);
+        Ok(())
+    }
+}
+
+// Each match of a non-browse predicate needs at least one positive
+// term in a selected field. A dictionary hit is only evidence to keep
+// searching: it may be retired or fail the full Boolean/phrase predicate.
+fn has_positive_terms(snapshots: &[&Snapshot], groups: &[query::ScoreGroup]) -> Result<bool, RecordError> {
+    for snapshot in snapshots {
+        for group in groups {
+            for field in &group.match_fields {
+                let term = Term::from_field_text(*field, &group.matched_term);
+                for segment in snapshot.searcher.segment_readers() {
+                    if segment.inverted_index(*field).map_err(storage)?
+                        .get_term_info(&term).map_err(storage)?.is_some() {
+                        return Ok(true);
+                    }
+                }
+                if snapshot.overlay.iter().any(|(_, row)| {
+                    !row.positions(&snapshot.fields, *field, &group.matched_term).is_empty()
+                }) {
+                    return Ok(true);
+                }
+            }
+        }
+    }
+    Ok(false)
 }
 
 // Same greater-is-better contract as result_ordering_root, restricted to
 // Record's stable ID and score sorts. Facet comparators keep their mmap guards.
 fn captured_ordering(
-    keys: &BTreeMap<usize, &str>,
     sorts: &[ResultSortIndex],
-    a: crate::min_heap::Result,
-    b: crate::min_heap::Result,
-) -> std::cmp::Ordering {
-    let a_key = keys.get(&a.doc_id).expect("selected query identity");
-    let b_key = keys.get(&b.doc_id).expect("selected query identity");
+    a: SearchHit,
+    a_key: &str,
+    b: SearchHit,
+    b_key: &str,
+) -> Ordering {
     for sort in sorts {
         if sort.idx == usize::MAX {
             return if sort.order == SortOrder::Descending { a_key.cmp(b_key) }
@@ -394,19 +556,22 @@ fn validate_selection(
 // BinaryHeap keeps the worst retained candidate at the root. The ordering is
 // the existing final-result comparator (Less means better), including facets
 // and stable business IDs; no per-hit identity allocation is needed.
+type CandidateOrder<'a> = dyn Fn(SearchHit, &str, SearchHit, &str) -> Ordering + 'a;
+
 struct Candidate<'a> {
-    hit: crate::min_heap::Result,
-    order: &'a dyn Fn(crate::min_heap::Result, crate::min_heap::Result) -> std::cmp::Ordering,
+    hit: SearchHit,
+    key: &'a str,
+    order: &'a CandidateOrder<'a>,
 }
 impl PartialEq for Candidate<'_> {
     fn eq(&self, other: &Self) -> bool { self.cmp(other).is_eq() }
 }
 impl Eq for Candidate<'_> {}
 impl PartialOrd for Candidate<'_> {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> { Some(self.cmp(other)) }
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> { Some(self.cmp(other)) }
 }
 impl Ord for Candidate<'_> {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering { (self.order)(self.hit, other.hit) }
+    fn cmp(&self, other: &Self) -> Ordering { (self.order)(self.hit, self.key, other.hit, other.key) }
 }
 
 impl<'a> Candidate<'a> {
@@ -422,6 +587,46 @@ impl<'a> Candidate<'a> {
 #[cfg(test)]
 mod candidate_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn aligned_lexical_misses_and_hits_skip_corpus_admission() {
+        use crate::record::{ExpectedVersion, RecordPartition, tests::{config, write}};
+        use crate::resources::{Governor, Lane};
+
+        let temporary = tempfile::tempdir().unwrap();
+        let config = config();
+        let partition = RecordPartition::create(&temporary.path().join("records"), config.clone())
+            .await
+            .unwrap();
+        for i in 0..32 {
+            let id = format!("record-{i}");
+            partition.write(write(&id, &id, "alpha", ExpectedVersion::Absent)).await.unwrap();
+        }
+        let handle = partition.inner.lock().await.index.capture_query(10).await.unwrap();
+        let scope = Arc::new(Governor::default())
+            .admit("lexical-lookup".into(), Lane::Foreground, 0)
+            .unwrap();
+        let predicate_bytes = 65536 + config.schema.len() as u64 * 100 * 512;
+        let _occupied = scope.bytes(512 * 1024 * 1024 - predicate_bytes - 16 * 1024).unwrap();
+        let lookup = |text: &str, result_type| {
+            let length = if result_type == ResultType::Count { 0 } else { 10 };
+            search(
+                &handle.index, text.into(), None, SearchMode::Lexical, QueryType::Union,
+                0, length, result_type, vec![], vec![], vec![],
+                Cut { sequence: u64::MAX, evaluation_time_ms: u64::MAX },
+            )
+        };
+
+        for result_type in [ResultType::Count, ResultType::TopkCount] {
+            let result = scope.clone().run(lookup("zzqneverlinked", result_type)).await.unwrap();
+            assert_eq!(result.result_count_total, 0);
+            assert_eq!(result.query_terms, ["zzqneverlinked"]);
+            assert!(result.results.is_empty());
+        }
+        let hit = scope.run(lookup("alpha", ResultType::TopkCount)).await.unwrap();
+        assert_eq!(hit.result_count_total, 32);
+        assert_eq!(hit.results.len(), 10);
+    }
 
     #[tokio::test]
     async fn captured_order_matches_guarded_order_for_id_and_score() {
@@ -454,7 +659,7 @@ mod candidate_tests {
                                 let a = crate::min_heap::Result { doc_id: a_id, score: a_score, ..Default::default() };
                                 let b = crate::min_heap::Result { doc_id: b_id, score: b_score, ..Default::default() };
                                 for empty in [false, true] {
-                                    assert_eq!(captured_ordering(&keys, &sorts, a, b),
+                                    assert_eq!(captured_ordering(&sorts, a, keys[&a_id], b, keys[&b_id]),
                                         crate::min_heap::result_ordering_root(&shards, empty, &sorts, a, b),
                                         "{ordering:?} descending={descending} a={a:?} b={b:?}");
                                 }
@@ -468,7 +673,7 @@ mod candidate_tests {
 
     #[test]
     fn bounded_candidates_match_full_sort() {
-        let order = |a: crate::min_heap::Result, b: crate::min_heap::Result| {
+        let order = |a: SearchHit, _: &str, b: SearchHit, _: &str| {
             crate::min_heap::rank_ordering(b.score, b.doc_id, a.score, a.doc_id)
         };
         // Reverse identities force replacements at equal scores. Ascending scores
@@ -479,11 +684,11 @@ mod candidate_tests {
                 ..Default::default()
             }).collect::<Vec<_>>();
             let mut expected = full.clone();
-            expected.sort_by(|a, b| order(*a, *b));
+            expected.sort_by(|a, b| order(*a, "", *b, ""));
             for limit in [0, 1, 37] {
                 let mut heap = std::collections::BinaryHeap::new();
                 for hit in &full {
-                    Candidate { hit: *hit, order: &order }.retain(&mut heap, limit);
+                    Candidate { hit: *hit, key: "", order: &order }.retain(&mut heap, limit);
                     assert!(heap.len() <= limit);
                     assert!(heap.capacity() <= (2 * limit).max(4));
                 }

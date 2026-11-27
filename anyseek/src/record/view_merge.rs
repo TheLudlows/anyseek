@@ -144,12 +144,15 @@ impl RetrievalView {
         let remap = |local: usize, slot: usize| local.checked_mul(next_count).and_then(|n| n.checked_add(slot))
             .filter(|n| *n < max_address_slots).ok_or_else(|| storage("merge address budget exceeded"));
         let mut mapped = Vec::new();
+        let mut physical_versions = 0;
         let mut put = |address: usize, key: &String| -> Result<(), RecordError> {
             if mapped.len() <= address {
                 mapped.try_reserve(address + 1 - mapped.len()).map_err(storage)?;
                 mapped.resize(address + 1, String::new());
             }
-            mapped[address] = key.clone(); Ok(())
+            mapped[address] = key.clone();
+            physical_versions += usize::from(!key.is_empty());
+            Ok(())
         };
         for (address, key) in ordinals.iter().enumerate().filter(|(_, key)| !key.is_empty()) {
             if let Some(slot) = remap_slots[address % old_count] { put(remap(address / old_count, slot)?, key)?; }
@@ -165,10 +168,13 @@ impl RetrievalView {
             next_locations.insert(key.clone(), next);
         }
         drop(shard);
+        lexical::visibility::PublishedSegment::publish(&candidate).await;
         let mut masks = Vec::with_capacity(next_count);
         for component in &next_segments {
             let shard = component.vector.read().await;
-            masks.push(shard.active.as_ref().and_then(|active| active.retired.clone()).ok_or_else(|| storage("merge retirement mask missing"))?);
+            let mask = shard.active.as_ref().and_then(|active| active.retired.clone())
+                .ok_or_else(|| storage("merge retirement mask missing"))?;
+            masks.push((mask, component.visibility.clone()));
         }
         // Source packages are now replaceable derived caches. Only references
         // actually removed from the topology are dropped; original readers keep
@@ -176,7 +182,13 @@ impl RetrievalView {
         let removed = sources.segments.iter().map(|segment| segment.lexical.package_path()).collect::<Vec<_>>();
         self.pending_seals.retain(|package| !removed.iter().any(|path|
             path.file_name().and_then(|name| name.to_str()).is_some_and(|name| name == format!("segment-{}", package.id))));
+        // Old handles may still score against this topology. After replacement
+        // their masks follow shared live tokens through the general join.
+        for source in &sources.segments {
+            source.visibility.invalidate();
+        }
         root.segments = next_segments;
+        self.physical_versions = physical_versions;
         self.retired = masks;
         *ordinals = mapped; *locations = next_locations;
         self.detached_cache = true;

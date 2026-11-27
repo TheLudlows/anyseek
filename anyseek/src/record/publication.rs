@@ -39,9 +39,7 @@ impl replay::Context<'_> {
             if self.fail_publication_stage == 1 {
                 return Err(RecordError::DurablePending(receipt.seq));
             }
-            if self.ordinals.len()<=id {self.ordinals.resize(id+1,String::new());}
-            self.ordinals[id]=receipt.record_id.clone();
-            self.locations.insert(receipt.record_id.clone(), id);
+            self.publish_location(id, &receipt.record_id);
         } else {
             self.locations.remove(&receipt.record_id);
         }
@@ -59,6 +57,16 @@ impl replay::Context<'_> {
         #[cfg(test)]
         assert_eq!(*self.snapshot_bytes,checkpoint_codec::full_length(self.config,self.state)?);
         Ok(())
+    }
+
+    pub(super) fn publish_location(&mut self, ordinal: usize, record_id: &str) {
+        if self.ordinals.len() <= ordinal {
+            self.ordinals.resize(ordinal + 1, String::new());
+        }
+        let slot = &mut self.ordinals[ordinal];
+        self.index.physical_versions += usize::from(slot.is_empty());
+        *slot = record_id.to_owned();
+        self.locations.insert(record_id.to_owned(), ordinal);
     }
 }
 

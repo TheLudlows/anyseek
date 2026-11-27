@@ -129,8 +129,7 @@ impl replay::Context<'_>{
         let old=self.locations.get(&r.record_id).copied();
         if let Some(document)=&r.document {
             let id=self.index.append(r.record_id.clone(),r.version,seq,temporal::indexed(document,&r.temporal,r.ingested_at_ms),native,component,publish_native).await?;
-            if self.ordinals.len()<=id {self.ordinals.resize(id+1,String::new());}
-            self.ordinals[id]=r.record_id.clone();self.locations.insert(r.record_id.clone(),id);
+            self.publish_location(id, &r.record_id);
         }else{self.locations.remove(&r.record_id);}
         if let Some(old)=old{self.index.retire(old).await?;}
         #[cfg(test)] if self.fail_publication_stage!=0{return Err(RecordError::DurablePending(seq));}
@@ -166,6 +165,7 @@ mod tests {
         assert_eq!(p.replace_group(first).await.unwrap(),receipt);
         assert!(matches!(p.write(super::super::tests::write("ordinary","a","bad",ExpectedVersion::Any)).await,Err(RecordError::Conflict(_))));
         assert!(p.get("b").await.unwrap().is_none());assert_eq!(p.group_version("group").await.unwrap(),Some(2));
+        assert_eq!(p.statistics().await.unwrap().physical_versions, 5);
         p.compact_journal().await.unwrap();
         p.finish_service_shutdown().await.unwrap();drop(p);
         let p=RecordPartition::open(&path,cfg.max_journal_bytes).await.unwrap();
@@ -205,6 +205,7 @@ mod tests {
         let p=RecordPartition::open(&path,super::super::tests::config().max_journal_bytes).await.unwrap();
         assert_eq!(p.replace_group(request("crash",0,&["a","b"])).await.unwrap().seq,1);
         assert_eq!(p.search("alpha".into(),None,SearchMode::Lexical,vec![],10).await.unwrap().count_total,2);
+        assert_eq!(p.statistics().await.unwrap().physical_versions, 2);
         p.finish_service_shutdown().await.unwrap();
     }
 
