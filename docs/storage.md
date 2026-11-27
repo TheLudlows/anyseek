@@ -44,7 +44,7 @@
 
 固定视图的 `candidate_paths` 从锚点成员、定向边及其邻居成员范围发现候选，回表核对三类声明及规范版本。通过 `seeds()` 和 `neighbors()` 只读借用候选，内存额度随结果持有。
 
-嵌入宿主可为已授权的本地隔离集合调用 `LocalEngine::build_entity_adjacency` 和 `LocalEngine::query_entity_paths`。读取在交付前重新取得同一 Catalog 代次的授权，并在 Record 发布屏障内核对当前基座、切点、组发布和参与结果的 TTL。访问上限覆盖全部范围。发现、规范校验和交付复核共用一个 `QueryWork` 与原截止时间。发布发生变化或到达 TTL 时，整次返回 `busy`。
+嵌入宿主可为已授权的本地隔离集合调用 `LocalEngine::build_entity_adjacency` 和 `LocalEngine::query_entity_paths`。读取在交付前重新取得同一 Catalog 代次的授权，并在 Record 发布屏障内核对当前基座、切点、组发布和参与结果的 TTL。访问上限覆盖全部范围。发现、规范校验和交付复核共用一个 `QueryWork` 与原截止时间。请求在准入前已到截止时直接返回 `busy`。发布发生变化或到达 TTL 时，整次返回 `busy`。
 
 ## 权威与数据归属
 

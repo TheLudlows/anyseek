@@ -270,6 +270,7 @@ impl LocalEngine {
     /// Discover one directed hop for an already authorized, isolated collection.
     /// Checks the same authorized generation again at handoff. A changed
     /// publication or reached TTL returns `busy` for the whole read.
+    /// An already reached request deadline returns `busy` before admission.
     /// Read the retained result through its borrowed candidate accessors.
     pub async fn query_entity_paths(
         &self,
@@ -281,6 +282,10 @@ impl LocalEngine {
         visit_limit: usize,
     ) -> Result<EntityCandidatePaths, LocalError> {
         let deadline = tokio::time::Instant::now() + self.service()?.request_timeout;
+        // Timeout polls the operation first, so an immediate result can win.
+        if tokio::time::Instant::now() >= deadline {
+            return Err(LocalError::unavailable("busy"));
+        }
         tokio::time::timeout_at(
             deadline,
             self.run(tenant, collection, Lane::Foreground, async move |service, tenant, id| {

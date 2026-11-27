@@ -44,7 +44,7 @@ New sidecars also store canonical `entity_ids` membership keys in the same order
 
 `candidate_paths` on a pinned view discovers anchor members, directed edges, and neighbor members. It reads the selected Records to check claims and canonical versions for all three roles. The result holds its memory reservation and exposes read-only borrows through `seeds()` and `neighbors()`.
 
-An embedding host can call `LocalEngine::build_entity_adjacency` and `LocalEngine::query_entity_paths` for an already authorized, isolated local collection. Handoff reacquires authorization for the same Catalog generation and checks the current base, Record cut, group publication, and TTL of the returned roles inside the Record publication barrier. One visit limit spans all ranges. Discovery, canonical validation, and final checks share a single `QueryWork` and the original deadline. A changed publication or reached TTL returns `busy` for the whole read.
+An embedding host can call `LocalEngine::build_entity_adjacency` and `LocalEngine::query_entity_paths` for an already authorized, isolated local collection. Handoff reacquires authorization for the same Catalog generation and checks the current base, Record cut, group publication, and TTL of the returned roles inside the Record publication barrier. One visit limit spans all ranges. Discovery, canonical validation, and final checks share a single `QueryWork` and the original deadline. A request that has already reached its deadline before admission returns `busy` immediately. A changed publication or reached TTL returns `busy` for the whole read.
 
 ## Authority and data ownership
 

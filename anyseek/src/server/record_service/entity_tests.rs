@@ -185,12 +185,20 @@ async fn local_entity_sdk_discovers_isolated_paths_after_reopen() {
         .unwrap();
     Arc::get_mut(&mut service).unwrap().request_timeout = Duration::ZERO;
     let engine = LocalEngine::from_test_service(service);
-    let expired = engine
-        .query_entity_paths("tenant-a", "graph", Out, &long_anchor, "link", 32)
-        .await
-        .err()
-        .unwrap();
-    assert_eq!(expired.code(), "busy");
+    tokio::time::pause();
+    for (tenant, anchor) in [
+        ("tenant-a", "app:A"),
+        ("tenant-a", long_anchor.as_str()),
+        ("other", "app:A"),
+    ] {
+        let expired = engine
+            .query_entity_paths(tenant, "graph", Out, anchor, "link", 32)
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(expired.code(), "busy");
+    }
+    tokio::time::resume();
     engine.shutdown().await.unwrap();
 }
 
@@ -229,6 +237,19 @@ async fn local_entity_handoff_refuses_replaced_group_and_catalog_generation() {
     create(&engine, "tenant", "graph", "create").await;
     write_graph(&engine, "tenant", "graph", "app:B", None).await;
     build(&engine, "tenant", "graph").await;
+
+    let (pending, resume) = pause_query(&service, &engine, "graph").await;
+    tokio::time::pause();
+    tokio::time::advance(service.request_timeout).await;
+    let expired = tokio::time::timeout(WAIT, pending)
+        .await
+        .expect("the query must time out while paused at handoff")
+        .unwrap()
+        .err()
+        .unwrap();
+    tokio::time::resume();
+    drop(resume);
+    assert_eq!(expired.code(), "busy");
 
     let (pending, resume) = pause_query(&service, &engine, "graph").await;
     replace(&engine, "tenant", "graph", 1, &[]).await;
