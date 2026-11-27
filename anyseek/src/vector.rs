@@ -1424,13 +1424,8 @@ impl SearchVectorSegment for VectorSegmentArc {
         let shard_ref = self.read().await;
         if shard_ref.failed { return Err(RecordError::RecoveryRequired); }
         if let Some(work) = work { work.charge(1)?; }
-        // Charge the full predicate count even when a row is filtered early.
-        let row_cost = 1usize.saturating_add(facet_filter.len());
         let _strict_workspace = if let Some(work) = work {
-            let bytes = crate::metadata_filter::workspace_bytes(&shard_ref, &facet_filter)
-                .map_err(RecordError::Rejected)?;
-            let units = usize::try_from(bytes.div_ceil(16)).map_err(|_| RecordError::Rejected("metadata work budget overflow".into()))?;
-            work.charge(units)?;
+            let bytes = crate::metadata_filter::metered_workspace_bytes(&shard_ref, &facet_filter, work)?;
             let bytes = bytes.checked_add((length as u64).saturating_mul(256))
                 .ok_or_else(|| RecordError::Rejected("vector workspace budget overflow".into()))?;
             Some(admit_memory(bytes, Scope::current().as_ref())?)
@@ -1439,6 +1434,9 @@ impl SearchVectorSegment for VectorSegmentArc {
             Ok(filters) => filters,
             Err(error) => return Err(RecordError::Rejected(error)),
         };
+        // Reserve each scanned row's full compiled filter cost, including
+        // string ID binary searches even if the row is rejected early.
+        let row_cost = work.map_or(0, |_| 1 + crate::metadata_filter::filter_work(&facet_filter));
         let mut observed_cluster_count = 0;
 
         let non_affine = shard_ref.max_vector_value == f32::MIN;

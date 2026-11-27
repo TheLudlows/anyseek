@@ -468,12 +468,15 @@ async fn event_time_text_http_and_sdk_fuse_one_cut_and_reject_excess_work() {
     for (id, time, body, vector) in [
         ("both", 20, "match", Some(json!([1, 0]))),
         ("time", 21, "other", None),
-        ("lexical", 90, "match", None),
+        ("lexical", 90, "other", None),
         ("vector", 91, "other", Some(json!([0, 1]))),
     ] {
         let mut row = mixed_row(id, id, None);
         row["temporal"]["event_time_ms"] = json!(time);
         row["document"] = json!({"body":body,"private":"hidden","tags":["broad",id]});
+        if matches!(id, "both" | "lexical") {
+            row["document"]["private"] = json!("match");
+        }
         if let Some(vector) = vector {
             row["document"]["vector"] = vector;
         }
@@ -571,12 +574,39 @@ async fn event_time_text_http_and_sdk_fuse_one_cut_and_reject_excess_work() {
     overflow["rrf"] = maximum;
     let mut over_budget = text.clone();
     over_budget["filter"] = json!([{"StringSet":{"field":"tags","filter":vec!["broad";128]}}]);
+    let mut vector_budget = mixed_request();
+    vector_budget["filter"] = over_budget["filter"].clone();
+    let (status, error) = call("tenant", vector_budget.clone()).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
+    assert!(
+        error["message"]
+            .as_str()
+            .unwrap()
+            .contains("query work budget exhausted")
+    );
+    assert!(error.get("hits").is_none());
+    let error = sdk
+        .query_time_vector(
+            "tenant",
+            "window",
+            serde_json::from_value(vector_budget).unwrap(),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), "rejected");
     let mut unsupported = triple;
     unsupported["query"] = json!("\"match other\"");
+    let mut punctuation = text.clone();
+    punctuation["query"] = json!("!!!");
+    let mut only_exclusion = text.clone();
+    only_exclusion["query"] = json!("-match");
+    only_exclusion["rrf"] = json!({"keyword_weight":0});
     for (request, message) in [
         (overflow, "maximum fused score"),
         (over_budget, "query work budget exhausted"),
         (unsupported, "single positive analyzed term"),
+        (punctuation, "single positive analyzed term"),
+        (only_exclusion, "single positive analyzed term"),
     ] {
         let (status, body) = call("tenant", request.clone()).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
@@ -585,11 +615,11 @@ async fn event_time_text_http_and_sdk_fuse_one_cut_and_reject_excess_work() {
             "{body}"
         );
         assert!(body.get("hits").is_none());
-        assert!(
-            sdk.query_time_text("tenant", "window", serde_json::from_value(request).unwrap())
-                .await
-                .is_err()
-        );
+        let error = sdk
+            .query_time_text("tenant", "window", serde_json::from_value(request).unwrap())
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), "rejected");
     }
 
     let entry = service
@@ -623,6 +653,140 @@ async fn event_time_text_http_and_sdk_fuse_one_cut_and_reject_excess_work() {
     drop(sdk);
     drop(app);
     service.shutdown().wait().await.unwrap();
+}
+
+#[tokio::test]
+async fn event_time_zero_weight_candidates_do_not_fence_http_or_sdk_delivery() {
+    // Cover the time-side and retrieval-side evidence independently.
+    for zero_time in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("catalog");
+        let service = open(&root).await;
+        let app = router(service.clone());
+        let sdk = Arc::new(local::LocalEngine::from_test_service(service.clone()));
+        create_mixed_collection(&app).await;
+        let partition = service.record("tenant", "window").await.unwrap();
+        let (clock, now) = anyseek::record::tests::test_clock(&partition).await;
+        let expiry = now + 60_000;
+        let mut keep = mixed_row("keep", "keep", None);
+        let mut expires = mixed_row("expires", "expires", Some(expiry));
+        keep["document"] = json!({"body":"match"});
+        expires["document"]["body"] = json!("other");
+        if zero_time {
+            keep["temporal"]["event_time_ms"] = json!(100);
+            keep["document"]["vector"] = json!([1, 0]);
+            expires["document"]
+                .as_object_mut()
+                .unwrap()
+                .remove("vector");
+        } else {
+            expires["temporal"]["event_time_ms"] = json!(100);
+        }
+        write_mixed(&app, vec![keep, expires]).await;
+        assert_eq!(
+            build(&app, master_headers(), "window").await,
+            (StatusCode::OK, json!({"indexed_seq":2}))
+        );
+
+        let muted = if zero_time {
+            "time_weight"
+        } else {
+            "vector_weight"
+        };
+        let mut positive = mixed_request();
+        positive["query"] = json!("match");
+        positive["length"] = json!(1);
+        positive["rrf"] =
+            json!({"constant":2,"time_weight":2,"keyword_weight":3,"vector_weight":2});
+        positive["rrf"][muted] = json!(0.25);
+        let mut zero = positive.clone();
+        zero["rrf"][muted] = json!(0);
+        let routes = &app;
+        let before = |request| async move {
+            namespace_response(routes, "POST", MIXED_QUERY, "tenant", Some(request)).await
+        };
+        let (status, body) = decode_response(before(positive.clone()).await).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["hits"][0]["record"]["record_id"], "keep");
+        assert_eq!(body["hits"][0]["score"], 2.5);
+        // The expiring, positively weighted candidate does not fit on the
+        // first page, but its rank evidence is still part of delivery.
+        let positive_http = before(positive.clone()).await;
+        let zero_http = before(zero.clone()).await;
+        assert_eq!(positive_http.status(), StatusCode::OK);
+        assert_eq!(zero_http.status(), StatusCode::OK);
+        let gate = root.join(".test-event-read-handoff-pause");
+        let entered = root.join(".test-event-read-handoff-started");
+        std::fs::write(&gate, b"pause").unwrap();
+        let start = |request| {
+            let reader = sdk.clone();
+            tokio::spawn(async move {
+                reader
+                    .query_time_text("tenant", "window", serde_json::from_value(request).unwrap())
+                    .await
+            })
+        };
+        let zero_sdk = start(zero);
+        wait_marker(&entered).await;
+        std::fs::remove_file(&entered).unwrap();
+        let positive_sdk = start(positive);
+        wait_marker(&entered).await;
+        clock.set(expiry + 1000);
+        assert!(
+            sdk.get("tenant", "window", "expires")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(partition.committed_progress().await.committed_seq, Some(2));
+        clock.set(expiry - 7000);
+        std::fs::remove_file(gate).unwrap();
+
+        let (status, body) = decode_response(zero_http).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["hits"].as_array().unwrap().len(), 1);
+        let hit = &body["hits"][0];
+        assert_eq!(hit["record"]["record_id"], "keep");
+        assert_eq!(hit["score"], 2.5);
+        let explanations: Vec<_> = hit["channels"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| {
+                (
+                    item["channel"].as_str().unwrap(),
+                    item["rrf_contribution"].as_f64().unwrap(),
+                )
+            })
+            .collect();
+        let expected = if zero_time {
+            [("lexical", 1.5), ("vector", 1.0)]
+        } else {
+            [("time", 1.0), ("lexical", 1.5)]
+        };
+        assert_eq!(explanations, expected);
+        let embedded = zero_sdk.await.unwrap().unwrap();
+        assert_eq!(embedded.hits[0].record.record_id, "keep");
+        assert_eq!(embedded.hits[0].score, 2.5);
+        assert_eq!(positive_sdk.await.unwrap().unwrap_err().code(), "busy");
+
+        let mut body = positive_http.into_body();
+        use http_body::Body as _;
+        assert!(matches!(
+            std::future::poll_fn(|cx| Pin::new(&mut body).poll_frame(cx)).await,
+            Some(Err(_))
+        ));
+        assert!(
+            std::future::poll_fn(|cx| Pin::new(&mut body).poll_frame(cx))
+                .await
+                .is_none()
+        );
+        drop(body);
+        drop(partition);
+        drop(sdk);
+        drop(app);
+        service.shutdown().wait().await.unwrap();
+    }
 }
 
 #[tokio::test]

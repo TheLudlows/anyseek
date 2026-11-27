@@ -142,7 +142,7 @@ pub(crate) async fn search(
     if work.is_some()
         && (!plan.predicate.downcast_ref::<super::query::Compiled>()
             .is_some_and(super::query::Compiled::supports_bounded_scoring)
-            || plan.scores.len() > 1
+            || plan.scores.len() != 1
             || plan.scores.iter().any(|group| group.components.len() != 1))
     {
         return Err(RecordError::Rejected("bounded lexical recall supports a single positive analyzed term".into()));

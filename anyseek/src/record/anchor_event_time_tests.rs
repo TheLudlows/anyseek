@@ -1159,9 +1159,10 @@ async fn event_time_vector_budget_counts_filtered_work_across_selected_shards() 
         field: "priority".into(),
         filter: 9..10,
     };
-    // Three time visits, two shard entries and their fixed predicate workspace,
-    // one frozen level and its cluster, and four vector visits with two predicates.
-    let combined_cost = 3 + 2 * (1 + 128) + 2 + 4 * 3;
+    // Three time visits, two shard entries, two input predicates and eight
+    // workspace slots per shard, two frozen range steps, and six compiled
+    // filter slots per vector visit.
+    let combined_cost = 3 + 2 * (1 + 2 + 8) + 2 + 4 * (1 + 6);
     let short_budget = combined_cost - 1;
     for (id, time) in [("a", 25), ("b", 26), ("c", 27), ("d", 28)] {
         let mut row = dated(id, id, time, ExpectedVersion::Absent);
@@ -1183,7 +1184,7 @@ async fn event_time_vector_budget_counts_filtered_work_across_selected_shards() 
                 .await
                 .unwrap();
             assert!(window.hits.is_empty() && vector.is_empty());
-            assert_eq!(single, combined_cost - 2 - 2 * 3);
+            assert_eq!(single, combined_cost - 2 - 2 * (1 + 6));
         }
     }
     let inner = p.inner.lock().await;
@@ -1280,6 +1281,146 @@ async fn event_time_vector_budget_counts_filtered_work_across_selected_shards() 
     })
     .await
     .unwrap();
+}
+
+#[tokio::test]
+async fn event_time_vector_meters_filter_width_and_fusion_before_delivery() {
+    use crate::search::QueryWork;
+
+    let temp = tempfile::tempdir().unwrap();
+    let mut settings = config();
+    settings.schema.push(serde_json::from_value(serde_json::json!({
+        "field":"tags", "field_type":"StringSet", "store":false, "facet":true, "index_lexical":false
+    })).unwrap());
+    let p = RecordPartition::create(&temp.path().join("records"), settings)
+        .await
+        .unwrap();
+    let tags: Vec<_> = (0..24).map(|n| format!("tag-{n:02}")).collect();
+    for (n, tag) in tags.iter().enumerate() {
+        let id = format!("row-{n:02}");
+        let mut row = dated(
+            &id,
+            &id,
+            if n == 0 { 25 } else { 50 },
+            ExpectedVersion::Absent,
+        );
+        let doc = row.document.as_mut().unwrap();
+        doc.insert("tags".into(), serde_json::json!([tag]));
+        doc.insert(
+            "vector".into(),
+            if n == 23 {
+                serde_json::json!([1, 0])
+            } else {
+                serde_json::json!([0, 1])
+            },
+        );
+        p.write(row).await.unwrap();
+    }
+    assert_eq!(build(&p).await, 24);
+    let (handle, evaluation) = {
+        let inner = p.inner.lock().await;
+        (
+            inner.index.capture_query(1).await.unwrap(),
+            inner.evaluation_time_ms,
+        )
+    };
+    let filter = |width| FacetFilter::StringSet {
+        field: "tags".into(),
+        filter: tags[..width].to_vec(),
+    };
+    let mut vector_work = Vec::new();
+    let mut setup_work = Vec::new();
+    for width in [1, 24] {
+        let deadline = native_deadline();
+        let filters = vec![filter(width), temporal::expiry_filter(evaluation)];
+        let setup = QueryWork::new(4096, 2048, 16 * 1024 * 1024, deadline);
+        for segment in &handle.index.read().await.segments {
+            let shard = segment.vector.read().await;
+            crate::metadata_filter::metered_workspace_bytes(&shard, &filters, &setup).unwrap();
+        }
+        setup_work.push(4096 - setup.remaining());
+        let work = Arc::new(QueryWork::new(4096, 2048, 16 * 1024 * 1024, deadline));
+        let result = crate::search::search_with_counts(
+            &handle.index,
+            String::new(),
+            Some(Embedding::F32(vec![1.0, 0.0])),
+            SearchMode::Vector {
+                similarity_threshold: None,
+                ann_mode: crate::vector_similarity::AnnMode::All,
+            },
+            0,
+            1,
+            ResultType::TopkCount,
+            true,
+            vec![],
+            filters,
+            vec![],
+            &mut Vec::new(),
+            Some(work.clone()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.results.len(), 1);
+        vector_work.push(4096 - work.remaining());
+    }
+    // The 24 deduplicated compiled values take four extra search levels
+    // compared with one value, for every vector, after removing setup work.
+    assert_eq!(
+        vector_work[1] - vector_work[0] - (setup_work[1] - setup_work[0]),
+        24 * 4
+    );
+    eprintln!("24 vectors, facet width 1/24: {vector_work:?}, setup: {setup_work:?}");
+    drop(handle);
+
+    let request = |width| TimeVectorQuery {
+        window: TimeRange {
+            from_ms: Some(25),
+            to_ms: Some(26),
+        },
+        temporal: None,
+        vector: Embedding::F32(vec![1.0, 0.0]),
+        facets: vec![filter(width)],
+        fields: vec![],
+        offset: 0,
+        length: 1,
+    };
+    let run = |width, visits| {
+        let deadline = native_deadline();
+        let work = Arc::new(QueryWork::new(visits, 2048, 16 * 1024 * 1024, deadline));
+        let future = p.query_time_mixed_with_work(request(width).into(), deadline, work.clone());
+        async move {
+            future
+                .await
+                .map(|output| (output, visits - work.remaining()))
+        }
+    };
+    let (narrow, spent_narrow) = run(1, 4096)
+        .await
+        .map_err(EventTimeError::record_error)
+        .unwrap();
+    assert_eq!(narrow.hits[0].record.record_id, "row-00");
+    let (window, vector, work_before_fusion) = p
+        .probe_event_time_vector_cut(25..26, 1, 4096, vec![filter(24)], native_deadline())
+        .await
+        .unwrap();
+    assert_eq!(hit_ids(&window), ["row-00"]);
+    assert_eq!(vector, ["row-23"]);
+    assert!(spent_narrow < work_before_fusion);
+    // Two insertions (4 + 5 units) and materialization (2 units), followed
+    // by one ordering comparison. Refusal in either phase yields no page.
+    for budget in [spent_narrow, work_before_fusion, work_before_fusion + 11] {
+        assert!(
+            matches!(run(24, budget).await, Err(EventTimeError::Record(RecordError::Rejected(message)))
+            if message == "shared query work budget exhausted")
+        );
+    }
+    let (wide, spent_wide) = run(24, work_before_fusion + 13)
+        .await
+        .map_err(EventTimeError::record_error)
+        .unwrap();
+    assert_eq!(spent_wide, work_before_fusion + 13);
+    assert_eq!(wide.hits[0].record.record_id, "row-00"); // Equal lane ranks break ties by ID.
+    assert_eq!(wide.hits[0].channels[0].channel, "time");
 }
 
 #[tokio::test]

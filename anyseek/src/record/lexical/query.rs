@@ -284,7 +284,7 @@ impl Compiled {
         let mut expr = &self.expr;
         loop {
             match expr {
-                Expr::Empty | Expr::Term(..) => return true,
+                Expr::Term(..) => return true,
                 Expr::Boolean(clauses) => match clauses.as_slice() {
                     [(Occur::Must | Occur::Should, child)] => expr = child,
                     [(Occur::Should, Expr::Term(_, word)), rest @ ..] => {
@@ -294,7 +294,7 @@ impl Compiled {
                     }
                     _ => return false,
                 },
-                Expr::All | Expr::Phrase(..) => return false,
+                Expr::All | Expr::Empty | Expr::Phrase(..) => return false,
             }
         }
     }

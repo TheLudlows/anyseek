@@ -22,6 +22,8 @@
   "record::anchor::event_time_tests::event_time_lexical_work_depends_on_postings_and_facet_expansion",
   "record::anchor::event_time_tests::event_time_text_three_lane_holds_admission_through_the_last_worker",
   "server::record_service::event_time_tests::event_time_text_http_and_sdk_fuse_one_cut_and_reject_excess_work",
+  "server::record_service::event_time_tests::event_time_zero_weight_candidates_do_not_fence_http_or_sdk_delivery",
+  "record::anchor::event_time_tests::event_time_vector_meters_filter_width_and_fusion_before_delivery",
   "record::anchor::event_time_tests::event_time_vector_cut_refuses_topology_handoff_and_group_publication",
   "server::record_service::cold::tests::http_cold_start_shares_one_open_and_lists_live_statistics",
   "server::record_service::cold::tests::http_cold_failure_retries_without_installing_a_deleted_generation",

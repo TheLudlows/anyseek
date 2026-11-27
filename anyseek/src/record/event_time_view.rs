@@ -283,10 +283,15 @@ fn add_channel(
     raw_score: Option<f32>,
     constant: f32,
     weight: f32,
+    work: &QueryWork,
 ) -> Result<(), RecordError> {
+    work.charge(1)?;
     if weight == 0.0 {
         return Ok(());
     }
+    // Prepay a lookup against every resident identity and the fixed maximum
+    // of three channel checks. At most MAX_RESULTS contributions reach fusion.
+    work.charge(fused.len() + 3)?;
     let hit = fused.entry(id).or_insert_with(|| FusedHit {
         version,
         score: 0.0,
@@ -305,6 +310,33 @@ fn add_channel(
         rrf_contribution: Some(contribution),
     });
     Ok(())
+}
+
+fn rank_fused(
+    fused: BTreeMap<String, FusedHit>,
+    work: &QueryWork,
+) -> Result<Vec<(String, FusedHit)>, RecordError> {
+    work.charge(fused.len())?;
+    let mut ranked: Vec<_> = fused.into_iter().collect();
+    // With at most 128 entries, insertion sort has a bound of 8,128
+    // comparison/swap steps. Check the shared budget before each step.
+    for end in 1..ranked.len() {
+        for pos in (1..=end).rev() {
+            work.charge(1)?;
+            let (left_id, left) = &ranked[pos - 1];
+            let (right_id, right) = &ranked[pos];
+            if !right
+                .score
+                .total_cmp(&left.score)
+                .then_with(|| left_id.cmp(right_id))
+                .is_gt()
+            {
+                break;
+            }
+            ranked.swap(pos - 1, pos);
+        }
+    }
+    Ok(ranked)
 }
 
 impl RecordPartition {
@@ -422,13 +454,17 @@ impl RecordPartition {
                 ranks.push((candidates, channel, weight));
             }
         }
+        // Qualify every supplied lane at the same cut. Only candidates that
+        // can contribute ranks affect delivery, including ones off this page.
         let expiry = time
             .hits
             .iter()
+            .filter(|_| rrf.time_weight > 0.0)
             .filter_map(|hit| hit.expires_at_ms)
             .chain(
                 ranks
                     .iter()
+                    .filter(|(_, _, weight)| *weight > 0.0)
                     .flat_map(|(hits, _, _)| hits.iter().filter_map(|hit| hit.expiry)),
             )
             .min();
@@ -444,6 +480,7 @@ impl RecordPartition {
                 None,
                 rrf.constant,
                 rrf.time_weight,
+                &work,
             )?;
         }
         for (hits, channel, weight) in ranks {
@@ -458,13 +495,11 @@ impl RecordPartition {
                     Some(hit.score),
                     rrf.constant,
                     weight,
+                    &work,
                 )?;
             }
         }
-        let mut ranked: Vec<_> = fused.into_iter().collect();
-        ranked.sort_unstable_by(|(a, left), (b, right)| {
-            right.score.total_cmp(&left.score).then_with(|| a.cmp(b))
-        });
+        let ranked = rank_fused(fused, &work)?;
         let inner = timeout_at(deadline, self.inner.lock())
             .await
             .map_err(|_| RecordError::Busy)?;
