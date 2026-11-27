@@ -2,6 +2,7 @@
 //! from the short, fenced publication phase. Dropping a caller does not cancel
 //! accepted work or release the partition's reader/build protection early.
 use super::*;
+use crate::storage::disk_records::event_time;
 use futures::FutureExt;
 use std::{sync::LazyLock, time::{Duration, Instant}};
 
@@ -9,7 +10,7 @@ pub(super) static WORKERS: LazyLock<Arc<Semaphore>> = LazyLock::new(|| Arc::new(
 const MAX_DEADLINE: Duration = Duration::from_secs(300);
 
 #[derive(Clone,Copy,Eq,PartialEq)]
-enum JobMode { VectorIndex, Automatic, Compact }
+enum JobMode { VectorIndex, Automatic, Compact, EventTime(event_time::BuildLimits) }
 
 fn crash_boundary(point:&str) {
     #[cfg(test)]
@@ -93,6 +94,12 @@ impl RecordPartition {
     pub(super) fn start_compact_job(&self)->Result<IndexJob,RecordError> {
         self.start_owned_index_job(MAX_DEADLINE,JobMode::Compact)
     }
+    // Explicit local opt-in for one full base. The caller sees any optional
+    // build refusal. No foreground or scheduled maintenance calls this path.
+    #[allow(dead_code, reason = "internal candidate pending the shared query cut")]
+    pub(crate) fn start_event_time_checkpoint(&self, timeout: Duration) -> Result<IndexJob, RecordError> {
+        self.start_owned_index_job(timeout, JobMode::EventTime(event_time::BuildLimits::DEFAULT))
+    }
     fn start_owned_index_job(&self,timeout:Duration,mode:JobMode)->Result<IndexJob,RecordError> {
         if timeout.is_zero() || timeout > MAX_DEADLINE {
             return Err(RecordError::Rejected("index build deadline must be within 1ns..=300s".into()));
@@ -133,6 +140,9 @@ impl RecordPartition {
                 let _capture_phase=maintenance::Phase::new("background_capture_locked",inner.state.seq);
                 if !inner.healthy { return Err(RecordError::RecoveryRequired); }
                 if inner.background.is_some() { return Err(RecordError::Busy); }
+                if matches!(mode, JobMode::EventTime(_)) && (inner.remote.is_some() || inner.archive.is_some()) {
+                    return Err(RecordError::Rejected("event-time checkpoint requires local-only storage without archive".into()));
+                }
                 inner.index.drain_indexes().await?;
                 inner.index.join_materializers().await?;
                 if automatic {
@@ -184,7 +194,7 @@ impl RecordPartition {
                     }else{None}
                 }else{None};
                 let archive = inner.archive.clone().map(|policy| (policy, inner.journal.generation()));
-                let source=if mode!=JobMode::VectorIndex || archive.is_some() {Some(maintenance::SourceCapture::capture(&inner)?)}else{None};
+                let source=if matches!(mode, JobMode::Automatic | JobMode::Compact) || archive.is_some() {Some(maintenance::SourceCapture::capture(&inner)?)}else{None};
                 // Complete fallible local capture before acquiring the remote pin.
                 let snapshot={let _phase=maintenance::Phase::new("snapshot_clone_locked",inner.state.seq);
                     inner.state.try_clone().map_err(|e|storage(format!("stage=index_snapshot_clone {e}")))?};
@@ -264,10 +274,14 @@ impl RecordPartition {
                     (source, snapshot)
                 };
                 let source=if mode==JobMode::Compact {source}else{None};
-                let reference = if mode==JobMode::Compact {
-                    let source=source.as_ref().ok_or(RecordError::RecoveryRequired)?;
-                    anchor::Reference::prepare_captured(&root,&config,&snapshot,prior,source.anchor(),source.frames(),native.as_ref()).await?
-                }else{anchor::Reference::prepare(&root,&config,&snapshot,prior,None,None,true,None).await?};
+                let reference = match mode {
+                    JobMode::Compact => {
+                        let source=source.as_ref().ok_or(RecordError::RecoveryRequired)?;
+                        anchor::Reference::prepare_captured(&root,&config,&snapshot,prior,source.anchor(),source.frames(),native.as_ref()).await?
+                    }
+                    JobMode::EventTime(limits) => anchor::Reference::prepare_event_time(&root,&config,&snapshot,prior,limits).await?,
+                    _ => anchor::Reference::prepare(&root,&config,&snapshot,prior,None,None,true,None).await?,
+                };
                 drop(source);
                 drop(native);
                 #[cfg(test)]
@@ -588,6 +602,42 @@ pub(super) async fn pause_journal_install(root: &Path) {
 mod tests {
     use super::*;
     use super::super::tests::{config,path,write,query};
+
+    #[tokio::test]
+    async fn event_time_checkpoint_budget_refusal_leaves_selected_state_and_other_partition_writable() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("event");
+        let plain = temp.path().join("plain");
+        let partition = RecordPartition::create(&root, config()).await.unwrap();
+        let other = RecordPartition::create(&plain, config()).await.unwrap();
+        let mut dated = write("dated", "a", "alpha", ExpectedVersion::Absent);
+        dated.temporal = Some(TemporalMetadata { event_time_ms: Some(1), ..Default::default() });
+        partition.write(dated).await.unwrap();
+        partition.start_event_time_checkpoint(Duration::from_secs(20)).unwrap().finish().await.unwrap();
+        let selected = serde_json::to_vec(&partition.inner.lock().await.anchor).unwrap();
+        std::fs::write(root.join(".test-indexer-pause"), b"pause").unwrap();
+        let limits = event_time::BuildLimits::for_test(1024, 4096);
+        let job = partition.start_owned_index_job(Duration::from_secs(20), JobMode::EventTime(limits)).unwrap();
+        wait_started(&root).await;
+        partition.write(write("tail", "b", "alpha", ExpectedVersion::Absent)).await.unwrap();
+        other.write(write("plain", "c", "alpha", ExpectedVersion::Absent)).await.unwrap();
+        other.index_committed(Duration::from_secs(20)).await.unwrap();
+        std::fs::remove_file(root.join(".test-indexer-pause")).unwrap();
+        assert!(matches!(
+            job.finish().await,
+            Err(RecordError::Rejected(message)) if message.contains("event-time projection exceeded its build budget")
+        ));
+        assert_eq!(serde_json::to_vec(&partition.inner.lock().await.anchor).unwrap(), selected);
+        assert!(!std::fs::read_dir(&root).unwrap().any(|entry|
+            entry.unwrap().file_name().to_string_lossy().starts_with(".anchor-prepare-")));
+        drop(partition);
+        let partition = RecordPartition::open(&root, config().max_journal_bytes).await.unwrap();
+        assert!(partition.get("a").await.unwrap().is_some());
+        assert!(partition.get("b").await.unwrap().is_some());
+        partition.index_committed(Duration::from_secs(20)).await.unwrap();
+        assert!(other.get("c").await.unwrap().is_some());
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn compact_native_probe_releases_io_before_waiting_for_shard_statistics() {
         use std::{future::Future, io::Write, task::Poll};

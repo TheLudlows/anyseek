@@ -327,17 +327,18 @@ impl Descriptor {
         pool: &mut PoolBuilder,
     ) -> Result<Self, RecordError> {
         validate_config(config)?;
-        Self::write_encoded(root, config, &checkpoint_codec::StateEncoding::new(state)?, pool)
+        Self::write_encoded(root, config, &checkpoint_codec::StateEncoding::new(state)?, pool, None)
     }
     pub(super) fn write_encoded(root: &Path, config: &RecordConfig,
         encoded: &checkpoint_codec::StateEncoding<'_>, pool: &mut PoolBuilder,
+        project: Option<(&str, crate::storage::disk_records::event_time::BuildLimits)>,
     ) -> Result<Self, RecordError> {
         let state = encoded.state();
         validate_config(config)?;
         if encoded.length() as u64 > config.max_journal_bytes {
             return Err(invalid("complete state byte budget exceeded"));
         }
-        let records = state_rows::Descriptor::write(root, state, config, pool)?;
+        let records = state_rows::Descriptor::write(root, state, config, pool, project)?;
         let mut writer = Writer {
             root,
             config,
@@ -523,7 +524,7 @@ impl Descriptor {
         if count != state.records.len() { return Err(invalid("disk record missing from checkpoint")); }
         Ok(())
     }
-    fn record_rows(&self) -> Result<&state_rows::Descriptor, RecordError> {
+    pub(super) fn record_rows(&self) -> Result<&state_rows::Descriptor, RecordError> {
         self.records.as_ref().ok_or_else(|| invalid("missing authenticated disk records"))
     }
 

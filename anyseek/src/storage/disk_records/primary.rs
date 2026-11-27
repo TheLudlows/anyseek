@@ -14,6 +14,20 @@ const MAX_HEIGHT: usize = 16;
 // Include the page owner and cache entry bookkeeping in the cached byte count.
 const PAGE_CHARGE: usize = PAGE_BYTES + 256;
 
+// Upper bound for one sorted build, with variable key bytes rounded up by
+// the caller. Parent pages refer to existing keys and never copy suffixes.
+pub(super) fn build_bytes(mut entries: u64, key_bytes: u64) -> Option<u64> {
+    let mut pages = 0u64;
+    while entries > 0 {
+        entries = entries.div_ceil(CAPACITY as u64);
+        pages = pages.checked_add(entries)?;
+        if entries == 1 {
+            break;
+        }
+    }
+    pages.checked_mul(PAGE_BYTES as u64)?.checked_add(2 * HEADER)?.checked_add(key_bytes)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Block {
@@ -453,6 +467,14 @@ impl Index {
             }
         }
         Ok(page)
+    }
+
+    pub(super) fn verify_root(&self, populated: bool) -> io::Result<()> {
+        match self.root {
+            Some(block) if populated => self.load(block).map(|_| ()),
+            None if !populated => Ok(()),
+            _ => Err(invalid("primary index root disagrees with record count")),
+        }
     }
 
     pub(super) fn find(&self, id: &str) -> io::Result<Option<RowRef>> {

@@ -12,6 +12,7 @@ use std::{
     sync::Arc,
 };
 
+pub(crate) mod event_time;
 pub(crate) mod primary;
 pub(crate) mod rows;
 
