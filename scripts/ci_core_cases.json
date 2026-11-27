@@ -188,6 +188,7 @@
   "catalog::tests::sqlite_process_exit_preserves_collection_and_receipt_atomicity",
   "catalog::tests::complete_service_snapshot_drains_owned_lifecycle_work_and_excludes_queued_writes",
   "catalog::tests::service_backup_waits_for_io_during_retained_record_validation",
+  "catalog::tests::service_backup_uses_sealed_cut_under_io_pressure",
   "catalog::tests::collection_recreation_keeps_generations_receipts_and_backups_separate",
   "catalog::tests::reclamation_keeps_backup_and_receipt_fences_and_resumes_after_restart",
   "record::reclamation::tests::bounded_retirement_waits_for_owner_and_child_pin_then_resumes",

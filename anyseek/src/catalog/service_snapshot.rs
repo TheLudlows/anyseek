@@ -41,7 +41,7 @@ fn publish(stage: &Path, target: &Path) -> Result<(), CatalogError> {
     crate::storage::partition::publish_bundle(stage, target)
         .map_err(|e| CatalogError::OutcomeUnknown(format!("bundle publication: {e}")))
 }
-fn backup_input_error(error: crate::record::RecordError) -> CatalogError {
+fn record_input_error(error: crate::record::RecordError) -> CatalogError {
     match error {
         crate::record::RecordError::Busy => CatalogError::Busy,
         error => storage(error),
@@ -145,8 +145,8 @@ async fn validate(root: &Path) -> Result<ServiceSnapshot, CatalogError> {
         let partition =
             RecordPartition::open(&root.join(&entry.directory()), entry.config.max_journal_bytes)
                 .await
-                .map_err(storage)?;
-        if partition.recovery_identity().await.map_err(storage)?.seq
+                .map_err(record_input_error)?;
+        if partition.recovery_cut().await.map_err(record_input_error)?.seq
             != *manifest
                 .record_seqs
                 .get(&entry.scope())
@@ -163,8 +163,8 @@ async fn validate(root: &Path) -> Result<ServiceSnapshot, CatalogError> {
         names.insert(name.clone());
         let p = RecordPartition::open(&root.join(name), 256 * 1024 * 1024)
             .await
-            .map_err(storage)?;
-        if p.recovery_identity().await.map_err(storage)?.seq != *seq {
+            .map_err(record_input_error)?;
+        if p.recovery_cut().await.map_err(record_input_error)?.seq != *seq {
             return Err(storage("backup cut mismatch"));
         }
     }
@@ -343,8 +343,8 @@ impl Catalog {
                     ));
                 }
                 // Preflight bounded authoritative payload before creating the
-                // archive. Private snapshots carry certified immutable packages;
-                // no live cache is copied. Per-partition closure budgets also apply.
+                // archive using sizes already admitted at publication. Archive
+                // creation separately validates the immutable packages it copies.
                 let mut total = serde_json::to_vec(&inner.state).map_err(storage)?.len() as u64;
                 for entry in inner.state.collections.values().filter(|entry| !entry.reclaiming) {
                     if entry.deleted
@@ -360,10 +360,10 @@ impl Catalog {
                             entry.config.max_journal_bytes,
                         )
                         .await
-                        .map_err(backup_input_error)?,
+                        .map_err(record_input_error)?,
                     };
                     total = total.saturating_add(
-                        p.recovery_identity().await.map_err(backup_input_error)?.checkpoint_bytes as u64 + 4096,
+                        p.recovery_cut().await.map_err(record_input_error)?.checkpoint_bytes as u64 + 4096,
                     );
                 }
                 for row in std::fs::read_dir(&source_root).map_err(storage)? {
@@ -374,13 +374,13 @@ impl Catalog {
                             continue;
                         }
                         let p=if let Some(path)=archives.get(&name) {
-                            RecordPartition::open(path,256*1024*1024).await.map_err(backup_input_error)?
+                            RecordPartition::open(path,256*1024*1024).await.map_err(record_input_error)?
                         }else {
-                            RecordPartition::resume_initialization(&row.path(),256*1024*1024).await.map_err(backup_input_error)?;
-                            RecordPartition::open(&row.path(),256*1024*1024).await.map_err(backup_input_error)?
+                            RecordPartition::resume_initialization(&row.path(),256*1024*1024).await.map_err(record_input_error)?;
+                            RecordPartition::open(&row.path(),256*1024*1024).await.map_err(record_input_error)?
                         };
                         total = total.saturating_add(
-                            p.recovery_identity().await.map_err(backup_input_error)?.checkpoint_bytes as u64 + 4096,
+                            p.recovery_cut().await.map_err(record_input_error)?.checkpoint_bytes as u64 + 4096,
                         );
                     }
                 }
@@ -412,13 +412,13 @@ impl Catalog {
                             entry.config.max_journal_bytes,
                         )
                         .await
-                        .map_err(backup_input_error)?,
+                        .map_err(record_input_error)?,
                     };
                     entry.prepare_parent(&stage)?;
                     let seq = partition
                         .checkpoint(&stage.join(&entry.directory()))
                         .await
-                        .map_err(backup_input_error)?;
+                        .map_err(record_input_error)?;
                     record_seqs.insert(entry.scope(), seq);
                     objects.insert(
                         entry.directory(),
@@ -434,12 +434,12 @@ impl Catalog {
                             continue;
                         }
                         let p=if let Some(path)=archives.get(&name) {
-                            RecordPartition::open(path,256*1024*1024).await.map_err(backup_input_error)?
+                            RecordPartition::open(path,256*1024*1024).await.map_err(record_input_error)?
                         }else {
-                            RecordPartition::resume_initialization(&row.path(),256*1024*1024).await.map_err(backup_input_error)?;
-                            RecordPartition::open(&row.path(),256*1024*1024).await.map_err(backup_input_error)?
+                            RecordPartition::resume_initialization(&row.path(),256*1024*1024).await.map_err(record_input_error)?;
+                            RecordPartition::open(&row.path(),256*1024*1024).await.map_err(record_input_error)?
                         };
-                        let seq = p.checkpoint(&stage.join(&name)).await.map_err(backup_input_error)?;
+                        let seq = p.checkpoint(&stage.join(&name)).await.map_err(record_input_error)?;
                         collection_backups.insert(id.into(), seq);
                         objects.insert(name.clone(), object_hash(&stage.join(&name))?);
                     }
