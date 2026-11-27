@@ -143,6 +143,8 @@ S3 remote-checkpoint 单测由同 feature 的 persistence 矩阵覆盖，fixture
 
 576/522 的追加/晚到命中和 400/160 的排名夹具保持固定规模。65,536、10,001、>16 MiB、64→65、128→129、8192-package 等独立边界不由小规模夹具替代。Windows 全文分区由 `scripts/check_lexical_partition.py` 校验；改变用例名或分区时须同步清单、矩阵及 remainder 排除项。
 
+全文夹具在写入后显式构建 checkpoint。后台维护占用构建槽时，夹具仅在有界窗口内重试 `Busy`，并检查成功的 checkpoint 覆盖本阶段的完整序号。重开、成员、评分和排序断言继续执行。
+
 ## API 与内部模块
 
 ```sh
