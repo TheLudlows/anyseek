@@ -7,6 +7,25 @@ use std::{error::Error, io::Read, path::Path};
 async fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<_> = std::env::args().skip(1).collect();
     match args.split_first() {
+        Some((mode, [source, backup, budget])) if mode == "base" => {
+            let seq = RecordPartition::export_local_archive_base(
+                Path::new(source), Path::new(backup), budget.parse()?,
+            ).await?;
+            println!("{seq}");
+        }
+        Some((mode, [source, backup, medium, wal_budget, archive_bytes, generations]))
+            if mode == "enroll" || mode == "renew" =>
+        {
+            let stream = RecordPartition::enroll_local_archive(
+                Path::new(source), Path::new(backup), Path::new(medium),
+                wal_budget.parse()?, archive_bytes.parse()?, generations.parse()?, mode == "renew",
+            ).await?;
+            println!("{}", serde_json::to_string(&stream)?);
+        }
+        Some((mode, [stream, budget])) if mode == "manifest" => {
+            let parts = RecordPartition::local_archive_manifest(Path::new(stream), budget.parse()?).await?;
+            println!("{}", serde_json::to_string(&parts)?);
+        }
         Some((mode, [source, backup, archive, budget])) if mode == "capture" => {
             let witness = RecordPartition::capture_local_archive(
                 Path::new(source),
@@ -36,7 +55,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 budget.parse()?, cut.parse()?,
             ).await?;
         }
-        _ => return Err("usage: local_archive_cut capture SOURCE BACKUP ARCHIVE BUDGET | restore BACKUP ARCHIVE DESTINATION BUDGET CUT WITNESS | restore-chain BACKUP DESTINATION BUDGET CUT MANIFEST".into()),
+        _ => return Err("usage: local_archive_cut base SOURCE BACKUP WAL_BUDGET | enroll|renew SOURCE BACKUP MEDIUM WAL_BUDGET ARCHIVE_BYTES GENERATIONS | manifest STREAM WAL_BUDGET | capture SOURCE BACKUP ARCHIVE BUDGET | restore BACKUP ARCHIVE DESTINATION BUDGET CUT WITNESS | restore-chain BACKUP DESTINATION BUDGET CUT MANIFEST".into()),
     }
     Ok(())
 }

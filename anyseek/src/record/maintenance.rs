@@ -699,6 +699,12 @@ impl Intent {
         if let Some(operations)=&self.operations {operations.apply(state)?;}
         Ok(())
     }
+    pub(super) fn archive_gc_epoch(&self) -> Result<Option<u64>, RecordError> {
+        if self.trim.is_some() {
+            return Err(storage("remote checkpoint trim cannot enter a local archive"));
+        }
+        Ok(self.operations.as_ref().filter(|gc| gc.prefix.is_some()).map(|gc| gc.epoch))
+    }
     #[cfg(feature="fault-injection")]
     pub(super) fn trims_history(&self)->bool {self.trim.is_some()}
 }
@@ -750,7 +756,6 @@ impl OperationGc {
     restore_operation_lookup(state)
     }
 }
-#[cfg(test)]
 pub(super) fn collect_operations(state:&mut State,epoch:u64)->Result<(),RecordError> {
     OperationGc::capture(state,epoch,state.history.floor)?.apply(state)
 }

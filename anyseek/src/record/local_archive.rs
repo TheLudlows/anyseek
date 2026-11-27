@@ -2,6 +2,9 @@
 use super::*;
 use sha2::{Digest, Sha256};
 
+mod automatic;
+pub(super) use automatic::Policy;
+
 /// The caller retains this witness independently alongside the selected backup.
 /// The digest binds the archive header and every length-framed committed entry.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -35,6 +38,32 @@ struct Header {
     last_seq: u64,
     base_sha256: [u8; 32],
     end_sha256: [u8; 32],
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    decisions_sha256: Option<[u8; 32]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    gc_epoch: Option<u64>,
+}
+
+fn read_window(frames: &[Vec<u8>]) -> Result<(Header, LocalArchiveWindow), RecordError> {
+    let (raw, suffix) = frames.split_first().ok_or_else(|| storage("archive has no header"))?;
+    if raw.len() > 4096 {
+        return Err(storage("archive header exceeds its bound"));
+    }
+    let header: Header = serde_json::from_slice(raw).map_err(storage)?;
+    match header.format {
+        2 if header.decisions_sha256.is_none() && header.gc_epoch.is_none() => {}
+        3 if header.decisions_sha256 == Some(hash_frames(suffix.iter().map(Vec::as_slice))) => {}
+        _ => return Err(storage("unsupported or damaged archive window")),
+    }
+    if header.last_seq < header.base_seq {
+        return Err(storage("archive window sequence regression"));
+    }
+    let witness = LocalArchiveWindow {
+        base_seq: header.base_seq,
+        last_seq: header.last_seq,
+        archive_sha256: hash_frames(frames.iter().map(Vec::as_slice)),
+    };
+    Ok((header, witness))
 }
 
 impl RecordPartition {
@@ -224,6 +253,8 @@ fn capture(
         last_seq,
         base_sha256,
         end_sha256: boundary_digest(&config, &mut state)?,
+        decisions_sha256: None,
+        gc_epoch: None,
     })
     .map_err(storage)?;
     let witness = LocalArchiveWindow {
@@ -237,21 +268,28 @@ fn capture(
         .parent()
         .ok_or_else(|| storage("archive needs a parent directory"))?;
     let prepared = parent.join(format!(".record-archive-{:032x}", rand::random::<u128>()));
+    publish_window(&prepared, archive, budget, &header, suffix)?;
+    Ok(witness)
+}
+
+fn publish_window(
+    prepared: &Path, archive: &Path, budget: u64, header: &[u8], suffix: &[Vec<u8>],
+) -> Result<(), RecordError> {
     let mut journal =
-        PartitionJournal::create(&prepared, budget, &header).map_err(creation_error)?;
-    let written = suffix
-        .iter()
-        .try_for_each(|frame| journal.append(frame).map(|_| ()));
+        PartitionJournal::create(prepared, budget, header).map_err(creation_error)?;
+    let written = if suffix.is_empty() { Ok(()) } else {
+        journal.append_batch(&suffix.iter().map(Vec::as_slice).collect::<Vec<_>>()).map(|_| ())
+    };
     drop(journal);
     if let Err(error) = written {
-        discard(&prepared);
+        discard(prepared);
         return Err(storage(error));
     }
-    match PartitionJournal::publish_prepared_root(&prepared, archive) {
-        Ok(()) => Ok(witness),
+    match PartitionJournal::publish_prepared_root(prepared, archive) {
+        Ok(()) => Ok(()),
         Err(error) => {
             if matches!(error, CreateError::NotPublished(_)) {
-                discard(&prepared);
+                discard(prepared);
             }
             Err(creation_error(error))
         }
@@ -282,20 +320,11 @@ fn recover(
         // its bytes even if the requested cut is in an earlier part.
         let _frames = crate::storage::build_budget::reserve_memory(budget).map_err(memory_error)?;
         let (_archive_owner, frames) = PartitionJournal::open(path, budget).map_err(storage)?;
-        let (raw, suffix) = frames
-            .split_first()
-            .ok_or_else(|| storage("archive has no header"))?;
-        if raw.len() > 4096
-            || hash_frames(frames.iter().map(Vec::as_slice)) != witness.archive_sha256
-        {
+        let (header, actual) = read_window(&frames)?;
+        if actual != *witness {
             return Err(storage("archive window differs from its retained witness"));
         }
-        let header: Header = serde_json::from_slice(raw).map_err(storage)?;
-        if header.format != 2
-            || header.base_seq != witness.base_seq
-            || header.last_seq != witness.last_seq
-            || header.last_seq < header.base_seq
-            || header.base_seq != endpoint
+        if header.base_seq != endpoint
             || header.base_sha256 != digest
         {
             return Err(storage(
@@ -303,11 +332,14 @@ fn recover(
             ));
         }
         if state.seq != cut {
-            for frame in suffix {
+            for frame in &frames[1..] {
                 replay(&config, &mut state, frame)?;
                 if state.seq == cut {
                     break;
                 }
+            }
+            if state.seq != cut && let Some(epoch) = header.gc_epoch {
+                maintenance::collect_operations(&mut state, epoch)?;
             }
             if state.seq != cut
                 && (state.seq != header.last_seq

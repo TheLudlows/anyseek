@@ -54,6 +54,9 @@ struct WirePackage<'a> {
     #[serde(borrow)] files:&'a serde_json::value::RawValue,
 }
 impl Reference {
+    pub(super) fn checkpoint_state(&self) -> Result<&State, RecordError> {
+        self.captured.get().ok_or_else(|| storage("missing certified State proof owner"))
+    }
     pub(super) fn decode_proof(raw:&serde_json::value::RawValue)->Result<Self,RecordError>{
         let charge=metadata_charge(raw.get().len())?.checked_add(65536).ok_or_else(||storage("reference scratch overflow"))?;
         let mut lease=crate::storage::build_budget::reserve_memory(charge).map_err(memory_error)?;
@@ -777,6 +780,9 @@ impl Inner {
         })
     }
     async fn prepare_and_publish_anchor(&mut self,candidate:Option<State>,reuse:bool)->Result<u64,RecordError>{
+        if self.archive.is_some() {
+            return Err(RecordError::Rejected("archive-enrolled partitions require an owned background checkpoint".into()));
+        }
         self.index.drain_batch_prefix(self.state.seq).await?;
         self.index.join_materializers().await?;
         let _phase=maintenance::Phase::new("full_checkpoint",self.state.seq);

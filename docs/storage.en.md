@@ -150,6 +150,25 @@ target/debug/examples/local_archive_cut restore BACKUP ARCHIVE NEW_ROOT BUDGET_B
 
 Restore checks the entire window and base backup, replays through the selected business decision, and atomically publishes a new path. A group decision includes its members and original receipt at the same sequence. Later changes and maintenance at the target's same sequence are left outside the restored cut. The caller manages source paths, service catalog, and any paired Origence SQLite backup. Use `restore-chain BACKUP NEW_ROOT BUDGET_BYTES TARGET_SEQ parts.json` for up to 64 ordered captures. Each entry in the JSON list carries `path` and `witness`. The recovery tool verifies each matching boundary and every listed part, including parts after the target cut. Capture each generation before its live journal is reclaimed. [#224](https://github.com/TheLudlows/anyseek/issues/224)
 
+### Automatic local WAL archiving
+
+Enroll a stopped local Record partition. Use a backup at its selected WAL base and place the backup and archive directory on separate, already mounted persistent media. Path separation and the stream identity help detect an absent or substituted mount. The operator verifies physical device independence. Both the local SDK and the standalone HTTP service read the enrollment when opening the partition. S3 caches do not support enrollment.
+
+```sh
+local_archive_cut base SOURCE BACKUP WAL_BUDGET_BYTES
+local_archive_cut enroll SOURCE BACKUP MEDIUM WAL_BUDGET_BYTES ARCHIVE_BYTES GENERATIONS
+local_archive_cut manifest STREAM WAL_BUDGET_BYTES > parts.json
+local_archive_cut restore-chain BACKUP NEW_ROOT WAL_BUDGET_BYTES TARGET_SEQ parts.json
+```
+
+`base` exports the selected checkpoint and leaves newer committed WAL entries for the following window. An existing independent backup at that cut can be enrolled directly. After startup, a checkpoint exports a window from its fixed committed WAL prefix. The archive files, commit witnesses, and directory publication must be durable before the primary can select a successor and reclaim the old WAL. Concurrent commits after capture belong to the successor suffix and are covered by its later export. Crossing an endpoint with receipt GC replays that maintenance using its authenticated fixed epoch. Restoring the endpoint's business decision retains the receipt from the decision itself.
+
+An unavailable archive medium, failed authentication, or archive quota refusal keeps the selected primary WAL. Archive I/O runs in the background outside the primary publication guard. Failure defers checkpoints. Sustained failure can exhaust active WAL capacity, and new writes then encounter `Busy` or the existing budget errors. Confirmed data and receipts retain the primary recovery contract. If a process exits after the archive is durable and before the primary selects a successor, reopen still selects the old WAL. A retry verifies that the earlier export is an exact decision prefix before extending the same archive generation.
+
+`GENERATIONS` caps the number of generations in a window (1–64), and `ARCHIVE_BYTES` budgets logical regular-file bytes for that stream, including staging and overlap with the previous copy on retry. Provision shared media for all streams, base backups, and filesystem overhead. At the window boundary, export the selected base while stopped and use `renew` with the same arguments as `enroll`. Renewal requires the old stream to reach the new base. The caller retains old streams and backups according to the recovery window. `manifest` verifies the contiguous windows present. Export it from a stopped or otherwise stable stream and save it independently with the backup so restore can detect the loss of any declared part, including the last one.
+
+Independent-media RPO depends on the latest durable archived cut that verifies continuously from the paired base backup. Checkpoints trigger archiving, so a quiet partition has no fixed maximum archival interval. The active unarchived WAL protects same-disk recovery. Those commits can be lost with the primary disk. RTO includes verification, replay, a new root, and retrieval index construction on the target media. Measure automatic archiving overhead separately from the frozen comparison without archiving.
+
 ## Maintenance publication and failure boundaries
 
 In S3 mode, SQLite selects the remote manifest. Owner epoch and failure fencing block stale writers and untrusted output. Writes and TTL share cache append. After confirmed SQLite commit, cache failure returns `durable_pending` and keeps output fenced. Reopen recovers the original receipt. A genuinely unknown SQLite result remains `outcome_unknown` and cannot justify a new operation.

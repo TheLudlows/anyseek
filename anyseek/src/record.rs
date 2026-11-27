@@ -333,6 +333,7 @@ struct Inner {
     evaluation_time_ms: u64,
     output: Arc<std::sync::RwLock<output::OutputState>>,
     remote: Option<RemotePersistence>,
+    archive: Option<local_archive::Policy>,
     #[cfg(test)]
     fail_after_durable: bool,
     #[cfg(test)]
@@ -1384,6 +1385,7 @@ impl RecordPartition {
                 evaluation_time_ms: 0,
                 output,
                 remote: None,
+                archive: None,
                 #[cfg(test)]
                 fail_after_durable: false,
                 #[cfg(test)]
@@ -1418,6 +1420,10 @@ impl RecordPartition {
         let _frames = crate::storage::build_budget::reserve_memory(max_journal_bytes).map_err(storage)?;
         let (mut journal, entries) =
             PartitionJournal::open(path, max_journal_bytes).map_err(storage)?;
+        let archive = local_archive::Policy::load(path)?;
+        if !local && archive.is_some() {
+            return Err(RecordError::Rejected("an archive-enrolled Record root cannot be an S3 cache".into()));
+        }
         clean_recovery_caches(path)?;
         let mut entries = entries.into_iter();
         let first = entries
@@ -1514,6 +1520,7 @@ impl RecordPartition {
                 evaluation_time_ms: 0,
                 output:output.clone(),
                 remote: None,
+                archive,
                 #[cfg(test)]
                 fail_after_durable: false,
                 #[cfg(test)]

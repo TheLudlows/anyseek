@@ -163,6 +163,25 @@ target/debug/examples/local_archive_cut restore BACKUP ARCHIVE NEW_ROOT BUDGET_B
 
 恢复先复核整段窗口和基础备份，再重放到指定业务决定（含该决定）并原子发布新路径。组写的成员和原回执属于同一个提交序号；目标决定后的变更及同序号维护不纳入输出。原始路径、服务目录和 Origence SQLite 配套备份由调用方管理。多代恢复使用 `restore-chain BACKUP NEW_ROOT BUDGET_BYTES TARGET_SEQ parts.json`。JSON 列表按顺序记录最多 64 段，每项含 `path` 和 `witness`。工具核验所有相邻边界和清单中的全部段，包括目标切点之后的段。每个代次需在其活动日志回收前捕获，见 [#224](https://github.com/TheLudlows/anyseek/issues/224)。
 
+### 自动归档已选本地 WAL
+
+对停机的本地 Record 分区注册归档。用已选 WAL 的起始切点备份作为基准，把备份和归档目录放在预先挂载的独立持久介质上。路径隔离和介质标识用于检测挂载丢失或路径被替换，部署者负责验证实际设备独立性。本地 SDK 和独立 HTTP 打开同一个分区时都会读取持久注册。S3 缓存不支持此注册。
+
+```sh
+local_archive_cut base SOURCE BACKUP WAL_BUDGET_BYTES
+local_archive_cut enroll SOURCE BACKUP MEDIUM WAL_BUDGET_BYTES ARCHIVE_BYTES GENERATIONS
+local_archive_cut manifest STREAM WAL_BUDGET_BYTES > parts.json
+local_archive_cut restore-chain BACKUP NEW_ROOT WAL_BUDGET_BYTES TARGET_SEQ parts.json
+```
+
+`base` 导出已选 checkpoint 本身，活动 WAL 中较新的尾段留给下一窗口。若已有同一切点的独立备份，可以直接注册。启动后每次 checkpoint 对固定的已提交 WAL 前缀导出经校验的窗口。归档文件、提交见证和目录发布持久确认后，才允许选择新主盘代次并回收旧 WAL。捕获后并发提交的后缀由新主盘代次接收，后续归档只追加其应覆盖的决定。跨过含收据回收的切点时，按认证窗口内的原固定 epoch 重演回收。恢复到该业务切点仍保留决定自身的回执。
+
+在已有主盘 WAL 剩余额度内，归档盘丢失、认证失败和归档额度不足都保留原选中的主盘 WAL。归档 I/O 在后台执行，主盘不跨这段归档写入持有发布锁。故障会延后 checkpoint。持续失败可能耗尽活动 WAL 的预算，新写的准入随后返回 `Busy` 或原预算错误。已有确认的记录及回执继续按主盘的恢复契约读取。进程在归档持久之后、主盘证书之前退出时，重开仍选择原 WAL。重试先校验旧归档决定是当前 WAL 的精确前缀，再扩展同一归档代次。
+
+`GENERATIONS` 为每个窗口的代次数上限（1–64），`ARCHIVE_BYTES` 是该流普通文件的逻辑字节预算，包含重试同时持有的旧副本和暂存空间。各流共享介质时还需为所有分区、基础备份和文件系统开销预留容量。达到边界时，停机导出当前选中切点并用 `renew` 启动新流，参数与 `enroll` 相同。更新前校验旧流覆盖当前基准，旧流和备份由调用方按保留期管理。`manifest` 校验已存在的连续窗口。用已停机或已选定的稳定窗口导出清单，并将清单与配套备份保存在独立位置，以便恢复时识别曾声明但后续丢失的末段。
+
+独立介质的 RPO 以最后持久确认且可与基础备份连续验证的归档切点为准。归档随 checkpoint 触发，低写入期间的归档间隔没有固定上限。当前活动 WAL 中尚未归档的提交受同盘故障恢复保护，盘丢失后可能超出 RPO。RTO 还包含归档认证、重放、写新根和重建检索结构的耗时，需要在目标介质上实测。自动归档启用后的开销单独测量，早先冻结的无归档性能对照不包含这项成本。
+
 ## 维护发布与失败边界
 
 S3 模式由 SQLite 选择远端 manifest，owner epoch 与失败 fence 阻止陈旧写者和不可信输出。普通写入和 TTL 共用缓存追加入口；SQLite 已明确提交成功时，缓存追加失败返回 `durable_pending` 并保持输出封锁，重开恢复原回执。SQLite 提交结果未知仍为 `outcome_unknown`，不能据此另发新操作。
