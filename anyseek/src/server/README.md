@@ -280,7 +280,7 @@ master POST `/api/v1/service-backups`（`{operation_id}`）冻结 catalog、所�
 
 部署可设置 `ANYSEEK_{类别}_SLOTS`、`_PER_COLLECTION`、`_BYTES`、`_PER_COLLECTION_BYTES`、`_IO`、`_PER_COLLECTION_IO`，类别取上表大写名称，字节值为十进制字节数。例如 `ANYSEEK_FOREGROUND_PER_COLLECTION=2`。配置必须为正整数、局部不大于全局、每集合字节至少 18 MiB；单类 slots/I/O 不超过 64，前三类 slots 总和不超过 48、CONTROL slots 不超过 8，以保留 catalog 控制余量。非法配置阻止启动。
 
-30 秒截止时间覆盖认证/身份查找及 handler；准入超时且未启动 handler 时返回 Busy，已接管工作超时仍 outcome_unknown。每个 HTTP 请求保守预留 18 MiB body/输出工作区；构建快照/tail、对象下载和 PUT 副本另计。S3 缓冲及累积解码 tail 额度跟随实际所有者（包括迭代器和已取出的条目），owned task 和已交付传输帧保留原请求准入，取消等待不提前退款。JSON 在增长前检查响应上限；I/O 无额外等待队列。已知未发布的资源拒绝可返回 busy，发布结果未知时继续 outcome_unknown/恢复协议，重试原操作身份。此账目不覆盖所有运行态对象、分配器、mmap/OS 缓存或 SDK 内存，不承诺全进程 RSS、系统 I/O 带宽或完整磁盘硬上限。每 authority 对象缓存为 256 MiB / 4096 块；Catalog 始终使用 `metadata.sqlite`；S3 各 collection 共用同库的协调表及其旁的对象缓存。物化索引、备份及多 authority 库场景的总占用仍需整体评估。
+30 秒截止时间覆盖认证/身份查找及 handler；准入超时且未启动 handler 时返回 Busy，已接管工作超时仍 outcome_unknown。按 ID 的 GET 和查询在原请求期限内等待发布，直到交付响应。发布失败时以 `recovery_required` 拒绝数据交付。每个 HTTP 请求保守预留 18 MiB body/输出工作区；构建快照/tail、对象下载和 PUT 副本另计。S3 缓冲及累积解码 tail 额度跟随实际所有者（包括迭代器和已取出的条目），owned task 和已交付传输帧保留原请求准入，取消等待不提前退款。JSON 在增长前检查响应上限；I/O 无额外等待队列。已知未发布的资源拒绝可返回 busy，发布结果未知时继续 outcome_unknown/恢复协议，重试原操作身份。此账目不覆盖所有运行态对象、分配器、mmap/OS 缓存或 SDK 内存，不承诺全进程 RSS、系统 I/O 带宽或完整磁盘硬上限。每 authority 对象缓存为 256 MiB / 4096 块；Catalog 始终使用 `metadata.sqlite`；S3 各 collection 共用同库的协调表及其旁的对象缓存。物化索引、备份及多 authority 库场景的总占用仍需整体评估。
 
 Service archive/root 清理是明确的离线操作，不提供删除运行根的接口。系统崩溃、文件系统崩溃、断电矩阵尚未验收；原生进程 kill/exit、故障注入与 fsync 调用不能代替。历史回执安全 GC 和已删除集合代次后台回收已有实现；持续运行容量与组合隔离验收、跨主机协调和分布式仍留在后续阶段；可选向量已实现。
 
