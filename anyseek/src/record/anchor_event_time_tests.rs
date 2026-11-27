@@ -510,6 +510,310 @@ async fn event_time_window_requires_all_retrieval_dependencies_at_the_cut() {
 }
 
 #[tokio::test]
+async fn event_time_lexical_reads_bill_real_postings_to_the_shared_meter() {
+    use crate::search::QueryWork;
+
+    let temp = tempfile::tempdir().unwrap();
+    let p = RecordPartition::create(&temp.path().join("records"), config())
+        .await
+        .unwrap();
+    p.write(dated("time", "time", 25, ExpectedVersion::Absent))
+        .await
+        .unwrap();
+    p.write(dated("other", "other", 37, ExpectedVersion::Absent))
+        .await
+        .unwrap();
+    assert_eq!(build(&p).await, 2);
+
+    let search = |work, deadline| {
+        p.probe_event_time_lexical_reads(25..26, "alpha".into(), vec![], deadline, work)
+    };
+    let deadline = native_deadline();
+    search(
+        Arc::new(QueryWork::new(4096, 2048, 16 * 1024 * 1024, deadline)),
+        deadline,
+    )
+    .await
+    .unwrap();
+    let deadline = native_deadline();
+    let work = Arc::new(QueryWork::new(4096, 2048, 16 * 1024 * 1024, deadline));
+    let (window, scored, after_time) = search(work.clone(), deadline).await.unwrap();
+    assert_eq!(window.cut, 2);
+    assert_eq!(hit_ids(&window), ["time"]);
+    assert_eq!(scored.result_count_total, 2); // Lexical candidates are independent of the time window.
+    let remaining = work.remaining_io();
+    let staged = (after_time.0 - remaining.0, after_time.1 - remaining.1);
+    assert!(
+        staged.0 > 0 && staged.1 > 0,
+        "missing physical postings charges: {staged:?}"
+    );
+    let used = (2048 - remaining.0, 16 * 1024 * 1024 - remaining.1);
+
+    for (reads, bytes) in [(used.0 - 1, used.1), (used.0, used.1 - 1)] {
+        let deadline = native_deadline();
+        let work = Arc::new(QueryWork::new(4096, reads, bytes, deadline));
+        let result = search(work, deadline).await;
+        assert!(
+            matches!(&result, Err(RecordError::Rejected(message))
+            if message == "shared query positioned read budget exhausted"),
+            "expected typed rejection with {reads} ranges and {bytes} bytes (full request {used:?}), got {:?}",
+            result.err()
+        );
+    }
+
+    let deadline = native_deadline();
+    let exact = Arc::new(QueryWork::new(4096, used.0, used.1, deadline));
+    let (_, scored, _) = search(exact.clone(), deadline).await.unwrap();
+    assert_eq!(scored.result_count_total, 2);
+    assert_eq!(exact.remaining_io(), (0, 0));
+}
+
+#[tokio::test]
+async fn event_time_lexical_statistics_meter_dictionary_and_physical_revisions_separately() {
+    use crate::search::QueryWork;
+
+    const VISITS: usize = 4096;
+    const RANGES: usize = 2048;
+    const BYTES: usize = 16 * 1024 * 1024;
+    let temp = tempfile::tempdir().unwrap();
+    let filter = FacetFilter::Int {
+        field: "priority".into(),
+        filter: 9..10,
+    };
+    for two_fields in [false, true] {
+        let mut settings = config();
+        settings.schema.push(serde_json::from_value(serde_json::json!({
+            "field":"priority", "field_type":"Int", "store":false, "facet":true, "index_lexical":false
+        })).unwrap());
+        if two_fields {
+            settings.schema.push(
+                serde_json::from_value(serde_json::json!({
+                    "field":"title", "field_type":"Text", "store":false, "index_lexical":true
+                }))
+                .unwrap(),
+            );
+        }
+        let root = temp.path().join(if two_fields {
+            "two-fields"
+        } else {
+            "one-field"
+        });
+        let p = RecordPartition::create(&root, settings).await.unwrap();
+        let request = |operation: &str, id: &str, time, priority, expected| {
+            let mut row = dated(operation, id, time, expected);
+            let body = row.document.as_mut().unwrap();
+            body.insert("priority".into(), serde_json::json!(priority));
+            if two_fields {
+                body.insert("title".into(), "alpha".into());
+            }
+            row
+        };
+        p.write(request(
+            "qualified",
+            "qualified",
+            25,
+            9,
+            ExpectedVersion::Absent,
+        ))
+        .await
+        .unwrap();
+        for n in 0..11 {
+            let id = format!("rejected-{n}");
+            p.write(request(
+                &id,
+                &id,
+                36,
+                if n == 0 && two_fields { 9 } else { 1 },
+                ExpectedVersion::Absent,
+            ))
+            .await
+            .unwrap();
+        }
+        assert_eq!(build(&p).await, 12);
+        if two_fields {
+            // The retired revision would pass the facet, and its postings
+            // remain in the frozen package while the update lives in the tail.
+            p.write(request(
+                "update",
+                "rejected-0",
+                36,
+                1,
+                ExpectedVersion::Match(1),
+            ))
+            .await
+            .unwrap();
+        }
+
+        let ordinary = p
+            .search(
+                "alpha".into(),
+                None,
+                SearchMode::Lexical,
+                vec![filter.clone()],
+                1,
+            )
+            .await
+            .unwrap();
+        assert_eq!(ordinary.hits.len(), 1);
+        assert_eq!(ordinary.hits[0].record.record_id, "qualified");
+        let search = |work, deadline| {
+            p.probe_event_time_lexical_reads(
+                25..26,
+                "alpha".into(),
+                vec![filter.clone()],
+                deadline,
+                work,
+            )
+        };
+        let deadline = native_deadline();
+        let work = Arc::new(QueryWork::new(VISITS, RANGES, BYTES, deadline));
+        let (window, scored, after_time) = search(work.clone(), deadline).await.unwrap();
+        assert_eq!(hit_ids(&window), ["qualified"]);
+        assert_eq!(scored.result_count_total, 1);
+        assert_eq!(scored.results[0].score, ordinary.hits[0].score);
+        let usage = work
+            .take_lexical_statistics()
+            .expect("real scorer used corpus statistics");
+        if two_fields {
+            assert!(
+                usage.postings >= 24,
+                "two fields, twelve frozen revisions: {usage:?}"
+            );
+            assert!(
+                usage.ranges >= 2 && usage.bytes > 0,
+                "missing postings ranges: {usage:?}"
+            );
+        } else {
+            assert_eq!(
+                usage.postings, 0,
+                "the dictionary DF shortcut must not visit postings"
+            );
+        }
+        let total = VISITS - work.remaining();
+        eprintln!("two_fields={two_fields} stats={usage:?}, total_logical={total}");
+        // The time channel would have returned a row. A budget which cannot
+        // finish statistics must fail the entire native request.
+        assert!(after_time.0 < RANGES && usage.visits > 0);
+        let deadline = native_deadline();
+        let before_statistics = VISITS - usage.initial_visits;
+        let short = Arc::new(QueryWork::new(
+            before_statistics + usage.visits - 1,
+            RANGES,
+            BYTES,
+            deadline,
+        ));
+        assert!(
+            matches!(search(short.clone(), deadline).await, Err(RecordError::Rejected(message))
+            if message == "shared query work budget exhausted")
+        );
+        assert!(
+            short.take_lexical_statistics().is_none(),
+            "the low budget reached beyond statistics"
+        );
+        if two_fields {
+            let ranges = RANGES - usage.initial_ranges + usage.ranges;
+            let bytes = BYTES - usage.initial_bytes + usage.bytes;
+            for (ranges, bytes) in [(ranges - 1, BYTES), (RANGES, bytes - 1)] {
+                let deadline = native_deadline();
+                let short = Arc::new(QueryWork::new(VISITS, ranges, bytes, deadline));
+                assert!(matches!(search(short.clone(), deadline).await, Err(RecordError::Rejected(message))
+                    if message == "shared query positioned read budget exhausted"));
+                assert!(short.take_lexical_statistics().is_none());
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn event_time_lexical_cut_refuses_legacy_identity_fallback() {
+    use crate::search::QueryWork;
+
+    let temp = tempfile::tempdir().unwrap();
+    let p = RecordPartition::create(&temp.path().join("records"), config())
+        .await
+        .unwrap();
+    p.write(dated("time", "time", 25, ExpectedVersion::Absent))
+        .await
+        .unwrap();
+    build(&p).await;
+    let components = p.inner.lock().await.index.components().await;
+    let mut changed = None;
+    for component in components {
+        let mut shard = component.write().await;
+        let active = shard.active.as_mut().unwrap();
+        if active.keys.is_empty() {
+            continue;
+        }
+        active.keys.push("unpaired".into());
+        active.revisions.push((1, 1));
+        changed = Some(component.clone());
+        break;
+    }
+    let component = changed.expect("checkpoint has a nonempty frozen component");
+    // Correct cursors and an absent query term still cannot prove this pair.
+    let deadline = native_deadline();
+    let work = Arc::new(QueryWork::new(4096, 2048, 16 * 1024 * 1024, deadline));
+    let result = p
+        .probe_event_time_lexical_reads(25..26, "absent".into(), vec![], deadline, work)
+        .await;
+    {
+        let mut shard = component.write().await;
+        let active = shard.active.as_mut().unwrap();
+        active.keys.pop();
+        active.revisions.pop();
+    }
+    assert!(matches!(result, Err(RecordError::Busy)));
+    let deadline = native_deadline();
+    let work = Arc::new(QueryWork::new(4096, 2048, 16 * 1024 * 1024, deadline));
+    let (window, scored, _) = p
+        .probe_event_time_lexical_reads(25..26, "absent".into(), vec![], deadline, work)
+        .await
+        .unwrap();
+    assert_eq!(hit_ids(&window), ["time"]);
+    assert!(scored.results.is_empty());
+}
+
+#[tokio::test]
+async fn event_time_lexical_worker_keeps_admission_until_cutoff_is_observed() {
+    use crate::search::QueryWork;
+
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("records");
+    let p = RecordPartition::create(&root, config()).await.unwrap();
+    p.write(dated("time", "time", 25, ExpectedVersion::Absent))
+        .await
+        .unwrap();
+    build(&p).await;
+
+    let available = p.admission.available_permits();
+    let pause = root.join(".test-event-time-lexical-worker-pause");
+    let entered = root.join(".test-event-time-lexical-worker-pause-entered");
+    std::fs::write(&pause, b"hold").unwrap();
+    let owner = p.clone();
+    let deadline = NativeDeadline::now() + std::time::Duration::from_secs(2);
+    let work = Arc::new(QueryWork::new(4096, 2048, 16 * 1024 * 1024, deadline));
+    let worker_work = work.clone();
+    let waiting = tokio::spawn(async move {
+        owner
+            .probe_event_time_lexical_reads(25..26, "alpha".into(), vec![], deadline, worker_work)
+            .await
+    });
+    wait_file(&entered).await;
+    let after_time = work.remaining_io();
+    assert!(matches!(waiting.await.unwrap(), Err(RecordError::Busy)));
+    assert_eq!(p.admission.available_permits(), available - 1);
+    std::fs::remove_file(pause).unwrap();
+    tokio::time::timeout(DEADLINE, async {
+        while p.admission.available_permits() != available {
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(work.remaining_io(), after_time);
+}
+
+#[tokio::test]
 async fn event_time_window_refuses_replaced_publication_at_same_sequence() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("records");

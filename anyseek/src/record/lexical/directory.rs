@@ -3,6 +3,7 @@
 use crate::{
     record::{RecordError, storage},
     resources,
+    search::QueryWork,
     storage::build_budget::File,
 };
 use stable_deref_trait::StableDeref;
@@ -450,13 +451,21 @@ impl FileHandle for ReadHandle {
         if range.is_empty() {
             return Ok(OwnedBytes::empty());
         }
+        let metered = QueryWork::check_read(range.len())?;
         let current = resources::Scope::current();
         let memory = self.reserve(range.len() as u64, current.as_ref())?;
         let mut bytes = Vec::new();
         bytes.try_reserve_exact(range.len()).map_err(io::Error::other)?;
         bytes.resize(range.len(), 0);
         let mut read = || self.file.read_exact_at(range.start as u64, &mut bytes);
-        match current.as_ref().or(self.budget.scope.as_ref()) {
+        let scope = current.as_ref().or(self.budget.scope.as_ref());
+        match scope {
+            // A request with a deadline cannot enter the native maintenance
+            // wait queue. The positioned read takes immediate I/O admission.
+            _ if metered => scope
+                .cloned()
+                .unwrap_or_else(|| resources::io_scope(resources::Lane::Foreground))
+                .run_sync(read),
             // Cancelling the writer must leave already published readers usable.
             Some(scope) if self.writer => scope.native_file_io(&self.budget.cancelled, read),
             Some(scope) => scope.native_file_io(&AtomicBool::new(false), read),
@@ -755,6 +764,38 @@ mod tests {
         assert_eq!(tail.as_slice(), b"ef");
         drop(tail);
         assert!(scope.bytes(2048 * 1024 * 1024).is_ok());
+    }
+
+    #[test]
+    fn metered_range_refuses_saturated_io_without_entering_the_native_wait_queue() {
+        use std::{sync::mpsc, time::Duration};
+        use tokio::time::Instant;
+
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("postings"), b"abcdefgh").unwrap();
+        let scope = Arc::new(resources::Governor::default())
+            .admit("metered-read".into(), resources::Lane::Background, 0)
+            .unwrap();
+        let directory = scope
+            .clone()
+            .run_sync(|| BudgetDirectory::open_selected(root.path(), 8))
+            .unwrap();
+        let handle = directory.get_file_handle(Path::new("postings")).unwrap();
+        let held = scope.io().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let work = Arc::new(QueryWork::new(1, 1, 4, deadline));
+        let worker_work = work.clone();
+        let (done, result) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let read = scope.run_sync(|| worker_work.with_reads(|| handle.read_bytes(2..6)));
+            done.send(read).unwrap();
+        });
+        let actual = result.recv_timeout(Duration::from_secs(3));
+        drop(held);
+        worker.join().unwrap();
+        let error = actual.unwrap().unwrap_err();
+        assert_eq!(super::super::native_io_error(error), RecordError::Busy);
+        assert_eq!(work.remaining_io(), (1, 4));
     }
 
     #[test]

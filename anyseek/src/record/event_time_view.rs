@@ -523,6 +523,75 @@ impl RecordPartition {
         Ok((window, ids, work_limit - work.remaining()))
     }
 
+    // Exercise real native postings at the common cut without exposing the
+    // lexical scorer before its logical work has a complete budget.
+    #[cfg(test)]
+    pub(super) async fn probe_event_time_lexical_reads(
+        &self,
+        window: Range<i64>,
+        text: String,
+        mut facets: Vec<FacetFilter>,
+        deadline: Deadline,
+        work: Arc<QueryWork>,
+    ) -> Result<(Window, crate::search::ResultObject, (usize, usize)), RecordError> {
+        let (view, output) = self
+            .capture_and_read(
+                window,
+                1,
+                IndexDependencies::LexicalWithVectorMetadata,
+                deadline,
+                Selection {
+                    facets: facets.clone(),
+                    ..Selection::default()
+                },
+                Some(work.clone()),
+            )
+            .await
+            .map_err(EventTimeError::record_error)?;
+        let after_time = work.remaining_io();
+        let runtime = tokio::runtime::Handle::current();
+        let worker = crate::resources::spawn_blocking(move || {
+            query::blocking_pause(&view.root, ".test-event-time-lexical-worker-pause")?;
+            facets.push(temporal::expiry_filter(view.evaluation));
+            let scored = work.with_reads(|| {
+                runtime.block_on(async {
+                    timeout_at(
+                        deadline,
+                        lexical::runtime_query::search(
+                            &view.retrieval.as_ref().unwrap().index,
+                            text,
+                            None,
+                            SearchMode::Lexical,
+                            QueryType::Union,
+                            0,
+                            1,
+                            ResultType::TopkCount,
+                            vec![],
+                            facets,
+                            vec![],
+                            lexical::Cut {
+                                sequence: view.cut,
+                                evaluation_time_ms: view.evaluation,
+                            },
+                        ),
+                    )
+                    .await
+                    .map_err(|_| RecordError::Busy)?
+                })
+            })?;
+            Ok::<_, RecordError>((view, scored))
+        });
+        let (view, scored) = timeout_at(deadline, worker)
+            .await
+            .map_err(|_| RecordError::Busy)?
+            .map_err(storage)??;
+        let window = self
+            .deliver_window(view, output, deadline, None)
+            .await
+            .map_err(EventTimeError::record_error)?;
+        Ok((window, scored, after_time))
+    }
+
     async fn read_vector_candidates(
         &self,
         view: View,

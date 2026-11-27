@@ -1,6 +1,7 @@
 //! BM25F/Proximity arithmetic over native postings and the selected active corpus.
 use super::*;
 use crate::index::{DOCUMENT_LENGTH_COMPRESSION, FieldLengthNormalization, int_to_byte4};
+use crate::search::QueryWork;
 use tantivy::postings::Postings;
 
 fn decoded(length: u64) -> f32 {
@@ -45,6 +46,9 @@ impl<'a> QueryStatistics<'a> {
         field_count: usize,
         normalization: FieldLengthNormalization,
     ) -> Result<Self, RecordError> {
+        let work = QueryWork::current();
+        #[cfg(test)]
+        let before = work.as_ref().map(|work| (work.remaining(), work.remaining_io()));
         // Preserve accumulation order independently of Tantivy's execution order.
         let terms = groups
             .iter()
@@ -58,6 +62,9 @@ impl<'a> QueryStatistics<'a> {
         let mut totals = vec![FieldLengths::default(); field_count];
         let population: usize = corpus.iter().map(|v| v.live.len()).sum();
         for view in corpus {
+            if let Some(work) = &work {
+                work.charge(field_count)?;
+            }
             let fields = match &view.live {
                 LiveSelection::Published(live) => &live.fields,
                 LiveSelection::Ordinals(live) if live.len() == view.snapshot.identities.len() => {
@@ -65,6 +72,9 @@ impl<'a> QueryStatistics<'a> {
                 }
                 LiveSelection::Ordinals(live) => {
                     for &ordinal in live {
+                        if let Some(work) = &work {
+                            work.charge(field_count)?;
+                        }
                         FieldLengths::add_document(&mut totals, view.snapshot.lengths_for(ordinal));
                     }
                     continue;
@@ -95,6 +105,9 @@ impl<'a> QueryStatistics<'a> {
         }
         let mut idfs = Vec::new();
         for word in &terms {
+            if let Some(work) = &work {
+                work.charge(1)?;
+            }
             // DF counts each active stable revision once across all fields.
             let mut df = 0usize;
             for view in corpus {
@@ -105,21 +118,31 @@ impl<'a> QueryStatistics<'a> {
                 {
                     let term = Term::from_field_text(*field, word);
                     for segment in view.snapshot.searcher.segment_readers() {
+                        if let Some(work) = &work {
+                            work.charge(1)?;
+                        }
                         let inverted = segment.inverted_index(*field).map_err(native_search_error)?;
                         if let Some(info) = inverted.get_term_info(&term).map_err(native_io_error)? {
                             df += info.doc_freq as usize;
                         }
+                    }
+                    if let Some(work) = &work {
+                        work.charge(view.snapshot.overlay.len())?;
                     }
                     df += view.snapshot.overlay.iter().filter(|(_, row)| {
                         row.postings[0].contains_key(word.as_str())
                     }).count();
                     continue;
                 }
-                df += view.document_frequency(word)?;
+                df += view.document_frequency(word, work.as_deref())?;
             }
             let n = population as f32;
             let df = df as f32;
             idfs.push((((n - df + 0.5) / (df + 0.5)) + 1.0).ln());
+        }
+        #[cfg(test)]
+        if let (Some(work), Some((visits, io))) = (&work, before) {
+            work.record_lexical_statistics(visits, io);
         }
         Ok(Self { terms, slots, averages, idfs })
     }
@@ -140,18 +163,26 @@ pub(super) fn validate_bounds(
 }
 
 impl ActiveView<'_> {
-    fn document_frequency(&self, word: &str) -> Result<usize, RecordError> {
+    fn document_frequency(&self, word: &str, work: Option<&QueryWork>) -> Result<usize, RecordError> {
         let mut frequency = 0;
         for (segment_id, segment) in self.snapshot.searcher.segment_readers().iter().enumerate() {
             let mut postings = Vec::with_capacity(self.snapshot.fields.len());
             for &field in self.snapshot.fields.iter() {
-                let inverted = segment.inverted_index(field).map_err(native_search_error)?;
-                if let Some(posting) = inverted.read_postings(
-                    &Term::from_field_text(field, word),
-                    IndexRecordOption::Basic,
-                ).map_err(native_io_error)? {
-                    postings.push(posting);
+                if let Some(work) = work {
+                    work.charge(1)?;
                 }
+                let inverted = segment.inverted_index(field).map_err(native_search_error)?;
+                let term = Term::from_field_text(field, word);
+                let Some(info) = inverted.get_term_info(&term).map_err(native_io_error)? else {
+                    continue;
+                };
+                // Charge every physical posting before decoding, including
+                // retired revisions and duplicate hits in different fields.
+                if let Some(work) = work {
+                    work.charge_statistics_postings(info.doc_freq as usize)?;
+                }
+                postings.push(inverted.read_postings_from_terminfo(&info, IndexRecordOption::Basic)
+                    .map_err(native_io_error)?);
             }
             let addresses = &self.snapshot.addresses[segment_id];
             // A native ordinal belongs to exactly one physical document.
@@ -159,6 +190,9 @@ impl ActiveView<'_> {
             // proportional to the document frequency.
             if let [posting] = postings.as_mut_slice() {
                 while posting.doc() != TERMINATED {
+                    if let Some(work) = work {
+                        work.charge(0)?;
+                    }
                     frequency += usize::from(self.live.contains(&addresses[posting.doc() as usize]));
                     posting.advance();
                 }
@@ -170,6 +204,9 @@ impl ActiveView<'_> {
                 .map(|(slot, posting)| Reverse((posting.doc(), slot))).collect::<Vec<_>>());
             let mut previous = TERMINATED;
             while let Some(Reverse((doc, slot))) = cursors.pop() {
+                if let Some(work) = work {
+                    work.charge(0)?;
+                }
                 if doc != previous {
                     frequency += usize::from(self.live.contains(&addresses[doc as usize]));
                     previous = doc;
@@ -179,6 +216,9 @@ impl ActiveView<'_> {
                     cursors.push(Reverse((next, slot)));
                 }
             }
+        }
+        if let Some(work) = work {
+            work.charge(self.snapshot.overlay.len() * self.snapshot.fields.len())?;
         }
         frequency += self.snapshot.overlay.iter().filter(|(ordinal, row)| {
             self.live.contains(ordinal) && row.postings.iter().any(|field| field.contains_key(word))
