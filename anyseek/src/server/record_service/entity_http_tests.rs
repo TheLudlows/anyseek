@@ -1,5 +1,8 @@
 use super::{
-    super::tests::{master_headers, namespace_api, namespace_response},
+    super::{
+        EVENT_TIME_CHECKPOINT_PATH,
+        tests::{master_headers, namespace_api, namespace_response},
+    },
     *,
 };
 use http_body::Body as _;
@@ -58,10 +61,9 @@ async fn replace(app: &Router, tenant: &str, previous: u64, records: Value) {
 }
 
 fn graph(neighbor: &str, expiry: Option<u64>) -> Value {
-    let mut target =
-        json!({"record_id":"target","document":{"body":"private source","entity_ids":[neighbor]}});
+    let mut target = json!({"record_id":"target","temporal":{"event_time_ms":25},"document":{"body":"private source","entity_ids":[neighbor]}});
     if let Some(expiry) = expiry {
-        target["temporal"] = json!({"expire_at_ms":expiry});
+        target["temporal"]["expire_at_ms"] = json!(expiry);
     }
     json!([
         {"record_id":"seed","document":{"body":"private source","entity_ids":["app:A"]}},
@@ -72,7 +74,7 @@ fn graph(neighbor: &str, expiry: Option<u64>) -> Value {
     ])
 }
 
-async fn build(app: &Router, tenant: &str) {
+async fn build(app: &Router, tenant: &str, checkpoint: &str) {
     let deadline = Instant::now() + WAIT;
     loop {
         let response = app
@@ -80,7 +82,7 @@ async fn build(app: &Router, tenant: &str) {
             .oneshot(
                 axum::http::Request::builder()
                     .method("POST")
-                    .uri(CHECKPOINT_PATH)
+                    .uri(checkpoint)
                     .header("apikey", master_headers()["apikey"].clone())
                     .body(Body::from(
                         json!({"tenant_id":tenant,"collection_id":"graph"}).to_string(),
@@ -204,10 +206,26 @@ async fn http_entity_round_trip_is_scoped_opt_in_and_bounded() {
         let (status, unavailable) = decode(query(&app, tenant, "out", "app:A", 3).await).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(unavailable["code"], "rejected");
-        build(&app, tenant).await;
+        build(&app, tenant, CHECKPOINT_PATH).await;
         path(&app, tenant, "out", "app:A", neighbor).await;
         path(&app, tenant, "in", neighbor, "app:A").await;
     }
+    let stale = query(&app, "tenant-a", "out", "app:A", 3).await;
+    build(&app, "tenant-a", EVENT_TIME_CHECKPOINT_PATH).await;
+    closes_without_data(stale, "same-sequence root change").await;
+    path(&app, "tenant-a", "out", "app:A", "app:B").await;
+    let (status, window) = namespace_api(
+        &app,
+        "POST",
+        "/api/v1/index/graph/event-time/query",
+        "tenant-a",
+        Some(json!({"temporal":{"event":{"from_ms":24,"to_ms":26}},"length":3})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{window}");
+    assert_eq!(window["visible_seq"], 1);
+    assert_eq!(window["hits"].as_array().unwrap().len(), 1);
+    assert_eq!(window["hits"][0]["record_id"], "target");
     let (status, denied) = decode(query(&app, "tenant-other", "out", "app:A", 3).await).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
     assert_eq!(denied["code"], "unauthorized");
@@ -245,7 +263,7 @@ async fn http_entity_body_rechecks_withdrawal_generation_and_ttl() {
 
     create(&app, "tenant", "create").await;
     replace(&app, "tenant", 0, graph("app:B", None)).await;
-    build(&app, "tenant").await;
+    build(&app, "tenant", CHECKPOINT_PATH).await;
 
     let (reached, release) = service.cold.test.entity_handoff.pause_next();
     let client = app.clone();
@@ -292,7 +310,7 @@ async fn http_entity_body_rechecks_withdrawal_generation_and_ttl() {
     let (clock, now) = crate::record::tests::test_clock(&record).await;
     let expiry = now + 120_000;
     replace(&app, "tenant", 0, graph("app:B", Some(expiry))).await;
-    build(&app, "tenant").await;
+    build(&app, "tenant", CHECKPOINT_PATH).await;
     path(&app, "tenant", "out", "app:A", "app:B").await;
     let expiring = query(&app, "tenant", "out", "app:A", 3).await;
     clock.set(expiry);

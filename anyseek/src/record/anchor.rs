@@ -276,7 +276,10 @@ impl Reference {
         prior: Closure, limits: event_time::BuildLimits) -> Result<Self, RecordError> {
         let encoded = checkpoint_codec::StateEncoding::capture(state).await?;
         Self::prepare_encoded(root,config,&encoded,prior,None,None,true,None,None,None,
-            Some(state_rows::ProjectionBuild { event_time: Some(limits), entity: false })).await
+            Some(state_rows::ProjectionBuild {
+                event_time: Some(limits),
+                entity: state.records.entity_base().is_some(),
+            })).await
     }
     pub(super) async fn prepare_entity(root: &Path, config: &RecordConfig, state: &State,
         prior: Closure) -> Result<Self, RecordError> {
