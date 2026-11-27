@@ -8,12 +8,12 @@
 
 - 通过实际 standalone HTTP `/ingest` 分批写入独立新库，每批 64 项。热集合测试点为 100,000、1,000,000、3,000,000 条，另有 4,096 条活跃集合与 64 条冷集合。每项核对 `committed` 回执和 Record ID，独立等词法及向量水位追平。脚本每次生成一批，按批记录内容哈希。
 - 合成负载版本 `anyseek-229-v1`，正文字节数以 128、128、256、512 循环，32 个词法主题，8 个整型过滤桶。向量固定为 128 维，Top-K 为 16，过滤使用整型半开区间。读者执行点读、全文、向量和过滤后的混合检索，轮换请求顺序。
-- 单集合热读先预热，再以一个闭环读者测量。随后运行单写者，再运行八读者（热集合六个、第二集合两个）、一个热集合写者和一个维护客户端。写者依次提交两成员组、替换为一个成员、清空，再执行单项异步写和独立删除。维护发送两个真实 PATCH 索引及 checkpoint 请求。基线 PATCH 没有显式 Compact 参数。报告记录实际 `state_image`、payload 压实及查询时间相交情况。显式 Compact 和未观察到的物理重写另列待验。
+- 创建第二个活跃集合和冷集合前，先对热集合预热，再以一个闭环读者测量。随后运行单写者，再运行八读者（热集合六个、第二集合两个）、一个热集合写者和一个维护客户端。写者依次提交两成员组、替换为一个成员、清空，再执行单项异步写和独立删除。维护发送两个真实 PATCH 索引及 checkpoint 请求。基线 PATCH 没有显式 Compact 参数。报告记录实际 `state_image`、payload 压实及查询时间相交情况。显式 Compact 和未观察到的物理重写另列待验。
 - Release 使用仓库默认特性、原生 CPU 配置和相同两颗服务 CPU，每个引擎版本单独编译。执行器记录 cgroup、内存、设备、CPU 序号、源码和二进制哈希。比较同机、同设备、相同 CPU 分配及数据集的结果。各版本各规模用全新数据目录并保留失败报告。
 
 ## 运行
 
-先准备固定基线 checkout，以下命令在基准工具所在仓库根执行。使用绝对路径设置 `BASE_CHECKOUT`、`LOCAL_NVME`、`BACKUP_DEVICE`。前者应为已签出精确基线的独立 checkout。后两者应是本轮专用挂载路径。
+运行需要 Linux、Python 3.11 或更新版本，以及 util-linux 的 `findmnt` 和 `lsblk`。以下命令在基准工具所在仓库根执行。使用绝对路径设置 `BASE_CHECKOUT`、`LOCAL_NVME`、`BACKUP_DEVICE`。前者是固定基线的独立 checkout，后两者为本轮专用挂载路径。
 
 ```bash
 git -C "$BASE_CHECKOUT" checkout --detach 74d48d92db27d4fa155ce38004ac079f3bf92835
@@ -36,13 +36,28 @@ done
 
 `report.json` 的成功请求 p99 使用最近秩。延迟包括 HTTP 往返和读取整个响应，排除生成请求及 JSON 响应解码。吞吐含生成负载、结果检验、记录及等待水位。Busy 和其它失败分别统计，未知结果保留原样。进程内存用 `VmHWM`，数据根、临时目录物理分配量每秒采样。采样峰值不覆盖两个采样点间的瞬时用量。重开是进程冷启动，操作系统页缓存保留。测设备冷读需专用机器另行记录缓存处理和操作。
 
+以集合和操作为单位复核混合负载时，将 `trace` 指向本次运行的 `requests.jsonl.gz`。
+
+```bash
+gzip -dc "$trace" | jq -c 'select(.phase == "mixed" and
+  (.operation | IN("point", "lexical", "vector", "hybrid_filtered"))) |
+  . + {collection: (.path | split("/")[4])}' |
+jq -s 'group_by([.collection, .operation]) | map(
+    (map(select(.success).http_ms) | sort) as $latency |
+    {collection: .[0].collection, operation: .[0].operation, requests: length,
+     busy: map(select(.busy)) | length,
+     other_failures: map(select((.success or .busy) | not)) | length,
+     p99_ms: (if ($latency | length) == 0 then null
+              else $latency[(($latency | length) * 0.99 | ceil) - 1] end)})'
+```
+
 ## 恢复与故障矩阵
 
 | 用例 | 执行与核对 |
 | --- | --- |
 | 同版本重开 | 写入、确认并核对 C 后 SIGKILL 本次服务。用同一二进制、同一根重开，核对点读版本、组 tombstone、原 B/C 回执及原 B 重试不会复活。冷集合做首次点读。 |
 | 独立备份 | 在 A 阶段调用完整服务备份并复制已发布归档，逐文件验证 SHA-256。只把归档交给新控制根，使用原生 `service-restores` 恢复，并启动返回的新根。核对 A 及原 A 回执，B/C 均缺失。在另一份复制件翻动一个 payload 字节，恢复必须失败且保留原备份。 |
-| PITR | `pitr-fixture.json` 固定 A 基础备份、B 原子写入两条轮次 Record、C 撤回和可查账见证。真实恢复应从 A 加连续的认证归档重放到 B。检查 B 双成员、组版本 1、B 原回执、C 见证与回执缺失，并与 B 时点 Origence 配套 `directory_sha256` 比对。归档窗口边缘及断档使用集成配置验证。当前 HTTP restore 只接受 backup ID，配置归档窗口、目标切点及无断档重放依赖 #224。 |
+| PITR | `pitr-fixture.json` 固定 A 基础备份、B 原子写入两条轮次 Record、C 撤回和可查账见证。真实恢复应从 A 加连续的认证归档重放到 B。检查 B 双成员、组版本 1、B 原回执、C 见证与回执缺失，并与 B 时点 Origence 配套 `directory_sha256` 比对。用集成后的权威回执查询验证 C 组撤回回执缺失。基线 HTTP 回执接口只提供普通 Record 回执。归档窗口边缘及断档使用集成配置验证。当前 HTTP restore 只接受 backup ID，配置归档窗口、目标切点及无断档重放依赖 #224。 |
 | 精确进程故障 | 复用下列真实 HTTP 故障、Release panic 探针以及已存在的组 WAL、checkpoint 选择、回收和损坏用例。整个矩阵只操作新库。 |
 
 完整服务快照的 1 GiB preflight 为 Catalog 的序列化字节数，加保留的集合及备份 `checkpoint_bytes`，每项另加 4096 字节。估算发生在创建 staging 之前。测量分别保存预估、限额、HTTP 结果、归档实际字节和查询容量。固定基线未输出 preflight 精确字节，报告留空。支持诊断输出的构建通过 `service snapshot preflight payload_bytes=… limit_bytes=…` 记录实际估算。归档落盘大小是独立值。 [基线实现](https://github.com/TheLudlows/anyseek/blob/74d48d92db27d4fa155ce38004ac079f3bf92835/anyseek/src/catalog/service_snapshot.rs#L339-L385)
@@ -53,6 +68,7 @@ CARGO_TARGET_DIR=target/fault-release cargo +1.98.0 build --locked --release -p 
   --features fault-injection --bin anyseek_server --example runtime_panic_probe
 python3 scripts/record_service_smoke.py --server target/fault-release/release/anyseek_server --faults
 python3 scripts/record_shutdown_smoke.py --server target/fault-release/release/anyseek_server
+python3 scripts/record_reclamation_smoke.py --server target/fault-release/release/anyseek_server
 python3 scripts/release_panic_smoke.py --probe target/fault-release/release/examples/runtime_panic_probe
 for case in \
   record::group_write::tests::group_wal_process_exit_recovers_single_decision \
@@ -76,8 +92,15 @@ python3 benchmarks/single-node/origence_pair.py --origence-repo "$ORIGENCE_CHECK
 
 ## 已得结果
 
-结果见 [固定基线冒烟](results/overlay-report.json)、[PITR 夹具](results/pitr-fixture.json) 和 [Origence 固定组合](results/origence-pinned.json)。Linux x86-64 overlay，16 GiB cgroup 上限及 4 vCPU 配额，服务固定 CPU 0、1。未发现符合合约的本地独占 NVMe。只用实际 API 写入 512 + 512 + 64 条，适用范围为冒烟。未跑 100,000、1,000,000、3,000,000 三档正式测试，也未验证设备冷读、硬断电或归档窗口重放。
+共享 Linux x86-64 overlay，16 GiB cgroup 上限、4 vCPU 配额，服务固定 CPU 0、1。[专用档检查](results/media-guard.txt) 拒绝该存储。[固定 Release 冒烟](results/overlay-report.json) 通过真实 API 确认 512 + 512 + 64 条。Release 二进制 SHA-256 为 `b09aa6a5ef012a3be8221c8ed9d6546c3843e0995c5b5eeb7af205d6c0bdebfc`。待在合约设备上执行 100,000、1,000,000、3,000,000 三档，验证设备冷读、硬断电和归档窗口重放。
 
-同版本重开验证 C。备份 A 返回 200，并从独立目录恢复。损坏复制件返回 503 `storage_error`。混合负载的 503 `recovery_required` 与 429 Busy 分开记录。该结果用于选择后续追踪点，样本规模不足以给出部署阈值。
+| 检查 | 共享执行器观察 |
+| --- | --- |
+| 查询和维护 | 热集合 checkpoint 与 128 次查询重叠，随后运行的第二个集合 checkpoint 无重叠。混合负载共 128 次读，其中 5 次点读返回 503 `recovery_required`，13 次搜索返回 429 Busy。见[逐请求记录](results/overlay-requests.jsonl.gz)。 |
+| 同版本重开 | SIGKILL 后进程冷启动，在 782 ms 内验证 C。 |
+| 独立备份 | 备份 A 返回 200。从复制的归档恢复到新根并验证 A 共 4,234 ms。归档与源库仍在同一底层文件系统。损坏复制件返回 503 `storage_error`，原因是 `unsupported payload segment`。 |
+| 快照预算 | 固定二进制发布了 17,454,518 字节归档。[独立故障／诊断 Release 构建](results/preflight-report.json) 实测 preflight 为 3,496,639 字节，限额 1,073,741,824 字节。返回 200，归档实际为 17,454,510 字节。本轮未触及 preflight 拒绝或测量大规模查询容量。 |
+| PITR | [A/B/C 夹具](results/pitr-fixture.json) 保存 A 的归档、B 两个已核对成员及原回执，还有 C 的撤回与操作见证。归档重放和 Origence 配套切点待集成。 |
+| 精确故障 | 完整 HTTP 故障套件、SIGTERM 和回收冒烟、三个 Release SIGABRT 探针和四项库级定点用例均通过。见[命令输出](results/fault-cases.txt)。 |
 
-Origence `d34804c` 独立启动并保存两轮，停机配套复核的 `directory_sha256` 一致，恢复后 HTTP 列表、回读、撤回通过。普通知识发布先返回 200，随后 Worker 记录 `VERSION_OR_IDEMPOTENCY_CONFLICT`，服务以 1 退出并记录 `incompatible AnySeek retrieval collection`。实际 AnySeek Info 提供 `max_candidates` 和 `max_journal_bytes`，已移除 `max_records`。普通资产兼容修复另走 Origence 分支。
+[Origence `d34804c` 实测](results/origence-pinned.json) 保存两轮，停机配套恢复前后 `directory_sha256` 一致，恢复后 HTTP 列表、原文回读、撤回通过。普通知识发布先返回 200，随后 Worker 记录 `VERSION_OR_IDEMPOTENCY_CONFLICT`，服务以 1 退出并记录 `incompatible AnySeek retrieval collection`。实际 AnySeek Info 提供 `max_candidates` 和 `max_journal_bytes`，已移除 `max_records`。普通资产兼容修复另走 Origence 分支。

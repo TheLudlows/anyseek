@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Run the paired Origence archive probe against actual, independent local HTTP processes."""
 import argparse
-from pathlib import Path
 import secrets
 import shutil
 import socket
@@ -9,14 +8,24 @@ import subprocess
 import sys
 import time
 import urllib.error
+from pathlib import Path
 
 from measure import file_digest, output_json
 
 
 def probe(args, out):
     sys.path.insert(0, str(args.origence_repo.resolve() / "tools"))
-    from private_archive_smoke import (ANSWER, Host, Model, command, isolated_env, native,
-                                       new_turn, peer, request)
+    from private_archive_smoke import (
+        ANSWER,
+        Host,
+        Model,
+        command,
+        isolated_env,
+        native,
+        new_turn,
+        peer,
+        request,
+    )
 
     binary = str(args.origence_binary.resolve(strict=True))
     anyseek = str(args.anyseek_binary.resolve(strict=True))

@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
 """Measure a synthetic single-node Record workload via a disposable Release HTTP server."""
 import argparse
-from concurrent.futures import ThreadPoolExecutor
 import contextlib
 import gzip
 import hashlib
 import json
 import os
-from pathlib import Path
 import platform
 import re
 import shutil
@@ -16,6 +14,8 @@ import subprocess
 import sys
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from shared_record_http import LocalServer, digest, oid, quantiles
@@ -97,11 +97,11 @@ def mount(path):
 
 
 class Evidence:
-    def __init__(self, out):
+    def __init__(self, out, raw):
         self.out = out
         self.lock = threading.Lock()
         self.samples = {}
-        self.raw = gzip.open(out / "requests.jsonl.gz", "wt", encoding="utf-8")
+        self.raw = raw
         self.origin = time.perf_counter()
 
     def event(self, **entry):
@@ -122,7 +122,7 @@ class Evidence:
                        http_ms=(time.perf_counter() - started) * 1000, status=None,
                        success=False, busy=False, transport_error=str(error)[:400])
             raise
-        status = server.last_status  # populated below from the response on this connection
+        status = server.last_status
         items = response.get("results", []) if isinstance(response, dict) else []
         codes = [item.get("code") for item in items]
         error_code = None
@@ -134,10 +134,12 @@ class Evidence:
         success = status in expected and not busy and (
             not items or all(code in {"applied", "committed"} for code in codes)
         )
-        row = dict(phase=phase, operation=operation, path=path, method=method,
-                   start_s=offset, end_s=time.perf_counter() - self.origin,
-                   http_ms=http_ms, status=status, success=success, busy=busy,
-                   busy_items=busy_items, item_codes=dict((code, codes.count(code)) for code in set(codes)))
+        row = {
+            "phase": phase, "operation": operation, "path": path, "method": method,
+            "start_s": offset, "end_s": time.perf_counter() - self.origin,
+            "http_ms": http_ms, "status": status, "success": success, "busy": busy,
+            "busy_items": busy_items, "item_codes": {code: codes.count(code) for code in set(codes)},
+        }
         if detail or not success:
             row["response"] = response
         self.event(**row)
@@ -327,7 +329,9 @@ def read(evidence, server, phase, collection, count, lane, iterations, barrier=N
             response, attempt = evidence.call(server, phase, name, method, endpoint, body)
             if not attempt["success"]:
                 continue
-            if name == "point" and (response["record_id"], response["version"]) != (f"r{i:09d}", 1):
+            if name == "point" and (response["record_id"], response["version"], response["document"]) != (
+                f"r{i:09d}", 1, document(i)
+            ):
                 raise RuntimeError("point identity/version mismatch")
             if name == "lexical" and not any(
                 hit["record"]["document"]["body"].startswith(f"topic{i % 32:02d} ")
@@ -336,9 +340,9 @@ def read(evidence, server, phase, collection, count, lane, iterations, barrier=N
                 raise RuntimeError("lexical query did not find a known topic")
             if name == "vector" and not response["hits"]:
                 raise RuntimeError("vector query did not find a known indexed vector")
-            if name == "hybrid_filtered" and any(
+            if name == "hybrid_filtered" and (not response["hits"] or any(
                 hit["record"]["document"]["bucket"] != (i // 32) % 8 for hit in response["hits"]
-            ):
+            )):
                 raise RuntimeError("hybrid result escaped its metadata filter")
 
 
@@ -397,11 +401,13 @@ def measure(args, cpu_ids, backup_root, evidence, report, epoch):
     counts = {"hot": target, "peer": min(4096, target), "cold": 64}
     with service(binary, out / "live", out, "load_and_measure", cpu_ids, evidence, report, kill=True) as (server, phase):
         phase[0] = "load"
-        for name, count in counts.items():
-            load(evidence, server, name, count, epoch, loaded)
+        load(evidence, server, "hot", counts["hot"], epoch, loaded)
         phase[0] = "hot_only"
         read(evidence, server, "warmup", "hot", target, 0, 4)
         read(evidence, server, "hot_only", "hot", target, 0, iterations)
+        phase[0] = "load"
+        for name in ("peer", "cold"):
+            load(evidence, server, name, counts[name], epoch, loaded)
         phase[0] = "write_only"
         activity(evidence, server, epoch, iterations, "write_only")
         phase[0] = "mixed"
@@ -510,19 +516,19 @@ def main():
         "pitr": {"status": "not_run"},
 
     }
-    evidence = Evidence(out)
-    try:
-        measure(args, cpus, backup, evidence, report, epoch)
-        report["status"] = "complete"
-    except BaseException as error:
-        report["status"] = "boundary" if any(x.get("boundary") for x in report["load"].values()) else "failed"
-        report["error"] = f"{type(error).__name__}: {error}"
-        raise
-    finally:
-        report["operations"] = evidence.summary()
-        report["maintenance"] = maintenance_evidence(out, evidence)
-        evidence.raw.close()
-        output_json(out / "report.json", report)
+    with gzip.open(out / "requests.jsonl.gz", "wt", encoding="utf-8") as raw:
+        evidence = Evidence(out, raw)
+        try:
+            measure(args, cpus, backup, evidence, report, epoch)
+            report["status"] = "complete"
+        except BaseException as error:
+            report["status"] = "boundary" if any(x.get("boundary") for x in report["load"].values()) else "failed"
+            report["error"] = f"{type(error).__name__}: {error}"
+            raise
+        finally:
+            report["operations"] = evidence.summary()
+            report["maintenance"] = maintenance_evidence(out, evidence)
+            output_json(out / "report.json", report)
 
 
 if __name__ == "__main__":

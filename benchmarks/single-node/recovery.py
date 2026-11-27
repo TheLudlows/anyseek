@@ -1,11 +1,23 @@
 """Snapshot, SIGKILL/reopen and future PITR cut fixtures for the single-node workload."""
-from datetime import datetime, timezone
-from pathlib import Path
 import re
 import shutil
 import time
+from datetime import UTC, datetime
+from pathlib import Path
 
-from measure import API, api, digest, document, file_digest, new_collection, oid, output_json, path_for, replace_group, service
+from measure import (
+    API,
+    api,
+    digest,
+    document,
+    file_digest,
+    new_collection,
+    oid,
+    output_json,
+    path_for,
+    replace_group,
+    service,
+)
 
 COLLECTION = "recovery"
 PATH = path_for(COLLECTION)
@@ -15,7 +27,7 @@ PREFLIGHT = re.compile(r"service snapshot preflight payload_bytes=(\d+) limit_by
 
 
 def utc():
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def copy_verified(source, destination):
