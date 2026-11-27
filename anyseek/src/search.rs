@@ -19,6 +19,22 @@ pub(crate) struct QueryWork {
     reads: AtomicUsize,
     bytes: AtomicUsize,
     deadline: Instant,
+    #[cfg(test)]
+    statistics_postings: AtomicUsize,
+    #[cfg(test)]
+    statistics_usage: std::sync::Mutex<Option<LexicalStatisticsUsage>>,
+}
+
+#[cfg(test)]
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct LexicalStatisticsUsage {
+    pub(crate) initial_visits: usize,
+    pub(crate) initial_ranges: usize,
+    pub(crate) initial_bytes: usize,
+    pub(crate) visits: usize,
+    pub(crate) postings: usize,
+    pub(crate) ranges: usize,
+    pub(crate) bytes: usize,
 }
 
 tokio::task_local! { static QUERY_READS: Arc<QueryWork>; }
@@ -30,6 +46,10 @@ impl QueryWork {
             reads: AtomicUsize::new(reads),
             bytes: AtomicUsize::new(bytes),
             deadline,
+            #[cfg(test)]
+            statistics_postings: AtomicUsize::new(0),
+            #[cfg(test)]
+            statistics_usage: std::sync::Mutex::new(None),
         }
     }
 
@@ -38,25 +58,95 @@ impl QueryWork {
         QUERY_READS.sync_scope(self, work)
     }
 
+    pub(crate) fn current() -> Option<Arc<Self>> {
+        QUERY_READS.try_with(Arc::clone).ok()
+    }
+
+    /// Check a range before allocating its buffer or entering I/O admission.
+    /// The file leaf still charges the range when it starts the positioned read.
+    pub(crate) fn check_read(bytes: usize) -> std::io::Result<bool> {
+        QUERY_READS
+            .try_with(|work| {
+                work.charge(0).map_err(std::io::Error::other)?;
+                if work.reads.load(Ordering::Relaxed) == 0
+                    || work.bytes.load(Ordering::Relaxed) < bytes
+                {
+                    return Err(Self::read_budget_error());
+                }
+                Ok(true)
+            })
+            .unwrap_or(Ok(false))
+    }
+
+    fn read_budget_error() -> std::io::Error {
+        std::io::Error::other(RecordError::Rejected(
+            "shared query positioned read budget exhausted".into(),
+        ))
+    }
+
     pub(crate) fn charge_read(bytes: usize) -> std::io::Result<()> {
-        QUERY_READS.try_with(|work| {
-            work.charge(0).map_err(std::io::Error::other)?;
-            for (counter, amount) in [(&work.reads, 1), (&work.bytes, bytes)] {
-                counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |remaining| remaining.checked_sub(amount))
-                    .map_err(|_| std::io::Error::other(RecordError::Rejected("shared query positioned read budget exhausted".into())))?;
-            }
-            Ok(())
-        }).unwrap_or(Ok(()))
+        QUERY_READS
+            .try_with(|work| {
+                work.charge(0).map_err(std::io::Error::other)?;
+                for (counter, amount) in [(&work.reads, 1), (&work.bytes, bytes)] {
+                    counter
+                        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |remaining| {
+                            remaining.checked_sub(amount)
+                        })
+                        .map_err(|_| Self::read_budget_error())?;
+                }
+                Ok(())
+            })
+            .unwrap_or(Ok(()))
     }
 
     pub(crate) fn charge(&self, visits: usize) -> std::result::Result<(), RecordError> {
         if Instant::now() >= self.deadline {
             return Err(RecordError::Busy);
         }
+        if visits == 0 {
+            return Ok(());
+        }
         self.remaining
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |remaining| remaining.checked_sub(visits))
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |remaining| {
+                remaining.checked_sub(visits)
+            })
             .map_err(|_| RecordError::Rejected("shared query work budget exhausted".into()))?;
         Ok(())
+    }
+
+    pub(crate) fn charge_statistics_postings(
+        &self,
+        postings: usize,
+    ) -> std::result::Result<(), RecordError> {
+        self.charge(postings)?;
+        #[cfg(test)]
+        self.statistics_postings
+            .fetch_add(postings, Ordering::Relaxed);
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn record_lexical_statistics(
+        &self,
+        before_visits: usize,
+        (reads, bytes): (usize, usize),
+    ) {
+        let (after_reads, after_bytes) = self.remaining_io();
+        *self.statistics_usage.lock().unwrap() = Some(LexicalStatisticsUsage {
+            initial_visits: before_visits,
+            initial_ranges: reads,
+            initial_bytes: bytes,
+            visits: before_visits - self.remaining(),
+            postings: self.statistics_postings.swap(0, Ordering::Relaxed),
+            ranges: reads - after_reads,
+            bytes: bytes - after_bytes,
+        });
+    }
+
+    #[cfg(test)]
+    pub(crate) fn take_lexical_statistics(&self) -> Option<LexicalStatisticsUsage> {
+        self.statistics_usage.lock().unwrap().take()
     }
 
     #[cfg(test)]
@@ -66,9 +156,13 @@ impl QueryWork {
 
     #[cfg(test)]
     pub(crate) fn remaining_io(&self) -> (usize, usize) {
-        (self.reads.load(Ordering::Relaxed), self.bytes.load(Ordering::Relaxed))
+        (
+            self.reads.load(Ordering::Relaxed),
+            self.bytes.load(Ordering::Relaxed),
+        )
     }
 }
+
 /// Specifies the default QueryType: The following query types are supported:
 /// - **Union** (OR, disjunction),
 /// - **Intersection** (AND, conjunction),
