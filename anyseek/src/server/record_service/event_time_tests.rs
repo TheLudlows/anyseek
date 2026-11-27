@@ -12,6 +12,19 @@ const QUERY: &str = "/api/v1/index/window/event-time/query";
 const BUILD: &str = "/api/v1/event-time-checkpoints";
 const BATCH: &str = "/api/v1/index/window/batch";
 
+tokio::task_local! { static PUBLICATION_WAIT: Arc<tokio::sync::Notify>; }
+
+pub(super) async fn observe_publication_wait<T>(publication: impl Future<Output = T>) -> T {
+    tokio::pin!(publication);
+    match futures::poll!(&mut publication) {
+        Poll::Ready(result) => result,
+        Poll::Pending => {
+            let _ = PUBLICATION_WAIT.try_with(|reached| reached.notify_one());
+            publication.await
+        }
+    }
+}
+
 async fn open(root: &FsPath) -> Arc<Service> {
     Service::open_http(
         root,
@@ -275,8 +288,7 @@ async fn event_time_vector_stringset_work_counts_tail_and_sealed_tags() {
 async fn event_time_vector_publication_timeout_remains_a_read_error() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join("catalog");
-    let mut service = open(&root).await;
-    Arc::get_mut(&mut service).unwrap().request_timeout = Duration::from_millis(300);
+    let service = open(&root).await;
     let app = router(service.clone());
     create_mixed_collection(&app).await;
     let sdk = local::LocalEngine::from_test_service(service.clone());
@@ -301,22 +313,36 @@ async fn event_time_vector_publication_timeout_remains_a_read_error() {
             .await
     });
     wait_marker(&partition.join(".test-lexical-consumer-started")).await;
-    let (status, error) = decode_response(
-        namespace_response(&app, "POST", MIXED_QUERY, "tenant", Some(mixed_request())).await,
-    )
-    .await;
+
+    let http_wait = Arc::new(tokio::sync::Notify::new());
+    let http_read = PUBLICATION_WAIT.scope(
+        http_wait.clone(),
+        namespace_response(&app, "POST", MIXED_QUERY, "tenant", Some(mixed_request())),
+    );
+    let sdk_wait = Arc::new(tokio::sync::Notify::new());
+    let sdk_read = PUBLICATION_WAIT.scope(
+        sdk_wait.clone(),
+        sdk.query_time_vector("tenant", "window", serde_json::from_value(mixed_request()).unwrap()),
+    );
+    let expire_reads = async {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(http_wait.notified(), sdk_wait.notified());
+        }).await.expect("HTTP and SDK must both reach the publication lock");
+
+        // Setup uses the normal service deadline. Advance only after both
+        // queries are blocked in the actual publication wait.
+        tokio::time::pause();
+        tokio::time::advance(service.request_timeout).await;
+        tokio::time::resume();
+    };
+    let (response, sdk_result, ()) = tokio::join!(http_read, sdk_read, expire_reads);
+    let (status, error) = decode_response(response).await;
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{error}");
     assert_eq!(error["code"], "busy");
     assert!(!error["message"].as_str().unwrap().contains("operation"));
+    assert!(error.get("operation_id").is_none());
     assert!(error.get("hits").is_none());
-    let error = sdk
-        .query_time_vector(
-            "tenant",
-            "window",
-            serde_json::from_value(mixed_request()).unwrap(),
-        )
-        .await
-        .unwrap_err();
+    let error = sdk_result.unwrap_err();
     assert_eq!(error.code(), "busy");
     assert!(!error.to_string().contains("operation"));
     assert!(!writer.is_finished());
