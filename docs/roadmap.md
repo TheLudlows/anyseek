@@ -144,6 +144,7 @@ W5 对照：Windows/default debug、local 新库、相同请求与临时数据�
 | 原生目录 I/O / #203 | [目录隔离实验](../benchmarks/native-io/README.zh-CN.md) | 固定前后版本、真实 atomic write/sync 的诊断负载；支持消除无关目录间的 mutex 等待，不证明端到端吞吐、Busy 或 P99 改善。Windows、release 与代表性持久设备仍需独立验收 |
 | 向量 Segment 所有权 | [前后对照](../benchmarks/vector-segments/README.md) | #111 的结构整理与行为证据，不宣称性能收益 |
 | 单机性能和恢复 / #229 | [复跑入口及证据](../benchmarks/single-node/README.zh-CN.md) | 记录独立 HTTP 冒烟与固定版本恢复。专用 NVMe 全规模与归档切点回放待验。 |
+| 同机在线维护隔离 / #237 | [复跑入口及证据](../benchmarks/maintenance-isolation/README.zh-CN.md) | 小型真实 HTTP 对照，按运行证据确认索引构建、派生缓存压实、回收与邻居读请求重叠。 |
 | 容量及异步对比工具 | [容量探针](../benchmarks/capacity/README.zh-CN.md)、[异步协议](../benchmarks/capacity/ASYNC-PROTOCOL.zh-CN.md) | 证据范围限于固定语料和所测负载 |
 | 文件库存 / #183 | [#184](https://github.com/TheLudlows/anyseek/pull/184)、[存储协议](storage.md#本地-segment-与共同视图) | 私有构建先有界合并、引用感知 GC 再收集库存，保留 1,024 文件上限。历史 4,000 条约 8 KiB 正文的 8 项回归及原故障库续写到 5,000 条不算当前提交重测，也不等于完整容量或真实 S3 验收 |
 
