@@ -40,6 +40,10 @@ An embedded local partition without automatic archival can call `RecordPartition
 
 This entry point returns edge declaration candidates at a fixed cut for authorized embedded callers. A future online query still needs seed and target eligibility and a publication and authorization check at delivery.
 
+New sidecars also store canonical `entity_ids` membership keys in the same ordered tree. A Record can declare up to 32 namespaced IDs. The authenticated inventory carries a membership capability marker. An older sidecar still supplies edges, and member discovery requires an explicit rebuild.
+
+`candidate_paths` on a pinned view discovers anchor members, directed edges, and neighbor members. It checks member claims and their canonical versions by reading the selected Record. A shared visit limit spans all ranges, and one `QueryWork` accounts for logical work, positioned reads, bytes, and the original deadline. The result holds its memory reservation and exposes read-only borrows through `seeds()` and `neighbors()`. This interface supplies native candidates for an already authorized, isolated collection. Live delivery still requires publication, TTL, and authorization checks on the selected paths.
+
 ## Authority and data ownership
 
 In S3 mode, SQLite is the mutable commit coordination authority for Record partitions. It stores head/owner epoch, commit and index watermarks, immutable references, bounded idempotency coordination, dependencies, pins, retirement, and backup/restore coordination. Object storage holds text, original vectors, indexes, and WAL contents. Local Record logs, payloads, and indexes are rebuildable cache, while Catalog and S3 SQLite metadata are durable authority.

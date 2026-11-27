@@ -9,6 +9,10 @@ pub(crate) const MEMBERS: [&str; 3] = [
     "entity-adjacency/primary-keys",
     "entity-adjacency/primary-pages",
 ];
+// A separate certified capability keeps the edge descriptor readable by
+// format-1 readers. Its absence means the member range was never built.
+pub(crate) const MEMBER_CAPABILITY: &str = "entity-membership";
+const MEMBER_MAGIC: &[u8; 16] = b"ANYSEEK-EMBR-001";
 const MAX_DESCRIPTOR: usize = 4096;
 const MAX_KEY: usize = 1800;
 const MAX_KEYS: usize = 8192;
@@ -77,9 +81,27 @@ fn prefix(direction: EntityDirection, anchor: &str, kind: &str) -> String {
     key
 }
 
-pub(crate) struct Range {
+pub(crate) struct Bounds {
     lower: String,
     upper: String,
+}
+
+impl Bounds {
+    fn prefix(lower: String) -> Self {
+        // '/' sorts immediately before the smallest hex digit.
+        let mut upper = lower[..lower.len() - 1].to_owned();
+        upper.push('0');
+        Self { lower, upper }
+    }
+
+    fn suffix<'a>(&self, key: &'a str) -> io::Result<&'a str> {
+        key.strip_prefix(&self.lower)
+            .ok_or_else(|| invalid("invalid entity posting key"))
+    }
+}
+
+pub(crate) struct Range {
+    pub(crate) bounds: Bounds,
     direction: EntityDirection,
     anchor: String,
     kind: String,
@@ -90,25 +112,26 @@ impl Range {
         if !entity_id(anchor) || !token(kind, 128) {
             return Err(reject("invalid entity adjacency range"));
         }
-        let lower = prefix(direction, anchor, kind);
-        // '/' sorts immediately before the smallest hex digit.
-        let mut upper = lower[..lower.len() - 1].to_owned();
-        upper.push('0');
         Ok(Self {
-            lower,
-            upper,
+            bounds: Bounds::prefix(prefix(direction, anchor, kind)),
             direction,
             anchor: anchor.to_owned(),
             kind: kind.to_owned(),
         })
     }
 
-    pub(crate) fn tail_keys(&self, id: &str, document: &Document) -> io::Result<Vec<String>> {
+    pub(crate) fn tail_keys(
+        &self,
+        id: &str,
+        document: &Document,
+        mut examine: impl FnMut() -> io::Result<()>,
+    ) -> io::Result<Vec<String>> {
         let mut keys = Vec::new();
         visit_edges(id, document, |from, kind, to| {
+            examine()?;
             let (anchor, neighbor) = self.direction.endpoints(from, to);
             if anchor == self.anchor && kind == self.kind {
-                keys.push(finish_key(self.lower.clone(), neighbor, id));
+                keys.push(finish_key(self.bounds.lower.clone(), neighbor, id));
             }
             Ok(())
         })?;
@@ -118,9 +141,10 @@ impl Range {
     }
 
     pub(crate) fn identity(&self, key: &str) -> io::Result<(String, String)> {
-        let (neighbor, id) = key
-            .strip_prefix(&self.lower)
-            .and_then(|suffix| suffix.split_once('/'))
+        let (neighbor, id) = self
+            .bounds
+            .suffix(key)?
+            .split_once('/')
             .ok_or_else(|| invalid("invalid entity posting key"))?;
         let neighbor = decode_hex(neighbor)?;
         if !entity_id(&neighbor) {
@@ -128,6 +152,74 @@ impl Range {
         }
         Ok((neighbor, decode_hex(id)?))
     }
+}
+
+pub(crate) struct MemberRange {
+    pub(crate) bounds: Bounds,
+    entity: String,
+}
+
+fn member_prefix(entity: &str) -> String {
+    let mut prefix = "m/".to_owned();
+    append_hex(&mut prefix, entity);
+    prefix.push('/');
+    prefix
+}
+
+impl MemberRange {
+    pub(crate) fn new(entity: &str) -> io::Result<Self> {
+        if !entity_id(entity) {
+            return Err(reject("invalid entity member range"));
+        }
+        Ok(Self {
+            bounds: Bounds::prefix(member_prefix(entity)),
+            entity: entity.to_owned(),
+        })
+    }
+
+    pub(crate) fn record_id(&self, key: &str) -> io::Result<String> {
+        decode_hex(self.bounds.suffix(key)?)
+    }
+
+    pub(crate) fn matches(
+        &self,
+        id: &str,
+        document: &Document,
+        mut examine: impl FnMut() -> io::Result<()>,
+    ) -> io::Result<bool> {
+        let mut matched = false;
+        visit_members(id, document, |entity| {
+            examine()?;
+            matched |= entity == self.entity;
+            Ok(())
+        })?;
+        Ok(matched)
+    }
+}
+
+fn visit_members(
+    id: &str,
+    document: &Document,
+    mut visit: impl FnMut(&str) -> io::Result<()>,
+) -> io::Result<()> {
+    let Some(members) = document.get("entity_ids") else {
+        return Ok(());
+    };
+    let members = members
+        .as_array()
+        .filter(|items| items.len() <= 32)
+        .ok_or_else(|| reject("entity_ids requires an array of at most 32 namespaced IDs"))?;
+    if !members.is_empty() && (id.is_empty() || id.len() > 256) {
+        return Err(reject("entity member Record ID exceeds 256 bytes"));
+    }
+    for member in members {
+        let entity = member
+            .as_str()
+            .filter(|id| entity_id(id))
+            .ok_or_else(|| reject("invalid entity member ID"))?;
+        visit(entity)?;
+    }
+    Ok(())
 }
 
 fn decode_hex(value: &str) -> io::Result<String> {
@@ -205,21 +297,36 @@ impl Builder {
             for direction in [EntityDirection::Out, EntityDirection::In] {
                 let (anchor, neighbor) = direction.endpoints(from, to);
                 let bytes = 2 * (anchor.len() + kind.len() + neighbor.len() + id.len()) + 5;
-                // Include geometric String and Vec capacities and their reallocations.
-                let charge = (4 * (bytes + size_of::<(String, RowRef)>())) as u64;
-                if self.entries.len() >= MAX_KEYS || self.memory.bytes() + charge > MAX_BUILD_BYTES
-                {
-                    return Err(reject("entity adjacency build budget exhausted"));
-                }
-                self.memory.grow(charge)?;
-                self.entries.try_reserve(1).map_err(io::Error::other)?;
-                self.entries.push((
-                    finish_key(prefix(direction, anchor, kind), neighbor, id),
-                    row,
-                ));
+                self.push_key(bytes, row, || {
+                    finish_key(prefix(direction, anchor, kind), neighbor, id)
+                })?;
             }
             Ok(())
+        })?;
+        visit_members(id, document, |entity| {
+            self.push_key(2 * (entity.len() + id.len()) + 3, row, || {
+                let mut key = member_prefix(entity);
+                append_hex(&mut key, id);
+                key
+            })
         })
+    }
+
+    fn push_key(
+        &mut self,
+        bytes: usize,
+        row: RowRef,
+        key: impl FnOnce() -> String,
+    ) -> io::Result<()> {
+        // Include geometric String and Vec capacities and their reallocations.
+        let charge = (4 * (bytes + size_of::<(String, RowRef)>())) as u64;
+        if self.entries.len() >= MAX_KEYS || self.memory.bytes() + charge > MAX_BUILD_BYTES {
+            return Err(reject("entity adjacency build budget exhausted"));
+        }
+        self.memory.grow(charge)?;
+        self.entries.try_reserve(1).map_err(io::Error::other)?;
+        self.entries.push((key(), row));
+        Ok(())
     }
 
     pub(crate) fn finish(mut self, root: &Path, binding: Binding) -> io::Result<()> {
@@ -246,13 +353,15 @@ impl Builder {
             .create_new(true)
             .open(dir.join("descriptor"))?;
         file.write_all(&raw)?;
-        file.sync_all()
+        file.sync_all()?;
+        create_file(&root.join(MEMBER_CAPABILITY), MEMBER_MAGIC)?.sync_all()
     }
 }
 
 pub(crate) struct Projection {
     index: primary::Index,
     cut: u64,
+    members: bool,
     _memory: MemoryLease,
 }
 
@@ -262,6 +371,7 @@ impl Projection {
         binding: &Binding,
         bytes: u64,
         sha: Digest,
+        member_proof: Option<(u64, Digest)>,
     ) -> io::Result<Self> {
         if !(1..=MAX_DESCRIPTOR as u64).contains(&bytes) {
             return Err(invalid("invalid entity adjacency descriptor extent"));
@@ -293,9 +403,17 @@ impl Projection {
             File::read_exact_at,
         )?;
         index.verify_root(descriptor.count > 0)?;
+        if let Some((bytes, sha)) = member_proof {
+            if bytes != MEMBER_MAGIC.len() as u64 || sha != digest(MEMBER_MAGIC) {
+                return Err(invalid("unsupported entity membership capability"));
+            }
+            let file = open_file(&root.join(MEMBER_CAPABILITY), bytes)?;
+            check_magic(&file, MEMBER_MAGIC, File::read_exact_at)?;
+        }
         Ok(Self {
             index,
             cut: binding.cut,
+            members: member_proof.is_some(),
             _memory: memory,
         })
     }
@@ -304,19 +422,25 @@ impl Projection {
         self.cut
     }
 
+    pub(crate) fn has_members(&self) -> bool {
+        self.members
+    }
+
     pub(crate) fn visit<E>(
         &self,
-        range: &Range,
+        bounds: &Bounds,
         map: impl Fn(io::Error) -> E,
+        mut examine: impl FnMut() -> Result<(), E>,
         mut visit: impl FnMut(&str, RowRef) -> Result<(), E>,
     ) -> Result<(), E> {
-        let mut cursor = self.index.cursor(&range.lower, false).map_err(&map)?;
+        let mut cursor = self.index.cursor(&bounds.lower, false).map_err(&map)?;
         while let Some((key, row)) = cursor.next().map_err(&map)? {
+            examine()?;
             let key = key.as_str();
-            if key >= range.upper.as_str() {
+            if key >= bounds.upper.as_str() {
                 break;
             }
-            if !key.starts_with(&range.lower) {
+            if !key.starts_with(&bounds.lower) {
                 return Err(map(invalid("entity posting outside selected range")));
             }
             visit(key, row)?;

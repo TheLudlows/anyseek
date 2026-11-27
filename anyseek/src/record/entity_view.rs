@@ -1,9 +1,11 @@
 //! Pinned storage candidates for embedded owners of an isolated partition.
 use super::*;
+use crate::search::QueryWork;
 use crate::storage::{
     build_budget::{MemoryLease, reserve_memory},
     disk_records::entity,
 };
+use tokio::time::{Instant, timeout_at};
 
 const MAX_TAIL_ROWS: usize = 128;
 const MAX_TAIL_BYTES: usize = 2 * 1024 * 1024;
@@ -48,6 +50,70 @@ impl EntityCandidates {
     /// Borrow the results in neighbor ID and then Record ID order.
     pub fn as_slice(&self) -> &[EntityCandidate] {
         &self.candidates
+    }
+}
+
+/// Visible canonical revision declaring membership in an entity.
+#[derive(Debug, PartialEq, Eq)]
+pub struct EntityMember {
+    /// Stable Record identity.
+    pub record_id: String,
+    /// Body version at the captured Record cut.
+    pub version: u64,
+}
+
+/// One neighbor, its declarations and visible member revisions at the same cut.
+pub struct EntityNeighborCandidates {
+    entity_id: String,
+    declarations: Vec<EntityCandidate>,
+    members: Vec<EntityMember>,
+}
+
+impl EntityNeighborCandidates {
+    /// Neighbor entity ID.
+    pub fn entity_id(&self) -> &str {
+        &self.entity_id
+    }
+
+    /// Edges linking the requested anchor and neighbor in the requested direction.
+    pub fn declarations(&self) -> &[EntityCandidate] {
+        &self.declarations
+    }
+
+    /// Canonical member revisions of this neighbor in Record ID order.
+    pub fn members(&self) -> &[EntityMember] {
+        &self.members
+    }
+}
+
+/// Bounded discovery for an already authorized embedded owner of the pinned view.
+/// These candidates require final publication revalidation before live delivery.
+/// The candidate storage remains borrowed from the result that holds its memory lease.
+///
+/// ```compile_fail,E0616
+/// use anyseek::record::EntityCandidatePaths;
+///
+/// fn detach_candidates(mut result: EntityCandidatePaths) {
+///     let neighbors = std::mem::take(&mut result.neighbors);
+///     drop(result);
+///     assert!(!neighbors.is_empty());
+/// }
+/// ```
+pub struct EntityCandidatePaths {
+    seeds: Vec<EntityMember>,
+    neighbors: Vec<EntityNeighborCandidates>,
+    _memory: MemoryLease,
+}
+
+impl EntityCandidatePaths {
+    /// Canonical member revisions of the anchor in Record ID order.
+    pub fn seeds(&self) -> &[EntityMember] {
+        &self.seeds
+    }
+
+    /// Neighbors with members, ordered by entity ID.
+    pub fn neighbors(&self) -> &[EntityNeighborCandidates] {
+        &self.neighbors
     }
 }
 
@@ -181,75 +247,279 @@ impl EntityAdjacencyView {
         .await
         .map_err(storage)?
     }
+
+    /// Discover seed and target revisions using exact member ranges at this cut.
+    /// The visit limit covers all edge and member ranges together. The same
+    /// deadline and work and positioned-read budgets apply across discovery.
+    /// An edge-only sidecar needs rebuilding before it can supply members.
+    pub async fn candidate_paths(
+        &self,
+        direction: EntityDirection,
+        anchor: &str,
+        kind: &str,
+        visit_limit: usize,
+        deadline: Instant,
+    ) -> Result<EntityCandidatePaths, RecordError> {
+        let work = Arc::new(QueryWork::new(65_536, 2_048, 16 * 1024 * 1024, deadline));
+        self.candidate_paths_with_work(direction, anchor, kind, visit_limit, deadline, work)
+            .await
+    }
+
+    pub(super) async fn candidate_paths_with_work(
+        &self,
+        direction: EntityDirection,
+        anchor: &str,
+        kind: &str,
+        visit_limit: usize,
+        deadline: Instant,
+        work: Arc<QueryWork>,
+    ) -> Result<EntityCandidatePaths, RecordError> {
+        if !(1..=self.snapshot.max_visits).contains(&visit_limit) {
+            return Err(RecordError::Rejected(
+                "invalid entity adjacency visit limit".into(),
+            ));
+        }
+        let edges =
+            entity::Range::new(direction, anchor, kind).map_err(state_rows::entity_error)?;
+        let seeds = entity::MemberRange::new(anchor).map_err(state_rows::entity_error)?;
+        let permit = self
+            .admission
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| RecordError::Busy)?;
+        let snapshot = self.snapshot.clone();
+        let anchor = anchor.to_owned();
+        let task = crate::resources::spawn_blocking(move || {
+            let _permit = permit;
+            work.clone()
+                .with_reads(|| snapshot.paths(&anchor, &seeds, &edges, visit_limit, &work))
+        });
+        timeout_at(deadline, task)
+            .await
+            .map_err(|_| RecordError::Busy)?
+            .map_err(storage)?
+    }
+}
+
+struct RangeWork<'a> {
+    remaining: usize,
+    work: Option<&'a QueryWork>,
+}
+
+impl RangeWork<'_> {
+    fn take(&mut self) -> Result<(), RecordError> {
+        self.remaining = self.remaining.checked_sub(1).ok_or_else(|| {
+            RecordError::Rejected("entity adjacency visit budget exhausted".into())
+        })?;
+        Ok(())
+    }
+}
+
+fn examine(work: Option<&QueryWork>) -> Result<(), RecordError> {
+    work.map_or(Ok(()), |work| work.charge(1))
 }
 
 impl Snapshot {
-    fn read(
-        &self,
-        range: &entity::Range,
-        mut remaining: usize,
-    ) -> Result<EntityCandidates, RecordError> {
+    fn projection(&self) -> &entity::Projection {
+        self.base.entity.as_ref().expect("selected sidecar")
+    }
+
+    fn shadowed(&self, id: &str) -> bool {
+        self.tail
+            .binary_search_by(|row| row.record_id.as_str().cmp(id))
+            .is_ok()
+    }
+
+    fn read(&self, range: &entity::Range, limit: usize) -> Result<EntityCandidates, RecordError> {
         // Owned candidate strings, sort slots and per-record tail key workspace.
         let _scratch = reserve_memory(256 * 1024).map_err(memory_error)?;
-        let memory = reserve_memory(remaining as u64 * 4096).map_err(memory_error)?;
+        let memory = reserve_memory(limit as u64 * 4096).map_err(memory_error)?;
+        let candidates = self.edges(
+            range,
+            &mut RangeWork {
+                remaining: limit,
+                work: None,
+            },
+        )?;
+        self.barrier.deliver(|| EntityCandidates {
+            candidates,
+            _memory: memory,
+        })
+    }
+
+    fn edges(
+        &self,
+        range: &entity::Range,
+        budget: &mut RangeWork<'_>,
+    ) -> Result<Vec<EntityCandidate>, RecordError> {
+        let work = budget.work;
         let mut output = Vec::new();
-        let mut charge = || {
-            remaining = remaining.checked_sub(1).ok_or_else(|| {
-                RecordError::Rejected("entity adjacency visit budget exhausted".into())
-            })?;
-            Ok::<_, RecordError>(())
-        };
-        let adjacency = self.base.entity.as_ref().expect("selected sidecar");
-        adjacency.visit(range, state_rows::entity_error, |key, reference| {
-            charge()?;
-            let (neighbor, record_id) = range.identity(key).map_err(state_rows::entity_error)?;
-            if self
-                .tail
-                .binary_search_by(|row| row.record_id.as_str().cmp(&record_id))
-                .is_err()
-            {
-                let row = adjacency
-                    .locate(&self.base.checkpoint, &record_id, reference)
-                    .map_err(state_rows::entity_error)?;
-                if row.metadata.visible(self.evaluation) {
-                    output.push((
-                        key.to_owned(),
-                        EntityCandidate {
+        let adjacency = self.projection();
+        adjacency.visit(
+            &range.bounds,
+            state_rows::entity_error,
+            || examine(work),
+            |key, reference| {
+                budget.take()?;
+                let (neighbor, record_id) =
+                    range.identity(key).map_err(state_rows::entity_error)?;
+                if !self.shadowed(&record_id) {
+                    let row = adjacency
+                        .locate(&self.base.checkpoint, &record_id, reference)
+                        .map_err(state_rows::entity_error)?;
+                    if row.metadata.visible(self.evaluation) {
+                        output.push(EntityCandidate {
                             neighbor,
                             record_id,
                             version: row.metadata.version,
-                        },
-                    ));
+                        });
+                    }
                 }
-            }
-            Ok(())
-        })?;
+                Ok(())
+            },
+        )?;
         for row in &self.tail {
+            examine(work)?;
             let Some(document) = &row.document else {
                 continue;
             };
             for key in range
-                .tail_keys(&row.record_id, document)
+                .tail_keys(&row.record_id, document, || {
+                    examine(work).map_err(std::io::Error::other)
+                })
                 .map_err(state_rows::entity_error)?
             {
-                charge()?;
+                budget.take()?;
                 if temporal::visible(row, self.evaluation) {
                     let (neighbor, record_id) =
                         range.identity(&key).map_err(state_rows::entity_error)?;
-                    output.push((
-                        key,
-                        EntityCandidate {
-                            neighbor,
-                            record_id,
-                            version: row.version,
-                        },
-                    ));
+                    output.push(EntityCandidate {
+                        neighbor,
+                        record_id,
+                        version: row.version,
+                    });
                 }
             }
         }
-        output.sort_unstable_by(|left, right| left.0.cmp(&right.0));
-        self.barrier.deliver(|| EntityCandidates {
-            candidates: output.into_iter().map(|(_, candidate)| candidate).collect(),
+        output
+            .sort_unstable_by(|a, b| (&a.neighbor, &a.record_id).cmp(&(&b.neighbor, &b.record_id)));
+        Ok(output)
+    }
+
+    fn members(
+        &self,
+        range: &entity::MemberRange,
+        budget: &mut RangeWork<'_>,
+    ) -> Result<Vec<EntityMember>, RecordError> {
+        let work = budget.work;
+        let check = || examine(work).map_err(std::io::Error::other);
+        let mut output = Vec::new();
+        let adjacency = self.projection();
+        adjacency.visit(
+            &range.bounds,
+            state_rows::entity_error,
+            || examine(work),
+            |key, reference| {
+                budget.take()?;
+                let record_id = range.record_id(key).map_err(state_rows::entity_error)?;
+                if self.shadowed(&record_id) {
+                    return Ok(());
+                }
+                let row = adjacency
+                    .locate(&self.base.checkpoint, &record_id, reference)
+                    .map_err(state_rows::entity_error)?;
+                if !row.metadata.visible(self.evaluation) {
+                    return Ok(());
+                }
+                let version = row.metadata.version;
+                let matched = state_rows::decode(&record_id, row, |record| {
+                    let document = record
+                        .document
+                        .as_ref()
+                        .ok_or_else(|| storage("missing entity member body"))?;
+                    range
+                        .matches(&record_id, document, check)
+                        .map_err(state_rows::entity_error)
+                })?;
+                if !matched {
+                    return Err(storage(
+                        "entity member posting disagrees with its canonical Record",
+                    ));
+                }
+                output.push(EntityMember { record_id, version });
+                Ok(())
+            },
+        )?;
+        for row in &self.tail {
+            examine(work)?;
+            let Some(document) = &row.document else {
+                continue;
+            };
+            if range
+                .matches(&row.record_id, document, check)
+                .map_err(state_rows::entity_error)?
+            {
+                budget.take()?;
+                if temporal::visible(row, self.evaluation) {
+                    output.push(EntityMember {
+                        record_id: row.record_id.clone(),
+                        version: row.version,
+                    });
+                }
+            }
+        }
+        output.sort_unstable_by(|a, b| a.record_id.cmp(&b.record_id));
+        Ok(output)
+    }
+
+    fn paths(
+        &self,
+        anchor: &str,
+        seeds: &entity::MemberRange,
+        edges: &entity::Range,
+        limit: usize,
+        work: &QueryWork,
+    ) -> Result<EntityCandidatePaths, RecordError> {
+        work.charge(0)?;
+        if !self.projection().has_members() {
+            return Err(RecordError::Rejected(
+                "entity membership requires rebuilding the selected sidecar".into(),
+            ));
+        }
+        let _scratch = reserve_memory(256 * 1024).map_err(memory_error)?;
+        let memory = reserve_memory(limit as u64 * 4096).map_err(memory_error)?;
+        let mut budget = RangeWork {
+            remaining: limit,
+            work: Some(work),
+        };
+        let seeds = self.members(seeds, &mut budget)?;
+        let mut neighbors = Vec::new();
+        if !seeds.is_empty() {
+            let mut ranges = BTreeMap::<String, Vec<EntityCandidate>>::new();
+            for edge in self.edges(edges, &mut budget)? {
+                work.charge(1)?;
+                if edge.neighbor != anchor {
+                    ranges.entry(edge.neighbor.clone()).or_default().push(edge);
+                }
+            }
+            for (entity_id, declarations) in ranges {
+                work.charge(1)?;
+                let range =
+                    entity::MemberRange::new(&entity_id).map_err(state_rows::entity_error)?;
+                let members = self.members(&range, &mut budget)?;
+                if !members.is_empty() {
+                    neighbors.push(EntityNeighborCandidates {
+                        entity_id,
+                        declarations,
+                        members,
+                    });
+                }
+            }
+        }
+        work.charge(0)?;
+        self.barrier.deliver(|| EntityCandidatePaths {
+            seeds,
+            neighbors,
             _memory: memory,
         })
     }
@@ -257,3 +527,6 @@ impl Snapshot {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod member_tests;
