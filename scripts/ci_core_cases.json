@@ -1,4 +1,8 @@
 [
+  "server::record_service::cold::tests::http_cold_start_shares_one_open_and_lists_live_statistics",
+  "server::record_service::cold::tests::http_cold_failure_retries_without_installing_a_deleted_generation",
+  "server::record_service::cold::tests::http_shutdown_drains_an_abandoned_cold_open",
+  "server::record_service::cold::tests::http_cold_open_and_service_backup_serialize_file_owners_in_both_orders",
   "record::lexical::directory::tests::directory_gates_share_aliases_and_isolate_other_directories",
   "record::lexical::directory::tests::range_buffers_retain_admission_and_handles_protect_the_package",
   "storage::build_budget::tests::positioned_reads_share_one_handle_without_moving_its_cursor",

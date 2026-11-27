@@ -3,6 +3,7 @@
 //! Tenant-scoped storage service. Upstream authenticates users; one configured
 //! service credential protects requests and the gateway supplies the namespace.
 mod admission;
+mod cold;
 mod shutdown;
 mod diagnostics;
 pub(crate) mod local;
@@ -46,6 +47,7 @@ use tokio::sync::{Mutex, RwLock, Semaphore};
 
 tokio::task_local! { static AUTHENTICATED: String; }
 tokio::task_local! { static REQUEST_DEADLINE: tokio::time::Instant; }
+tokio::task_local! { static ROUTED_COLLECTION: Option<admission::RoutedCollection>; }
 #[derive(Clone)]
 struct Principal(String);
 
@@ -53,7 +55,7 @@ const TENANT_HEADER: &str = "x-anyseek-tenant";
 
 const MAX_BODY: usize = 2 * 1024 * 1024;
 const MAX_RESPONSE: usize = 16 * 1024 * 1024;
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct Error(StatusCode, &'static str, String);
 impl IntoResponse for Error {
     fn into_response(self) -> Response {
@@ -147,9 +149,14 @@ async fn owned<T: Send + 'static>(
 ) -> Result<T, Error> {
     let scope = ResourceScope::current();
     let principal = AUTHENTICATED.try_with(Clone::clone).ok();
+    let collection = ROUTED_COLLECTION.try_with(Clone::clone).ok().flatten();
+    // Keep large storage futures out of the nested task-local envelopes.
+    let work = Box::pin(work);
     anyseek::resources::spawn_owned(async move {
         let work = async move { match scope { Some(scope) => scope.run(work).await, None => work.await } };
-        match principal { Some(principal) => AUTHENTICATED.scope(principal, work).await, None => work.await }
+        ROUTED_COLLECTION.scope(collection, async move {
+            match principal { Some(principal) => AUTHENTICATED.scope(principal, work).await, None => work.await }
+        }).await
     }).await.map_err(|e| {
         Error(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -308,6 +315,7 @@ pub struct Service {
     root: PathBuf,
     catalog: Catalog,
     records: RwLock<BTreeMap<String, RecordPartition>>,
+    cold: cold::Registry,
     // Exclude management changes across the entire owned committed request.
     write_gate: Arc<RwLock<()>>,
     control: Arc<Mutex<()>>,
@@ -472,6 +480,7 @@ impl Service {
             root: root.into(),
             catalog,
             records: RwLock::new(BTreeMap::new()),
+            cold: cold::Registry::default(),
             write_gate: Arc::new(RwLock::new(())),
             control: Arc::new(Mutex::new(())),
             control_admission: Arc::new(Semaphore::new(16)),
@@ -524,10 +533,17 @@ impl Service {
                 log::warn!("retired backup cleanup pending: {error}");
             }
         }
-        for entry in entries {
-            let scope = service.resources.admit(format!("collection:{}", entry.scope()), anyseek::resources::Lane::Recovery,
-                (MAX_BODY + MAX_RESPONSE) as u64).map_err(|e|e.to_string())?;
-            scope.run(service.finish_collection(entry)).await.map_err(|e| e.2)?;
+        let http = service.master_verifier.is_some();
+        if http {
+            service.s3_config("startup".into(), MAX_BODY as u64).map_err(|e| e.2)?;
+        }
+        for entry in entries.into_iter().filter(|entry| !entry.deleted && (!http || !entry.active)) {
+            if entry.active {
+                service.finish_collection(entry).await.map_err(|e| e.2)?;
+            } else {
+                let scope = service.recovery_scope(&entry).map_err(|e| e.2)?;
+                scope.run(service.finish_collection(entry)).await.map_err(|e| e.2)?;
+            }
         }
         Ok(service)
     }
@@ -576,16 +592,10 @@ impl Service {
         }))
     }
 
-    async fn finish_collection(&self, entry: CollectionEntry) -> Result<(), Error> {
-        if entry.deleted {
-            return Ok(());
-        }
-        if self.records.read().await.contains_key(&entry.scope()) {
-            return Ok(());
-        }
+    async fn open_partition(&self, entry: &CollectionEntry) -> Result<RecordPartition, Error> {
         entry.prepare_parent(&self.root)?;
         let path = self.root.join(entry.directory());
-        let remote_config = self.s3_record_config(&entry)?;
+        let remote_config = self.s3_record_config(entry)?;
         let partition = if let Some(remote_config) = remote_config {
             if !entry.active && path.exists() && entry.restore_from.is_none() {
                 RecordPartition::resume_initialization(&path, entry.config.max_journal_bytes).await?;
@@ -656,22 +666,7 @@ impl Service {
                 ));
             }
         };
-        if !entry.active {
-            self.catalog
-                .execute(CatalogRequest {
-                    operation_id: internal_id(format!("sys:activate:{}", entry.directory())),
-                    command: CatalogCommand::ActivateCollection {
-                        tenant_id: entry.tenant_id.clone(),
-                        collection_id: entry.collection_id.clone(),
-                    },
-                })
-                .await?;
-        }
-        self.records
-            .write()
-            .await
-            .insert(entry.scope(), partition);
-        Ok(())
+        Ok(partition)
     }
     async fn authenticate(&self, headers: &HeaderMap) -> Result<String, Error> {
         let principal = match AUTHENTICATED.try_with(Clone::clone) {
@@ -722,12 +717,6 @@ impl Service {
                     "control queue full".into(),
                 )
             })
-    }
-    async fn record(&self, key: &str, id: &str) -> Result<CollectionRecord, Error> {
-        let entry = self.catalog
-            .collection_entry(key, id).await?;
-        let partition = self.records.read().await.get(&entry.scope()).cloned().ok_or_else(not_found)?;
-        Ok(CollectionRecord { generation: entry.generation, partition })
     }
 }
 
@@ -818,7 +807,7 @@ async fn create_collection(
 }
 
 async fn create_collection_locked(
-    s: &Service, tenant: String, request: CollectionCreate,
+    s: &Arc<Service>, tenant: String, request: CollectionCreate,
 ) -> Result<Value, Error> {
     let operation_id = request.operation_id.clone();
     let id = request.collection_id.clone();
@@ -857,7 +846,7 @@ async fn list_collections(
     let mut info = vec![];
     let mut data = vec![];
     for entry in entries {
-        let p = s.record(&key, &entry.collection_id).await?;
+        let p = s.record_entry(entry.clone()).await?;
         data.push(p.output_permit()?);
         let id = entry.collection_id.clone();
         let value = s
@@ -996,7 +985,7 @@ async fn read(
     protected_after_publication(value, data).await
 }
 async fn read_collection(
-    service: &Service, tenant: String, collection: String, record: String,
+    service: &Arc<Service>, tenant: String, collection: String, record: String,
 ) -> Result<(Option<anyseek::record::Record>, DataOutputPermit), Error> {
     let partition = service.record(&tenant, &collection).await?;
     let data = partition.output_permit_after_publication().await?;
@@ -1059,7 +1048,7 @@ async fn replace_group(
 }
 
 async fn replace_collection_group(
-    s: &Service, key: String, id: String, request: GroupReplace,
+    s: &Arc<Service>, key: String, id: String, request: GroupReplace,
 ) -> Result<anyseek::record::GroupReceipt, Error> {
     let gate = s.write_gate.clone().read_owned().await;
     let partition = s.record(&key, &id).await?;
@@ -1309,7 +1298,12 @@ async fn service_backup(
             if receipt.identity!=id {return Err(bad("backup request identity reused"));}
             return response(json!({"backup_id":id,"snapshot":receipt,"operation_id":request.operation_id,"scope":"catalog, all retained collections and live collection backups; no recursive service archives"}));
         }
+        #[cfg(test)]
+        s.cold.test.backup_waiters.increment();
+        let _opens = s.cold.disk.write().await;
         let records=s.records.read().await.clone();
+        #[cfg(test)]
+        s.cold.test.backup_snapshot.wait().await;
         let temporary=s.root.join(format!(".s3-service-export-{:032x}",rand::random::<u128>()));
         let result=async {
         let mut archives=BTreeMap::new();
@@ -1709,7 +1703,7 @@ async fn query(
 }
 
 async fn query_collection(
-    s: &Service, key: String, id: String, request: SearchRequestObject, request_id: String,
+    s: &Arc<Service>, key: String, id: String, request: SearchRequestObject, request_id: String,
 ) -> Result<(Result<QueryResponse, Error>, DataOutputPermit), Error> {
     let p = s.record(&key, &id).await?;
     let data = p.output_permit_after_publication().await?;
@@ -1853,6 +1847,7 @@ async fn request_admitted(
         return bad("query parameters belong in the JSON body").into_response();
     }
     let principal = request.extensions().get::<Principal>().cloned();
+    let collection = request.extensions().get::<admission::RoutedCollection>().cloned();
     let run = async move {
         match principal {
             Some(principal) => AUTHENTICATED.scope(principal.0, next.run(request)).await,
@@ -1860,7 +1855,8 @@ async fn request_admitted(
         }
     };
     let response =
-        match tokio::time::timeout_at(deadline, scope.clone().run(REQUEST_DEADLINE.scope(deadline, run))).await {
+        match tokio::time::timeout_at(deadline, scope.clone().run(
+            REQUEST_DEADLINE.scope(deadline, ROUTED_COLLECTION.scope(collection, run)))).await {
             Ok(response) => response,
             Err(_) => Error(
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -3037,7 +3033,7 @@ mod tests {
         let (mut service,path,headers) = setup().await;
         Arc::get_mut(&mut service).unwrap().request_timeout = std::time::Duration::from_millis(50);
         let app = router(service.clone());
-        let gate = service.records.write().await;
+        let (reached, release) = service.cold.test.preflight.pause_next();
         struct NeverRead;
         impl http_body::Body for NeverRead {
             type Data = Bytes; type Error = std::io::Error;
@@ -3049,7 +3045,8 @@ mod tests {
             .header("apikey",headers["apikey"].clone()).header(TENANT_HEADER,"tenant").body(Body::new(NeverRead)).unwrap();
         let response = tokio::time::timeout(std::time::Duration::from_secs(2), app.clone().oneshot(request)).await.unwrap().unwrap();
         assert_eq!(response.status(),StatusCode::TOO_MANY_REQUESTS);
-        drop(response);drop(gate);
+        reached.await.unwrap();
+        drop(response);drop(release);
         let request = axum::http::Request::builder().uri("/api/v1/index/c")
             .header("apikey",headers["apikey"].clone()).header(TENANT_HEADER,"tenant").body(Body::empty()).unwrap();
         let response = app.clone().oneshot(request).await.unwrap();
@@ -3090,7 +3087,8 @@ mod tests {
         let service = Service::open_http(&path, std::num::NonZeroUsize::new(200).unwrap(), "anyseek-unit-test-secret")
             .await
             .unwrap();
-        assert_eq!(service.records.read().await.len(), 3);
+        assert!(service.records.read().await.is_empty());
+        assert_eq!(service.catalog.listing("tenant").await.unwrap().len(), 3);
         drop(service);
         std::fs::remove_dir_all(path).unwrap();
     }
