@@ -1,6 +1,31 @@
 //! Local SDK contract through its public Rust API.
 use anyseek::sdk::{LocalEngine, LocalErrorKind, OperationId};
-use serde_json::json;
+use serde_json::{Value, json};
+
+async fn group_view(engine: &LocalEngine, query_term: &str, ids: &[&str], seq: u64) {
+    for query in [
+        json!({"query":query_term,"length":5,"count":true}),
+        json!({"query_vector":[1,0],"all":true,"length":5,"count":true}),
+    ] {
+        let result = engine
+            .query("1-tenant", "policy", serde_json::from_value(query).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(result.count_total(), Some(ids.len()));
+        let mut found: Vec<_> = result
+            .hits()
+            .iter()
+            .map(|hit| hit.record.record_id.as_str())
+            .collect();
+        found.sort_unstable();
+        assert_eq!(found, ids);
+        let response = serde_json::to_value(result).unwrap();
+        let progress = &response["diagnostics"]["index_progress"];
+        for name in ["committed_seq", "lexical_seq", "vector_seq"] {
+            assert_eq!(progress[name], seq, "{progress}");
+        }
+    }
+}
 
 #[tokio::test]
 async fn local_sdk_owns_publishes_isolates_and_recovers() {
@@ -13,10 +38,15 @@ async fn local_sdk_owns_publishes_isolates_and_recovers() {
             "1-tenant",
             "policy",
             OperationId::new("create-policy".into()),
-            serde_json::from_value(json!({"index_name":"policy","tokenizer":"TantivySimpleV1",
-            "schema":[{"field":"terms","field_type":"Text","store":true,"index_lexical":true}]}))
+            serde_json::from_value(json!({
+                "index_name":"policy","tokenizer":"TantivySimpleV1","vector":{"dimensions":2},
+                "schema":[
+                    {"field":"terms","field_type":"Text","store":true,"index_lexical":true},
+                    {"field":"vector","field_type":"Json","index_vector":true},
+                ]
+            }))
             .unwrap(),
-            None,
+            Some("fixture-f32-cosine".into()),
         )
         .await
         .unwrap();
@@ -28,40 +58,106 @@ async fn local_sdk_owns_publishes_isolates_and_recovers() {
             .kind(),
         LocalErrorKind::NotFound
     );
-    let operation_id = OperationId::new("publish-policy".into());
-    let group = json!({"operation_id":operation_id,"group_id":"policy","expected_group_version":0,
-        "records":[{"record_id":"p1","document":{"terms":"connection timeout"}}]});
-    for _ in 0..2 {
-        let receipt = engine
-            .replace_group(
-                "1-tenant",
-                "policy",
-                serde_json::from_value(group.clone()).unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(receipt.group_version, 1);
-    }
+    let group = |nonce: &str, version: u64, ids: &[&str], terms: &str| {
+        let records: Vec<Value> = ids
+            .iter()
+            .map(|id| json!({"record_id":id,"document":{"terms":terms,"vector":[1,0]}}))
+            .collect();
+        serde_json::from_value::<anyseek::record::GroupReplace>(json!({
+            "operation_id":OperationId::new(nonce.into()),
+            "group_id":"policy","expected_group_version":version,"records":records,
+        }))
+        .unwrap()
+    };
+
+    let initial = group("publish-policy", 0, &["p1", "p2"], "connection timeout");
+    let first = engine
+        .replace_group("1-tenant", "policy", initial.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        (first.seq, first.group_version, first.record_count),
+        (1, 1, 2)
+    );
+    group_view(&engine, "connection", &["p1", "p2"], 1).await;
+
+    let replacement = group("replace-policy", 1, &["p1", "p3"], "subscription timeout");
+    // Discard the committed outcome and recover using the original operation ID.
+    let _ = engine
+        .replace_group("1-tenant", "policy", replacement.clone())
+        .await
+        .unwrap();
     assert_eq!(
         engine
             .group_version("1-tenant", "policy", "policy")
             .await
             .unwrap(),
-        Some(1)
+        Some(2)
     );
     engine.shutdown().await.unwrap();
     engine.shutdown().await.unwrap();
     assert!(engine.version().is_err());
+
     let reopened = LocalEngine::open(&root, false).await.unwrap();
-    let result = reopened
+    let second = reopened
+        .replace_group("1-tenant", "policy", replacement.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        (second.seq, second.group_version, second.record_count),
+        (2, 2, 2)
+    );
+    assert_eq!(
+        reopened
+            .replace_group("1-tenant", "policy", replacement)
+            .await
+            .unwrap(),
+        second
+    );
+    assert_eq!(
+        reopened
+            .replace_group("1-tenant", "policy", initial)
+            .await
+            .unwrap(),
+        first
+    );
+    group_view(&reopened, "subscription", &["p1", "p3"], 2).await;
+    let stale = reopened
         .query(
             "1-tenant",
             "policy",
-            serde_json::from_value(json!({"query":"connection","length":5,"count":true})).unwrap(),
+            serde_json::from_value(json!({"query":"connection","count":true})).unwrap(),
         )
         .await
         .unwrap();
-    assert_eq!(result.count_total(), Some(1));
-    assert_eq!(result.hits()[0].record.record_id, "p1");
+    assert_eq!(stale.count_total(), Some(0));
+
+    let withdrawal = group("withdraw-policy", 2, &[], "");
+    let third = reopened
+        .replace_group("1-tenant", "policy", withdrawal.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        (third.seq, third.group_version, third.record_count),
+        (3, 3, 0)
+    );
+    group_view(&reopened, "subscription", &[], 3).await;
+    reopened.shutdown().await.unwrap();
+    let reopened = LocalEngine::open(&root, false).await.unwrap();
+    assert_eq!(
+        reopened
+            .replace_group("1-tenant", "policy", withdrawal)
+            .await
+            .unwrap(),
+        third
+    );
+    assert_eq!(
+        reopened
+            .group_version("1-tenant", "policy", "policy")
+            .await
+            .unwrap(),
+        Some(3)
+    );
+    group_view(&reopened, "subscription", &[], 3).await;
     reopened.shutdown().await.unwrap();
 }

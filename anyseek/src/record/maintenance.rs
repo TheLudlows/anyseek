@@ -616,10 +616,10 @@ impl SourceProof {
             }
             let entry=proof_decode::mutation(frame)?;
             let state=replayed.as_mut().unwrap();
-            state.admit_replay_frame(checkpoint_codec::json_length(&entry)?)?;
+            let state_bytes = state.admit_replay_frame(checkpoint_codec::json_length(&entry)?)?;
             match entry {
                 Entry::Applied(op)=>apply(state,&op)?,
-                Entry::GroupApplied(d)=>group_plan::apply(state,&d)?,
+                Entry::GroupApplied(d)=>group_plan::apply(state,d,state_bytes)?,
                 Entry::Expired(event)=>temporal::apply(state,&event)?,
                 Entry::HistoryTrim(event)=>history::apply_trim(state,&config.history,&event)?,
                 _=>return Err(storage("unexpected captured source authority")),
@@ -708,10 +708,11 @@ fn expired_operation(op:&Applied,history_floor:u64,epoch:u64)->bool {
     op.receipt.seq<=history_floor
         && op.request.operation_id.epoch.saturating_add(1)<epoch
 }
-pub(super) fn has_expired_operations(state:&State,epoch:u64)->Result<bool,RecordError> {
+pub(super) fn has_expired_operations(state: &State, epoch: u64) -> bool {
     let epoch=epoch.max(state.epoch_watermark);
-    Ok(state.operations.iter().take_while(|op|op.receipt.seq<=state.history.floor)
-        .any(|op|expired_operation(op,state.history.floor,epoch)) || state.groups.iter().flat_map(|g|g.receipts.iter()).any(|r|r.receipt.seq<=state.history.floor&&r.operation_id.epoch.saturating_add(1)<epoch))
+    let floor = state.history.floor;
+    state.operation_epochs.has_expired(floor, epoch)
+        || state.groups.as_ref().is_some_and(|groups| groups.has_expired_receipts(floor, epoch))
 }
 struct OperationGc {
     epoch:u64,

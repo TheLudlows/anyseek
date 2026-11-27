@@ -125,10 +125,10 @@ mod tests {
         let prepared = state_memory::Prepared::from_previous(input.previous, &applied).unwrap();
         prefix.advance(&input, &applied, &prepared, snapshot_bytes).unwrap();
         apply(&mut oracle, &applied).unwrap();
-        assert!(!maintenance::has_expired_operations(&basis, 10).unwrap());
-        assert!(maintenance::has_expired_operations(&oracle, 10).unwrap());
-        assert_eq!(maintenance::has_expired_operations(&basis, 10.max(prefix.epoch_watermark)).unwrap(),
-            maintenance::has_expired_operations(&oracle, 10).unwrap());
+        assert!(!maintenance::has_expired_operations(&basis, 10));
+        assert!(maintenance::has_expired_operations(&oracle, 10));
+        assert_eq!(maintenance::has_expired_operations(&basis, 10.max(prefix.epoch_watermark)),
+            maintenance::has_expired_operations(&oracle, 10));
     }
 }
 impl PlanningView {
@@ -180,7 +180,7 @@ impl PlanningView {
             .and_then(|n| n.checked_add(prepared.record.wire_bytes()))
             .and_then(|n| n.checked_add(prepared.operation.wire_bytes()))
             .ok_or_else(|| storage("planning value size overflow"))?;
-        let lookup = self.lookup_bytes.checked_add(checkpoint_codec::json_length(&request.operation_id)?)
+        let lookup = self.lookup_bytes.checked_add(operation_lookup_bytes(&request.operation_id)?)
             .ok_or_else(|| storage("planning lookup size overflow"))?;
         let container = snapshot_bytes.checked_sub(values).and_then(|n| n.checked_add(lookup))
             .ok_or_else(|| storage("planning container size overflow"))?;
