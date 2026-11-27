@@ -18,3 +18,7 @@ pub(crate) mod payload_pool;
 pub(crate) mod build_budget;
 
 pub(crate) mod object_keys;
+
+// Component of the local record checkpoint. Production integration is tracked in #224.
+#[allow(dead_code, reason = "the checkpoint component is exercised independently before #224 integration")]
+pub(crate) mod disk_records;

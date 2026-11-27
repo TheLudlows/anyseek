@@ -18,6 +18,32 @@ pub(crate) struct PayloadRef {
     pub length: u64,
     pub sha256: [u8; 32],
 }
+impl PayloadRef {
+    pub(super) fn bounded_length(&self, extent: u64, max_body_bytes: usize) -> io::Result<usize> {
+        if self.offset < HEADER || self.offset.checked_add(self.length).is_none_or(|end| end > extent) {
+            return Err(invalid("payload outside segment"));
+        }
+        let length = usize::try_from(self.length).map_err(|_| invalid("payload length overflow"))?;
+        if length > max_body_bytes { return Err(invalid("payload read budget exceeded")); }
+        Ok(length)
+    }
+
+    pub(super) fn verify(&self, bytes: &[u8]) -> io::Result<()> {
+        if bytes.len() as u64 != self.length || hash(bytes) != self.sha256 {
+            return Err(invalid("payload checksum mismatch"));
+        }
+        Ok(())
+    }
+}
+
+pub(super) fn check_payload_header(extent: u64, read: impl FnOnce(&mut [u8]) -> io::Result<()>) -> io::Result<()> {
+    if extent < HEADER { return Err(invalid("segment length smaller than header")); }
+    let mut magic = [0; HEADER as usize];
+    read(&mut magic)?;
+    if &magic != MAGIC { return Err(invalid("unsupported payload segment")); }
+    Ok(())
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Descriptor {
@@ -109,8 +135,7 @@ impl Reader {
             if end>descriptor.bytes {return Err(invalid("payload outside segment"));}
         }
         if end!=descriptor.bytes {return Err(invalid("unreferenced segment suffix"));}
-        let mut magic=[0u8;16];file.read_exact(&mut magic)?;
-        if &magic!=MAGIC {return Err(invalid("unsupported payload segment"));}
+        check_payload_header(descriptor.bytes, |magic| file.read_exact(magic))?;
         file.seek(SeekFrom::Start(0))?;
         let mut digest=Sha256::new();let mut buffer=[0u8;8192];
         loop {let n=file.read(&mut buffer)?;if n==0 {break;}digest.update(&buffer[..n]);}
@@ -120,12 +145,11 @@ impl Reader {
     }
     pub fn read(&self,position:usize,max_body_bytes:usize)->io::Result<Vec<u8>> {
         let p=self.descriptor.payloads.get(position).ok_or_else(||invalid("payload identity outside segment"))?;
-        let length=usize::try_from(p.length).map_err(|_|invalid("payload length overflow"))?;
-        if length>max_body_bytes {return Err(invalid("payload read budget exceeded"));}
+        let length = p.bounded_length(self.descriptor.bytes, max_body_bytes)?;
         let mut bytes=Vec::new();bytes.try_reserve_exact(length).map_err(io::Error::other)?;bytes.resize(length,0);
         let mut file=self.file.lock().map_err(|_|invalid("payload reader poisoned"))?;
         file.seek(SeekFrom::Start(p.offset))?;file.read_exact(&mut bytes)?;
-        if hash(&bytes)!=p.sha256 {return Err(invalid("payload checksum mismatch"));}
+        p.verify(&bytes)?;
         Ok(bytes)
     }
 }
