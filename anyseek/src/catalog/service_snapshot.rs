@@ -41,6 +41,12 @@ fn publish(stage: &Path, target: &Path) -> Result<(), CatalogError> {
     crate::storage::partition::publish_bundle(stage, target)
         .map_err(|e| CatalogError::OutcomeUnknown(format!("bundle publication: {e}")))
 }
+fn backup_input_error(error: crate::record::RecordError) -> CatalogError {
+    match error {
+        crate::record::RecordError::Busy => CatalogError::Busy,
+        error => storage(error),
+    }
+}
 fn read_manifest(root: &Path) -> Result<ServiceSnapshot, CatalogError> {
     let (journal, entries) =
         PartitionJournal::open(&root.join(MANIFEST), BUDGET).map_err(storage)?;
@@ -354,10 +360,10 @@ impl Catalog {
                             entry.config.max_journal_bytes,
                         )
                         .await
-                        .map_err(storage)?,
+                        .map_err(backup_input_error)?,
                     };
                     total = total.saturating_add(
-                        p.recovery_identity().await.map_err(storage)?.checkpoint_bytes as u64 + 4096,
+                        p.recovery_identity().await.map_err(backup_input_error)?.checkpoint_bytes as u64 + 4096,
                     );
                 }
                 for row in std::fs::read_dir(&source_root).map_err(storage)? {
@@ -368,13 +374,13 @@ impl Catalog {
                             continue;
                         }
                         let p=if let Some(path)=archives.get(&name) {
-                            RecordPartition::open(path,256*1024*1024).await.map_err(storage)?
+                            RecordPartition::open(path,256*1024*1024).await.map_err(backup_input_error)?
                         }else {
-                            RecordPartition::resume_initialization(&row.path(),256*1024*1024).await.map_err(storage)?;
-                            RecordPartition::open(&row.path(),256*1024*1024).await.map_err(storage)?
+                            RecordPartition::resume_initialization(&row.path(),256*1024*1024).await.map_err(backup_input_error)?;
+                            RecordPartition::open(&row.path(),256*1024*1024).await.map_err(backup_input_error)?
                         };
                         total = total.saturating_add(
-                            p.recovery_identity().await.map_err(storage)?.checkpoint_bytes as u64 + 4096,
+                            p.recovery_identity().await.map_err(backup_input_error)?.checkpoint_bytes as u64 + 4096,
                         );
                     }
                 }
@@ -406,13 +412,13 @@ impl Catalog {
                             entry.config.max_journal_bytes,
                         )
                         .await
-                        .map_err(storage)?,
+                        .map_err(backup_input_error)?,
                     };
                     entry.prepare_parent(&stage)?;
                     let seq = partition
                         .checkpoint(&stage.join(&entry.directory()))
                         .await
-                        .map_err(storage)?;
+                        .map_err(backup_input_error)?;
                     record_seqs.insert(entry.scope(), seq);
                     objects.insert(
                         entry.directory(),
@@ -428,12 +434,12 @@ impl Catalog {
                             continue;
                         }
                         let p=if let Some(path)=archives.get(&name) {
-                            RecordPartition::open(path,256*1024*1024).await.map_err(storage)?
+                            RecordPartition::open(path,256*1024*1024).await.map_err(backup_input_error)?
                         }else {
-                            RecordPartition::resume_initialization(&row.path(),256*1024*1024).await.map_err(storage)?;
-                            RecordPartition::open(&row.path(),256*1024*1024).await.map_err(storage)?
+                            RecordPartition::resume_initialization(&row.path(),256*1024*1024).await.map_err(backup_input_error)?;
+                            RecordPartition::open(&row.path(),256*1024*1024).await.map_err(backup_input_error)?
                         };
-                        let seq = p.checkpoint(&stage.join(&name)).await.map_err(storage)?;
+                        let seq = p.checkpoint(&stage.join(&name)).await.map_err(backup_input_error)?;
                         collection_backups.insert(id.into(), seq);
                         objects.insert(name.clone(), object_hash(&stage.join(&name))?);
                     }

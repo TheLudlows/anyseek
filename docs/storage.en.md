@@ -175,6 +175,8 @@ HTTP fixture is distinct from real S3 certification. Actual endpoints, system/fi
 
 Catalog control performs one full budget and recoverability check before write transactions. Full archive format is 2. Restore retains only source Catalog cut/hash, source identity, and needed historical Operation ID isolation without copying full historical Catalog state. Databases and archives contain no key material. HTTP middleware authenticates once before body read, and handlers and owned work reuse that context. Collection execution still checks generation inside the lifecycle barrier.
 
+Whole-service backup reopens retained partitions and validates sealed rows under a file transaction. This permit is acquired and released outside native index operations. Resource refusal before publication returns `busy`. Storage failures and unknown publication retain their respective recovery semantics.
+
 ## Final reclamation of deleted collection generations
 
 Delete durably commits logical deletion and returns `physical_reclamation: pending`. One bounded service loop selects one old generation per second and deletes up to 64 local entries or 16 remote objects. Separately retry at most 16 monotonic object tombstones every 30 seconds. Admission refusal, owner/pinned readers, or backup protection defers work. Progress and failures are logged.

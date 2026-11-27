@@ -496,6 +496,59 @@ async fn complete_service_snapshot_drains_owned_lifecycle_work_and_excludes_queu
 }
 
 #[tokio::test]
+async fn service_backup_waits_for_io_during_retained_record_validation() {
+    use crate::record::{RecordPartition, RecordWrite};
+    use crate::resources::{Governor, Lane, hold_io_for_test};
+
+    let parent = tempfile::tempdir().unwrap();
+    let root = parent.path().join("service");
+    let catalog = setup(&root).await;
+    let partition = RecordPartition::create(&parent.path().join("seed"), config())
+        .await
+        .unwrap();
+    let write: RecordWrite = serde_json::from_value(json!({
+        "operation_id": OperationId::new("backup-io".into()),
+        "record_id": "record", "expected": "Absent",
+        "document": {"body": "sealed source"}
+    })).unwrap();
+    let receipt = partition.write(write).await.unwrap();
+    let id = "a".repeat(64);
+    let retained = root.join(format!("backup-{id}"));
+    partition.checkpoint(&retained).await.unwrap();
+    partition.finish_service_shutdown().await.unwrap();
+    drop(partition);
+
+    let marker = retained.join(".test-open-final-validation-pause");
+    let entered = retained.join(".test-open-final-validation-pause-entered");
+    std::fs::write(&marker, b"pause before validating the selected Record cut").unwrap();
+    let scope = Arc::new(Governor::default()).admit("service".into(), Lane::Background, 0).unwrap();
+    let destination = parent.path().join("archive");
+    let mut backup = {
+        let destination = destination.clone();
+        tokio::spawn(scope.clone().run(async move {
+            catalog.backup_service(root, destination, "cut".into(), BTreeMap::new()).await
+        }))
+    };
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !entered.exists() {
+            assert!(!backup.is_finished());
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }).await.unwrap();
+    let io = tokio::time::timeout(Duration::from_secs(10), hold_io_for_test(&scope)).await.unwrap();
+    std::fs::remove_file(marker).unwrap();
+    let early = tokio::time::timeout(Duration::from_millis(100), &mut backup).await;
+    assert!(early.is_err(), "the same backup must wait for the file transaction, got {early:?}");
+    assert!(!destination.exists());
+    drop(io);
+
+    let snapshot = tokio::time::timeout(Duration::from_secs(10), backup)
+        .await.unwrap().unwrap().unwrap();
+    assert_eq!(snapshot.collection_backups[&id], receipt.seq);
+    assert_eq!(Catalog::completed_service_backup(&destination).unwrap(), Some(snapshot));
+}
+
+#[tokio::test]
 async fn collection_recreation_keeps_generations_receipts_and_backups_separate() {
     use crate::record::{RecordPartition, RecordWrite};
     let parent = tempfile::tempdir().unwrap();

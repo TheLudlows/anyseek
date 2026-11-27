@@ -957,6 +957,15 @@ fn validate_restored_state(config:&RecordConfig,state:&State)->Result<(),RecordE
     group_plan::validate(state)?;
     Ok(())
 }
+
+// An open owns its private cut. Validate file-backed rows under one loan after
+// native operations have returned, while no serving partition guard is held.
+async fn validate_open_authority(config: &RecordConfig, state: &State) -> Result<(), RecordError> {
+    crate::resources::file_transaction(|| {
+        validate_restored_state(config, state)?;
+        history::validate_state(state)
+    }).await.map_err(|_| RecordError::Busy)?
+}
 /// Retain only prefix minima of operation epoch in commit order. A receipt
 /// whose epoch is at least an earlier receipt's epoch can never change whether
 /// there is an expired receipt at or below a given history floor.
@@ -1464,9 +1473,8 @@ impl RecordPartition {
             }
         }
         log::info!("record_recovery stage=decoded seq={} elapsed_ms={} measure_us={recovery_measure_us} apply_us={recovery_apply_us}",state.seq,recovery_started.elapsed().as_millis());
-        validate_restored_state(&config,&state)?;
+        validate_open_authority(&config, &state).await?;
         let snapshot_bytes = checkpoint_codec::length(&config, &state)?;
-        history::validate_state(&state)?;
         log::info!("record_recovery stage=validated seq={} elapsed_ms={}",state.seq,recovery_started.elapsed().as_millis());
         let rebuild_in_packages = prepared.is_none() && state.records.len() > capacity::PACKAGE_RECORDS;
         let (mut index,mut ordinals,mut locations)=match prepared {
@@ -1533,8 +1541,9 @@ impl RecordPartition {
             #[cfg(feature="fault-injection")]
             if std::env::var("ANYSEEK_RECOVERY_CRASH_STAGE").as_deref()==Ok("after_native_flush"){std::process::abort();}
         }
-        validate_restored_state(&inner.config,&inner.state)?;
-        history::validate_state(&inner.state)?;
+        #[cfg(test)]
+        query::pause(path, ".test-open-final-validation-pause").await?;
+        validate_open_authority(&inner.config, &inner.state).await?;
         inner.reclaim_anchor_objects().await?;
         let indexes = index_consumers::Cursors::recovered(inner.state.seq);
         Ok(Self {output,indexes,committed_queue:Arc::default(),writer:Arc::new(Mutex::new(())),inner:Arc::new(Mutex::new(inner)),admission:Arc::new(Semaphore::new(16))})
