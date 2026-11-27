@@ -1,5 +1,6 @@
 //! Shared schema validation and per-shard metadata predicates for all search modes.
 use crate::{
+    component::FacetReader,
     index::{FieldType, SchemaField, VectorSegment},
     search::FacetFilter,
     utils::{read_f64, read_i64, read_u32},
@@ -136,15 +137,15 @@ pub(crate) fn compile_filters(
 // True means reject this document. Empty predicates accept every document.
 #[inline]
 pub(crate) fn is_facet_filter(
-    shard: &VectorSegment,
+    reader: &mut FacetReader<'_>,
     filters: &[FilterSparse],
     doc_id: usize,
 ) -> Result<bool, crate::record::RecordError> {
-    for (filter, field) in filters.iter().zip(&shard.facets) {
+    for (filter, field) in filters.iter().zip(&reader.segment.facets) {
         if matches!(filter, FilterSparse::None) {
             continue;
         }
-        let bytes = shard.read_facet(doc_id, field)?;
+        let bytes = reader.read(doc_id, field)?;
         if bytes[crate::component::field_width(&field.field_type) - 1] == 0 {
             return Ok(true);
         }

@@ -119,22 +119,32 @@ async fn truncated_component_reads_fail_without_returning_partial_hits() {
     use crate::{vector::SearchVectorSegment, vector_similarity::AnnMode};
 
     let (_root, index, config, engine, _scope) = fixture().await;
-    engine.append(input(&config), &Arc::new(Cursors::default())).await.unwrap();
+    let cursors = Arc::new(Cursors::default());
+    engine.append(input(&config), &cursors).await.unwrap();
+    let second = Input::vector(
+        &config, lexical::Identity { id: "second".into(), version: 1, revision: 1 }, 1,
+        &serde_json::from_value(serde_json::json!({"vector":[2.0,0.0],"number":42})).unwrap(),
+    ).unwrap();
+    engine.append(second, &cursors).await.unwrap();
     index.commit().await.unwrap();
     let root = index.read().await;
     let component = root.segments[0].vector.clone();
     let path = std::path::PathBuf::from(&root.index_path_string);
+    let first_row_bytes = component.read().await.facets_size_sum as u64;
     drop(root);
     let score = |filters| component.search_vector_segment(
         Some((crate::vector::Embedding::F32(vec![1.0, 0.0]), 0.0, 0.0, 0, 0)),
-        1, true, None, AnnMode::All, Vec::new(), filters,
+        2, true, None, AnnMode::All, Vec::new(), filters,
     );
     let filter: crate::search::FacetFilter = serde_json::from_value(serde_json::json!({
         "Int": {"field":"number", "filter":{"start":42, "end":43}}
     })).unwrap();
-    assert_eq!(score(vec![filter.clone()]).await.unwrap().results.len(), 1);
-    for (file, filters) in [("metadata.bin", vec![filter]), ("vectors.bin", Vec::new())] {
-        std::fs::OpenOptions::new().write(true).open(path.join(file)).unwrap().set_len(1).unwrap();
+    assert_eq!(score(vec![filter.clone()]).await.unwrap().results.len(), 2);
+    for (file, filters, length) in [
+        ("metadata.bin", vec![filter], first_row_bytes),
+        ("vectors.bin", Vec::new(), 1),
+    ] {
+        std::fs::OpenOptions::new().write(true).open(path.join(file)).unwrap().set_len(length).unwrap();
         assert!(matches!(score(filters).await, Err(RecordError::Storage(_))), "{file}");
     }
 }

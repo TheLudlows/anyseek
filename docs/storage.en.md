@@ -20,7 +20,7 @@ At the end of a private bulk build, `finish_build` reuses bounded small-Segment 
 
 A partition guard and package pin protect local readers and builds. Full-text Searchers read ranges through pinned file handles. Files used by pinned Searchers, native workers, and vector and metadata views cannot be deleted until the last holder leaves. Backup exports independent authority without borrowing mutable paths that source GC can remove. Build and reclamation have explicit budgets. Full in-memory State and conservative admission remain, with no hard whole-process RSS cap.
 
-Vector and metadata files keep their component format and publication order. A query or build owns an aligned vector window of at most 64 KiB and releases its reservation on completion. Filters read fixed-width fields. Custom sorting captures values for bounded candidates before comparison and stops the query on a read fault. Reads and sequential writes use file I/O admission, and buffers count toward the process and request limits. The operating system may cache ordinary file pages.
+Vector and metadata files keep their component format and publication order. A query or build owns an aligned vector window of at most 64 KiB and releases its reservation on completion. Filters first read fixed-width fields. Repeated access to the same block enables a buffer of at most 4 KiB in the query's reader for that component. A field spanning two blocks is read directly. Custom sorting captures values for bounded candidates before comparison and stops the query on a read fault. Reads and sequential writes use file I/O admission, and buffers count toward the process and request limits. The operating system may cache ordinary file pages.
 
 ### Disk record directory component
 

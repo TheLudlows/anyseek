@@ -4,11 +4,12 @@
 //! never a business head and is only opened after the package closure is verified.
 use crate::{index::*, vector::{Inference, Precision, Quantization},
     vector_similarity::{TurboQuant, VectorSimilarity}, clustering::ParentMedoid,
+    record::{RecordError, build_budget::admit_memory}, resources::{MemoryReservation, Scope},
     storage::build_budget::File, utils::*};
 use ahash::{AHashMap, AHashSet};
 use indexmap::IndexMap;
 use serde::{Serialize, Deserialize};
-use std::{collections::HashMap, fs, io::{Read, Seek, SeekFrom, Write}, path::{Path, PathBuf}, sync::Arc};
+use std::{collections::HashMap, fs, io::{Read, Seek, SeekFrom, Write}, ops::Range, path::{Path, PathBuf}, sync::Arc};
 use tokio::sync::RwLock;
 
 pub(crate) mod memory;
@@ -17,8 +18,63 @@ const FORMAT: u32 = 3;
 const DESCRIPTOR: &str = "component.json";
 const VECTOR: &str = "vectors.bin";
 const FACETS: &str = "metadata.bin";
+const FACET_BLOCK_BYTES: usize = 4096;
 pub(crate) type VectorIndexArc = Arc<RwLock<VectorIndex>>;
 pub(crate) type VectorSegmentArc = Arc<RwLock<VectorSegment>>;
+
+/// Query-local metadata reads bound to one guarded component. An isolated
+/// lookup stays narrow. A second lookup in the same block enables reuse.
+pub(crate) struct FacetReader<'a> {
+    pub(crate) segment: &'a VectorSegment,
+    previous_block: Option<usize>,
+    cached: Option<FacetBlock>,
+}
+
+struct FacetBlock {
+    bytes: Vec<u8>,
+    start: usize,
+    valid: usize,
+    _memory: MemoryReservation,
+}
+
+impl<'a> FacetReader<'a> {
+    pub(crate) fn new(segment: &'a VectorSegment) -> Self {
+        Self { segment, previous_block: None, cached: None }
+    }
+
+    pub(crate) fn read(&mut self, ordinal: usize, field: &FacetField) -> Result<[u8; 9], RecordError> {
+        let segment = self.segment;
+        segment.read_facet_with(ordinal, field, |range, dst| {
+            let start = range.start / FACET_BLOCK_BYTES * FACET_BLOCK_BYTES;
+            let end = range.end - start;
+            if end > FACET_BLOCK_BYTES {
+                return segment.facets_file.read_exact_at(range.start as u64, dst).map_err(read_error);
+            }
+            let cached = self.cached.as_ref()
+                .is_some_and(|block| block.start == start && end <= block.valid);
+            if !cached {
+                if self.previous_block.replace(start) != Some(start) {
+                    return segment.facets_file.read_exact_at(range.start as u64, dst).map_err(read_error);
+                }
+                let length = segment.metadata_length()?;
+                let capacity = length.min(FACET_BLOCK_BYTES);
+                if self.cached.is_none() {
+                    let memory = admit_memory(capacity as u64, Scope::current().as_ref())?;
+                    self.cached = Some(FacetBlock { bytes: vec![0; capacity], start, valid: 0, _memory: memory });
+                }
+                let block = self.cached.as_mut().expect("admitted metadata block");
+                let count = (length - start).min(capacity);
+                block.valid = 0;
+                segment.facets_file.read_exact_at(start as u64, &mut block.bytes[..count]).map_err(read_error)?;
+                block.start = start;
+                block.valid = count;
+            }
+            let block = self.cached.as_ref().expect("loaded metadata block");
+            dst.copy_from_slice(&block.bytes[range.start - start..end]);
+            Ok(())
+        })
+    }
+}
 
 /// A segment's vector/metadata component and lexical runtime share topology and
 /// lifetime. Cloning a view retains both components, including native file pins.
@@ -299,20 +355,35 @@ impl VectorSegment {
         &self,
         ordinal: usize,
         field: &FacetField,
-    ) -> Result<[u8; 9], crate::record::RecordError> {
+    ) -> Result<[u8; 9], RecordError> {
+        self.read_facet_with(ordinal, field, |range, dst| {
+            self.facets_file.read_exact_at(range.start as u64, dst).map_err(read_error)
+        })
+    }
+
+    fn metadata_length(&self) -> Result<usize, RecordError> {
+        self.indexed_doc_count.checked_mul(self.facets_size_sum)
+            .ok_or_else(|| RecordError::Storage("metadata length overflow".into()))
+    }
+
+    fn read_facet_with(
+        &self,
+        ordinal: usize,
+        field: &FacetField,
+        read: impl FnOnce(Range<usize>, &mut [u8]) -> Result<(), RecordError>,
+    ) -> Result<[u8; 9], RecordError> {
+        let width = field_width(&field.field_type);
         let offset = ordinal
             .checked_mul(self.facets_size_sum)
             .and_then(|row| row.checked_add(field.offset))
-            .ok_or_else(|| {
-                crate::record::RecordError::Storage("metadata offset overflow".into())
-            })?;
+            .ok_or_else(|| RecordError::Storage("metadata offset overflow".into()))?;
+        let length = self.metadata_length()?;
+        let end = offset.checked_add(width).filter(|end| *end <= length)
+            .ok_or_else(|| RecordError::Storage("metadata field outside component rows".into()))?;
         let mut bytes = [0; 9];
-        let width = field_width(&field.field_type);
-        self.facets_file
-            .read_exact_at(offset as u64, &mut bytes[..width])
-            .map_err(read_error)?;
+        read(offset..end, &mut bytes[..width])?;
         if bytes[width - 1] > 1 {
-            return Err(crate::record::RecordError::Storage(
+            return Err(RecordError::Storage(
                 "invalid metadata presence byte".into(),
             ));
         }

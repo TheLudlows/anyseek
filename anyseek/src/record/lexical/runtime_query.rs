@@ -3,7 +3,7 @@
 use super::*;
 use std::cmp::Ordering;
 use crate::{
-    component::RetrievalSegment,
+    component::{FacetReader, RetrievalSegment},
     index::VectorIndexArc,
     min_heap::Result as SearchHit,
     search::{
@@ -195,12 +195,13 @@ pub(crate) async fn search(
         for (slot, (shard, active)) in shards.iter().zip(active_shards).enumerate() {
             let compiled = crate::metadata_filter::compile_filters(shard, &filters)
                 .map_err(RecordError::Rejected)?;
+            let mut facets = FacetReader::new(shard);
             for (local, key) in active.keys.iter().enumerate().filter(|(local, _)| active.is_live(*local)) {
                 let (version, revision) = active.revisions[local];
                 let identity = Identity { id: key.clone(), version, revision };
                 let row = VectorRow {
                     address: local * shards.len() + slot,
-                    passes_filter: !crate::metadata_filter::is_facet_filter(shard, &compiled, local)?,
+                    passes_filter: !crate::metadata_filter::is_facet_filter(&mut facets, &compiled, local)?,
                 };
                 if vectors.insert(identity, row).is_some() {
                     return Err(storage("duplicate live vector revision identity"));
@@ -231,7 +232,7 @@ pub(crate) async fn search(
     // Reserve its workspace before compiling the predicates.
     let mut compiled = Vec::new();
     let _filter_workspace = if aligned && !filters.is_empty() {
-        let mut bytes = 0u64;
+        let mut bytes = (shards.len() as u64) * (size_of::<FacetReader<'_>>() as u64);
         for shard in &shards {
             bytes = bytes.checked_add(crate::metadata_filter::workspace_bytes(shard, &filters)
                 .map_err(RecordError::Rejected)?)
@@ -257,8 +258,9 @@ pub(crate) async fn search(
         // Inspect metadata only for posting matches while the component is guarded,
         // then release component guards before native scoring.
         let mut accepted = FilteredMatches::default();
+        let mut facets = shards.iter().map(|shard| FacetReader::new(shard)).collect::<Vec<_>>();
         corpus.as_ref().expect("aligned corpus").visit(plan.predicate.as_ref(), |slot, ordinal, _| {
-            if !crate::metadata_filter::is_facet_filter(&shards[slot], &compiled[slot], ordinal)? {
+            if !crate::metadata_filter::is_facet_filter(&mut facets[slot], &compiled[slot], ordinal)? {
                 accepted.insert(ordinal * n + slot, scope.as_ref())?;
             }
             Ok(())
@@ -280,6 +282,11 @@ pub(crate) async fn search(
         // only when collecting hits.
         None => scoring::CorpusView::select_matching(&views, cut, |identity| vectors.contains_key(identity))?,
     };
+    let mut facets = if compiled.is_empty() || detached {
+        Vec::new()
+    } else {
+        shards.iter().map(|shard| FacetReader::new(shard)).collect()
+    };
     let accepts = |slot: usize, ordinal: usize, identity: &Identity| {
         Ok(if !aligned {
             vectors[identity].passes_filter
@@ -287,7 +294,7 @@ pub(crate) async fn search(
             filtered.addresses.contains(&(ordinal * n + slot))
         } else {
             compiled.is_empty()
-                || !crate::metadata_filter::is_facet_filter(&shards[slot], &compiled[slot], ordinal)?
+                || !crate::metadata_filter::is_facet_filter(&mut facets[slot], &compiled[slot], ordinal)?
         })
     };
     let address = |slot: usize, ordinal: usize, identity: &Identity| {

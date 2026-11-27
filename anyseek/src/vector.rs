@@ -1,5 +1,5 @@
 use crate::{
-    component::read_error as vector_io,
+    component::{FacetReader, read_error as vector_io},
     record::{build_budget::admit_memory, RecordError},
     resources::{MemoryReservation, Scope},
     storage::build_budget::File,
@@ -1321,7 +1321,7 @@ pub enum ResultSource {
 
 impl VectorSegment {
     #[allow(clippy::too_many_arguments)]
-    pub(crate) async fn search_vector_segment_uncommitted(
+    fn search_vector_segment_uncommitted(
         &self,
         query_simd: &QuerySimd,
         query_embedding: &Embedding,
@@ -1332,6 +1332,7 @@ impl VectorSegment {
         vector_similarity: &VectorSimilarity,
         field_filter_set: &AHashSet<u16>,
         facet_filter: &[FilterSparse],
+        facets: &mut FacetReader<'_>,
         top_k: &mut TopK<'_>,
     ) -> Result<(), RecordError> {
         let level_id = if self.is_last_level_incomplete {
@@ -1344,7 +1345,7 @@ impl VectorSegment {
 
         for record in self.block_vector_buffer.iter() {
             let doc_id = (level_id << 16) | (record.doc_id as usize);
-            if self.is_deleted(doc_id) || is_facet_filter(self, facet_filter, doc_id)? {
+            if self.is_deleted(doc_id) || is_facet_filter(facets, facet_filter, doc_id)? {
                 continue;
             }
             if field_filter_set.is_empty() || field_filter_set.contains(&(record.field_id as u16)) {
@@ -1459,6 +1460,7 @@ impl SearchVectorSegment for VectorSegmentArc {
         };
         let mut top_k = TopK::new(length, similarity_threshold, vector_similarity, similarity_normalization);
         top_k.keys = shard_ref.active.as_ref().map(|active| active.keys.as_slice());
+        let mut facets = FacetReader::new(&shard_ref);
 
         if include_uncommitted && shard_ref.uncommitted && !shard_ref.block_vector_buffer.is_empty()
         {
@@ -1473,9 +1475,9 @@ impl SearchVectorSegment for VectorSegmentArc {
                     &vector_similarity,
                     &field_filter_set,
                     &facet_filter,
+                    &mut facets,
                     &mut top_k,
-                )
-                .await?;
+                )?;
         }
 
         let mut offset = 0;
@@ -1596,7 +1598,7 @@ impl SearchVectorSegment for VectorSegmentArc {
 
                         let doc_id = (level_id << 16) | (record.header.doc_id as usize);
                         if shard_ref.is_deleted(doc_id)
-                            || is_facet_filter(&shard_ref, &facet_filter, doc_id)?
+                            || is_facet_filter(&mut facets, &facet_filter, doc_id)?
                         {
                             continue;
                         }
