@@ -75,6 +75,48 @@ pub struct TimeVectorRequest {
     pub facet_filter: Vec<FacetFilter>,
 }
 
+/// Opt-in event time plus a bounded lexical query, with an optional exact vector.
+#[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TimeTextRequest {
+    /// Independent event-time window.
+    pub recall: TimeVectorRecall,
+    /// One positive analyzed term, at most 1024 input bytes.
+    #[serde(rename = "query")]
+    #[schema(min_length = 1, max_length = 1024)]
+    pub query_string: String,
+    /// External embedding to include exact-vector recall as the third channel.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query_vector: Option<serde_json::Value>,
+    /// Required and true with an embedding. Omit for time and lexical recall.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub all: Option<bool>,
+    /// Optional temporal predicates shared by all channels.
+    #[serde(default)]
+    #[schema(value_type = Object)]
+    pub temporal: Option<crate::record::TemporalFilter>,
+    /// Skip this many fused records.
+    #[serde(default)]
+    pub offset: usize,
+    /// Two channels allow offset plus length through 64 and three through 42.
+    #[serde(default = "length_api")]
+    #[schema(default = 10, minimum = 1, maximum = 64)]
+    pub length: usize,
+    /// Exact totals are unavailable in this mode. Must be false if supplied.
+    #[serde(default)]
+    pub count: bool,
+    /// Requested stored fields. An empty list selects all stored fields.
+    #[serde(default)]
+    pub fields: Vec<String>,
+    /// Metadata predicates applied by all channels before ranking.
+    #[serde(default, rename = "filter")]
+    #[schema(value_type = Vec<api_schema::FacetFilter>, max_items = 32)]
+    pub facet_filter: Vec<FacetFilter>,
+    /// Optional channel weights and rank constant. Defaults are equal.
+    #[serde(default)]
+    pub rrf: crate::search::TimeRrfOptions,
+}
+
 /// Search text, vectors, or both. Empty input browses documents. Pending writes are visible.
 #[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
 #[serde(deny_unknown_fields)]

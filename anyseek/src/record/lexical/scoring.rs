@@ -4,6 +4,66 @@ use crate::index::{DOCUMENT_LENGTH_COMPRESSION, FieldLengthNormalization, int_to
 use crate::search::QueryWork;
 use tantivy::postings::Postings;
 
+fn precharge_predicate(
+    query: &dyn Query,
+    segment: &tantivy::SegmentReader,
+    work: &QueryWork,
+) -> Result<(), RecordError> {
+    let mut terms = Vec::new();
+    query.query_terms(&mut |term, _| terms.push(term));
+    let mut postings = 0usize;
+    for term in &terms {
+        work.charge(1)?;
+        let inverted = segment
+            .inverted_index(term.field())
+            .map_err(native_search_error)?;
+        if let Some(info) = inverted.get_term_info(term).map_err(native_io_error)? {
+            postings = postings.saturating_add(info.doc_freq as usize);
+        }
+    }
+    // The strict plan admits a TermScorer or one flat buffered field union
+    // inside unary Boolean wrappers. Term cursors only advance. A union refill
+    // consumes at least one posting and advances its 4096-doc horizon, with
+    // at most 64 bitmap buckets and three passes over its field cursors.
+    let union = if terms.len() > 1 {
+        let windows = postings.min((segment.max_doc() as usize).div_ceil(4096));
+        (windows + 1).saturating_mul(64 + 3 * terms.len())
+    } else {
+        0
+    };
+    work.charge(
+        1usize
+            .saturating_add(postings.saturating_mul(2))
+            .saturating_add(union),
+    )
+}
+
+fn read_score_postings(
+    segment: &tantivy::SegmentReader,
+    field: Field,
+    word: &str,
+    work: Option<&QueryWork>,
+) -> Result<Option<tantivy::postings::SegmentPostings>, RecordError> {
+    let inverted = segment.inverted_index(field).map_err(native_search_error)?;
+    let term = Term::from_field_text(field, word);
+    if let Some(work) = work {
+        work.charge(1)?;
+        let Some(info) = inverted.get_term_info(&term).map_err(native_io_error)? else {
+            return Ok(None);
+        };
+        // BM25's independent frequency cursor seeks monotonically. A skip
+        // passes a block once, and each scored document pays for its own seek.
+        work.charge(info.doc_freq as usize)?;
+        return inverted
+            .read_postings_from_terminfo(&info, IndexRecordOption::WithFreqs)
+            .map(Some)
+            .map_err(native_io_error);
+    }
+    inverted
+        .read_postings(&term, IndexRecordOption::WithFreqs)
+        .map_err(native_io_error)
+}
+
 fn decoded(length: u64) -> f32 {
     DOCUMENT_LENGTH_COMPRESSION[int_to_byte4(length as u32) as usize] as f32
 }
@@ -284,6 +344,9 @@ impl ActiveView<'_> {
             return Ok(0);
         }
         let QueryStatistics { terms, slots, averages, idfs } = statistics;
+        let work = QueryWork::current();
+        // Each bounded group has one term for its gate and scoring.
+        let row_cost = 1 + self.snapshot.fields.len() * (3 + self.snapshot.fields.len());
         // Tantivy executes the complete Boolean/phrase predicate, but cannot
         // prune with its own BM25 score bounds for this different score.
         let weight = query
@@ -293,28 +356,28 @@ impl ActiveView<'_> {
             .map_err(native_search_error)?;
         let mut count = 0;
         for (segment_id, segment) in self.snapshot.searcher.segment_readers().iter().enumerate() {
+            if let Some(work) = &work {
+                precharge_predicate(query, segment, work)?;
+            }
             let mut postings = Vec::new();
             for word in terms {
                 let fields = self
                     .snapshot
                     .fields
                     .iter()
-                    .map(|field| {
-                        Ok(segment.inverted_index(*field)?.read_postings(
-                            &Term::from_field_text(*field, word),
-                            IndexRecordOption::WithFreqs,
-                        )?)
-                    })
-                    .collect::<tantivy::Result<Vec<_>>>()
-                    .map_err(native_search_error)?;
+                    .map(|&field| read_score_postings(segment, field, word, work.as_deref()))
+                    .collect::<Result<Vec<_>, _>>()?;
                 postings.push(fields);
             }
+            if let Some(work) = &work { work.charge(0)?; }
             let mut scorer = weight.scorer(segment, 1.0).map_err(native_search_error)?;
             while scorer.doc() != TERMINATED {
+                if let Some(work) = &work { work.charge(0)?; }
                 let doc = scorer.doc();
                 let ordinal = self.snapshot.addresses[segment_id][doc as usize];
                 let identity = &self.snapshot.identities[ordinal];
                 if self.live.contains(&ordinal) && accepts(ordinal, identity)? {
+                    if let Some(work) = &work { work.charge(row_cost)?; }
                     count += 1;
                     let mut score = 0.0f32;
                     for fields in &mut postings {
@@ -360,10 +423,12 @@ impl ActiveView<'_> {
                 }
                 scorer.advance();
             }
+            if let Some(work) = &work { work.charge(0)?; }
         }
         if !self.snapshot.overlay.is_empty() {
             let predicate=query.downcast_ref::<super::query::Compiled>().ok_or_else(||storage("visible delta requires shared query compiler"))?;
             for (ordinal,row) in &self.snapshot.overlay {
+                if let Some(work) = &work { work.charge(row_cost)?; }
                 // Match before filter and scoring callbacks, just like the native scorer.
                 if !self.live.contains(ordinal) || !predicate.matches(row,&self.snapshot.fields) || !accepts(*ordinal, &row.identity)?{continue;}
                 count+=1;let mut score=0.0f32;
@@ -487,6 +552,7 @@ impl<'a> CorpusView<'a> {
         query: &dyn Query,
         mut visit: impl FnMut(usize, usize, &Identity) -> Result<(), RecordError>,
     ) -> Result<(), RecordError> {
+        let work = QueryWork::current();
         for (slot, view) in self.views.iter().enumerate() {
             if view.live.is_empty() {
                 continue;
@@ -495,19 +561,25 @@ impl<'a> CorpusView<'a> {
                 .weight(EnableScoring::disabled_from_searcher(&view.snapshot.searcher))
                 .map_err(native_search_error)?;
             for (segment_id, segment) in view.snapshot.searcher.segment_readers().iter().enumerate() {
+                if let Some(work) = &work {
+                    precharge_predicate(query, segment, work)?;
+                }
                 let mut scorer = weight.scorer(segment, 1.0).map_err(native_search_error)?;
                 while scorer.doc() != TERMINATED {
+                    if let Some(work) = &work { work.charge(0)?; }
                     let ordinal = view.snapshot.addresses[segment_id][scorer.doc() as usize];
                     if view.live.contains(&ordinal) {
                         visit(slot, ordinal, &view.snapshot.identities[ordinal])?;
                     }
                     scorer.advance();
                 }
+                if let Some(work) = &work { work.charge(0)?; }
             }
             if !view.snapshot.overlay.is_empty() {
                 let predicate = query.downcast_ref::<super::query::Compiled>()
                     .ok_or_else(|| storage("visible delta requires shared query compiler"))?;
                 for (ordinal, row) in &view.snapshot.overlay {
+                    if let Some(work) = &work { work.charge(1 + view.snapshot.fields.len())?; }
                     if view.live.contains(ordinal) && predicate.matches(row, &view.snapshot.fields) {
                         visit(slot, *ordinal, &row.identity)?;
                     }

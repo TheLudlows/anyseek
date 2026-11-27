@@ -143,6 +143,43 @@ pub(crate) fn workspace_bytes(shard: &VectorSegment, filters: &[FacetFilter]) ->
         .ok_or_else(|| "metadata predicate memory overflow".to_owned())
 }
 
+pub(crate) fn metered_workspace_bytes(
+    shard: &VectorSegment,
+    filters: &[FacetFilter],
+    work: &crate::search::QueryWork,
+) -> Result<u64, crate::record::RecordError> {
+    use crate::record::RecordError;
+
+    for filter in filters {
+        work.charge(1)?;
+        if let FacetFilter::String { filter, .. } | FacetFilter::StringSet { filter, .. } = filter {
+            for value in filter {
+                work.charge(2 + value.len())?;
+            }
+        }
+    }
+    let bytes = workspace_bytes(shard, filters).map_err(RecordError::Rejected)?;
+    let slots = shard.facets.len() + filters.len();
+    let ids = usize::try_from((bytes - slots as u64 * 256) / 16)
+        .map_err(|_| RecordError::Rejected("metadata work budget overflow".into()))?;
+    // Each expanded ID is copied, sorted, and deduplicated. Include sorting
+    // growth before allocating the expanded predicates, even if all IDs repeat.
+    let levels = ids.checked_ilog2().unwrap_or(0) as usize + 1;
+    work.charge(slots.saturating_add(ids.saturating_mul(2 + 4 * levels)))?;
+    Ok(bytes)
+}
+
+pub(crate) fn filter_work(filters: &[FilterSparse]) -> usize {
+    fn checks(filter: &FilterSparse) -> usize {
+        match filter {
+            FilterSparse::String(ids) => 2 + ids.len().checked_ilog2().unwrap_or(0) as usize,
+            FilterSparse::And(predicates) => predicates.iter().map(checks).sum(),
+            _ => 1,
+        }
+    }
+    filters.iter().map(checks).sum()
+}
+
 pub(crate) fn compile_filters(
     shard: &VectorSegment,
     filters: &[FacetFilter],

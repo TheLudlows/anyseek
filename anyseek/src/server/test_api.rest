@@ -211,3 +211,19 @@ X-AnySeek-Tenant: {{tenant_id}}
 Content-Type: application/json
 
 {"recall":{"time":{"from_ms":1735689600000,"to_ms":1735776000000}},"query_vector":[1,0],"all":true,"length":10,"fields":["body"]}
+
+### Fuse a certified time window with bounded lexical recall
+POST {{base_url}}/api/v1/index/{{collection_id}}/query
+apikey: {{master_key}}
+X-AnySeek-Tenant: {{tenant_id}}
+Content-Type: application/json
+
+{"recall":{"time":{"from_ms":1735689600000,"to_ms":1735776000000}},"query":"report","length":10,"fields":["body"]}
+
+### Fuse time, bounded lexical recall, and exact vector recall
+POST {{base_url}}/api/v1/index/{{collection_id}}/query
+apikey: {{master_key}}
+X-AnySeek-Tenant: {{tenant_id}}
+Content-Type: application/json
+
+{"recall":{"time":{"from_ms":1735689600000,"to_ms":1735776000000}},"query":"report","query_vector":[1,0],"all":true,"length":10,"fields":["body"]}

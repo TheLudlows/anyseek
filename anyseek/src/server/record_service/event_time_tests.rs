@@ -95,12 +95,17 @@ fn event_time_vector_openapi_keeps_ordinary_and_mixed_query_shapes() {
     let input = &query["requestBody"]["content"]["application/json"]["schema"]["oneOf"];
     assert_eq!(input[0]["$ref"], "#/components/schemas/SearchRequestObject");
     assert_eq!(input[1]["$ref"], "#/components/schemas/TimeVectorRequest");
+    assert_eq!(input[2]["$ref"], "#/components/schemas/TimeTextRequest");
     let output = &query["responses"]["200"]["content"]["application/json"]["schema"]["oneOf"];
     assert_eq!(
         output[0]["properties"]["diagnostics"]["$ref"],
         "#/components/schemas/QueryDiagnostics"
     );
     assert_eq!(output[1]["$ref"], "#/components/schemas/TimeVectorResult");
+    let channels = &doc["components"]["schemas"]["TimeVectorResult"]["properties"]["hits"]
+        ["items"]["properties"]["channels"];
+    assert_eq!(channels["maxItems"], 3);
+    assert_eq!(channels["items"]["properties"]["channel"]["enum"], json!(["time", "lexical", "vector"]));
     assert_eq!(
         doc["components"]["schemas"]["TimeVectorRequest"]["properties"]["all"]["const"],
         true
@@ -409,7 +414,6 @@ async fn event_time_vector_http_respects_authorization_and_publication() {
         StatusCode::FORBIDDEN
     );
     for (field, value) in [
-        ("query", json!("lexical")),
         ("nprobe", json!(1)),
         ("all", json!(false)),
         ("count", json!(true)),
@@ -450,6 +454,339 @@ async fn event_time_vector_http_respects_authorization_and_publication() {
     );
     drop(app);
     service.shutdown().wait().await.unwrap();
+}
+
+#[tokio::test]
+async fn event_time_text_http_and_sdk_fuse_one_cut_and_reject_excess_work() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("catalog");
+    let service = open(&root).await;
+    let app = router(service.clone());
+    let sdk = local::LocalEngine::from_test_service(service.clone());
+    create_mixed_collection(&app).await;
+    let mut rows = Vec::new();
+    for (id, time, body, vector) in [
+        ("both", 20, "match", Some(json!([1, 0]))),
+        ("time", 21, "other", None),
+        ("lexical", 90, "other", None),
+        ("vector", 91, "other", Some(json!([0, 1]))),
+    ] {
+        let mut row = mixed_row(id, id, None);
+        row["temporal"]["event_time_ms"] = json!(time);
+        row["document"] = json!({"body":body,"private":"hidden","tags":["broad",id]});
+        if matches!(id, "both" | "lexical") {
+            row["document"]["private"] = json!("match");
+        }
+        if let Some(vector) = vector {
+            row["document"]["vector"] = vector;
+        }
+        rows.push(row);
+    }
+    for n in 0..12 {
+        let id = format!("padding-{n}");
+        let mut row = mixed_row(&id, &id, None);
+        row["temporal"]["event_time_ms"] = json!(100);
+        row["document"] = json!({"body":"other","tags":["broad",id]});
+        rows.push(row);
+    }
+    write_mixed(&app, rows).await;
+    assert_eq!(
+        build(&app, master_headers(), "window").await,
+        (StatusCode::OK, json!({"indexed_seq":16}))
+    );
+    let routes = &app;
+    let call = |tenant, request| async move {
+        decode_response(
+            namespace_response(routes, "POST", MIXED_QUERY, tenant, Some(request)).await,
+        )
+        .await
+    };
+    let text = json!({"recall":{"time":{"from_ms":18,"to_ms":22}},"query":"match",
+        "length":4,"fields":["body","private"]});
+    let mut triple = text.clone();
+    triple["query_vector"] = json!([1, 0]);
+    triple["all"] = json!(true);
+    for (request, expected) in [(text.clone(), 3), (triple.clone(), 4)] {
+        let (status, body) = call("tenant", request.clone()).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["visible_seq"], 16);
+        assert!(body["count_total"].is_null());
+        let hits = body["hits"].as_array().unwrap();
+        assert_eq!(hits.len(), expected);
+        assert_eq!(hits[0]["record"]["record_id"], "both");
+        let channels = |id: &str| {
+            hits.iter()
+                .find(|hit| hit["record"]["record_id"] == id)
+                .unwrap()["channels"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|channel| channel["channel"].as_str().unwrap())
+                .collect::<Vec<_>>()
+        };
+        let expected_both = if expected == 3 {
+            vec!["time", "lexical"]
+        } else {
+            vec!["time", "lexical", "vector"]
+        };
+        assert_eq!(channels("both"), expected_both);
+        assert_eq!(channels("time"), ["time"]);
+        assert_eq!(channels("lexical"), ["lexical"]);
+        if expected == 4 {
+            assert_eq!(channels("vector"), ["vector"]);
+        }
+        assert_eq!(hits[0]["record"]["document"], json!({"body":"match"}));
+        let embedded = sdk
+            .query_time_text("tenant", "window", serde_json::from_value(request).unwrap())
+            .await
+            .unwrap();
+        let embedded: Value =
+            serde_json::from_str(&serde_json::to_string(&embedded).unwrap()).unwrap();
+        assert_eq!(embedded["hits"], body["hits"]);
+    }
+    assert_eq!(
+        call("outside", triple.clone()).await.0,
+        StatusCode::FORBIDDEN
+    );
+    assert!(
+        sdk.query_time_text(
+            "outside",
+            "window",
+            serde_json::from_value(triple.clone()).unwrap()
+        )
+        .await
+        .is_err()
+    );
+
+    let mut empty = text.clone();
+    empty["recall"]["time"] = json!({"from_ms":0,"to_ms":1});
+    empty["query"] = json!("unmatched");
+    let (status, body) = call("tenant", empty).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["hits"], json!([]));
+
+    let maximum =
+        json!({"constant":1,"time_weight":1.2e38,"keyword_weight":1.2e38,"vector_weight":1.2e38});
+    let mut finite = text.clone();
+    finite["rrf"] = maximum.clone();
+    assert_eq!(call("tenant", finite).await.0, StatusCode::OK);
+    let mut overflow = triple.clone();
+    overflow["rrf"] = maximum;
+    let mut over_budget = text.clone();
+    over_budget["filter"] = json!([{"StringSet":{"field":"tags","filter":vec!["broad";128]}}]);
+    let mut vector_budget = mixed_request();
+    vector_budget["filter"] = over_budget["filter"].clone();
+    let (status, error) = call("tenant", vector_budget.clone()).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
+    assert!(
+        error["message"]
+            .as_str()
+            .unwrap()
+            .contains("query work budget exhausted")
+    );
+    assert!(error.get("hits").is_none());
+    let error = sdk
+        .query_time_vector(
+            "tenant",
+            "window",
+            serde_json::from_value(vector_budget).unwrap(),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), "rejected");
+    let mut unsupported = triple;
+    unsupported["query"] = json!("\"match other\"");
+    let mut punctuation = text.clone();
+    punctuation["query"] = json!("!!!");
+    let mut only_exclusion = text.clone();
+    only_exclusion["query"] = json!("-match");
+    only_exclusion["rrf"] = json!({"keyword_weight":0});
+    for (request, message) in [
+        (overflow, "maximum fused score"),
+        (over_budget, "query work budget exhausted"),
+        (unsupported, "single positive analyzed term"),
+        (punctuation, "single positive analyzed term"),
+        (only_exclusion, "single positive analyzed term"),
+    ] {
+        let (status, body) = call("tenant", request.clone()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(
+            body["message"].as_str().unwrap().contains(message),
+            "{body}"
+        );
+        assert!(body.get("hits").is_none());
+        let error = sdk
+            .query_time_text("tenant", "window", serde_json::from_value(request).unwrap())
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), "rejected");
+    }
+
+    let entry = service
+        .catalog
+        .collection_entry("tenant", "window")
+        .await
+        .unwrap();
+    let partition = root.join(entry.directory());
+    let gate = partition.join(".test-lexical-consumer-pause");
+    std::fs::write(&gate, b"pause").unwrap();
+    let (status, ingested) = namespace_api(
+        &app,
+        "POST",
+        "/api/v1/index/window/ingest",
+        "tenant",
+        Some(json!({"records":[mixed_row("publish", "tail", None)]})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{ingested}");
+    assert_eq!(ingested["results"][0]["receipt"]["seq"], 17);
+    wait_marker(&partition.join(".test-lexical-consumer-started")).await;
+    let busy = call("tenant", text.clone()).await;
+    let embedded = sdk
+        .query_time_text("tenant", "window", serde_json::from_value(text).unwrap())
+        .await;
+    std::fs::remove_file(gate).unwrap();
+    assert_eq!(busy.0, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(busy.1["code"], "busy");
+    assert!(busy.1.get("hits").is_none());
+    assert_eq!(embedded.unwrap_err().code(), "busy");
+    drop(sdk);
+    drop(app);
+    service.shutdown().wait().await.unwrap();
+}
+
+#[tokio::test]
+async fn event_time_zero_weight_candidates_do_not_fence_http_or_sdk_delivery() {
+    // Cover the time-side and retrieval-side evidence independently.
+    for zero_time in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("catalog");
+        let service = open(&root).await;
+        let app = router(service.clone());
+        let sdk = Arc::new(local::LocalEngine::from_test_service(service.clone()));
+        create_mixed_collection(&app).await;
+        let partition = service.record("tenant", "window").await.unwrap();
+        let (clock, now) = anyseek::record::tests::test_clock(&partition).await;
+        let expiry = now + 60_000;
+        let mut keep = mixed_row("keep", "keep", None);
+        let mut expires = mixed_row("expires", "expires", Some(expiry));
+        keep["document"] = json!({"body":"match"});
+        expires["document"]["body"] = json!("other");
+        if zero_time {
+            keep["temporal"]["event_time_ms"] = json!(100);
+            keep["document"]["vector"] = json!([1, 0]);
+            expires["document"]
+                .as_object_mut()
+                .unwrap()
+                .remove("vector");
+        } else {
+            expires["temporal"]["event_time_ms"] = json!(100);
+        }
+        write_mixed(&app, vec![keep, expires]).await;
+        assert_eq!(
+            build(&app, master_headers(), "window").await,
+            (StatusCode::OK, json!({"indexed_seq":2}))
+        );
+
+        let muted = if zero_time {
+            "time_weight"
+        } else {
+            "vector_weight"
+        };
+        let mut positive = mixed_request();
+        positive["query"] = json!("match");
+        positive["length"] = json!(1);
+        positive["rrf"] =
+            json!({"constant":2,"time_weight":2,"keyword_weight":3,"vector_weight":2});
+        positive["rrf"][muted] = json!(0.25);
+        let mut zero = positive.clone();
+        zero["rrf"][muted] = json!(0);
+        let routes = &app;
+        let before = |request| async move {
+            namespace_response(routes, "POST", MIXED_QUERY, "tenant", Some(request)).await
+        };
+        let (status, body) = decode_response(before(positive.clone()).await).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["hits"][0]["record"]["record_id"], "keep");
+        assert_eq!(body["hits"][0]["score"], 2.5);
+        // The expiring, positively weighted candidate does not fit on the
+        // first page, but its rank evidence is still part of delivery.
+        let positive_http = before(positive.clone()).await;
+        let zero_http = before(zero.clone()).await;
+        assert_eq!(positive_http.status(), StatusCode::OK);
+        assert_eq!(zero_http.status(), StatusCode::OK);
+        let gate = root.join(".test-event-read-handoff-pause");
+        let entered = root.join(".test-event-read-handoff-started");
+        std::fs::write(&gate, b"pause").unwrap();
+        let start = |request| {
+            let reader = sdk.clone();
+            tokio::spawn(async move {
+                reader
+                    .query_time_text("tenant", "window", serde_json::from_value(request).unwrap())
+                    .await
+            })
+        };
+        let zero_sdk = start(zero);
+        wait_marker(&entered).await;
+        std::fs::remove_file(&entered).unwrap();
+        let positive_sdk = start(positive);
+        wait_marker(&entered).await;
+        clock.set(expiry + 1000);
+        assert!(
+            sdk.get("tenant", "window", "expires")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(partition.committed_progress().await.committed_seq, Some(2));
+        clock.set(expiry - 7000);
+        std::fs::remove_file(gate).unwrap();
+
+        let (status, body) = decode_response(zero_http).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["hits"].as_array().unwrap().len(), 1);
+        let hit = &body["hits"][0];
+        assert_eq!(hit["record"]["record_id"], "keep");
+        assert_eq!(hit["score"], 2.5);
+        let explanations: Vec<_> = hit["channels"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| {
+                (
+                    item["channel"].as_str().unwrap(),
+                    item["rrf_contribution"].as_f64().unwrap(),
+                )
+            })
+            .collect();
+        let expected = if zero_time {
+            [("lexical", 1.5), ("vector", 1.0)]
+        } else {
+            [("time", 1.0), ("lexical", 1.5)]
+        };
+        assert_eq!(explanations, expected);
+        let embedded = zero_sdk.await.unwrap().unwrap();
+        assert_eq!(embedded.hits[0].record.record_id, "keep");
+        assert_eq!(embedded.hits[0].score, 2.5);
+        assert_eq!(positive_sdk.await.unwrap().unwrap_err().code(), "busy");
+
+        let mut body = positive_http.into_body();
+        use http_body::Body as _;
+        assert!(matches!(
+            std::future::poll_fn(|cx| Pin::new(&mut body).poll_frame(cx)).await,
+            Some(Err(_))
+        ));
+        assert!(
+            std::future::poll_fn(|cx| Pin::new(&mut body).poll_frame(cx))
+                .await
+                .is_none()
+        );
+        drop(body);
+        drop(partition);
+        drop(sdk);
+        drop(app);
+        service.shutdown().wait().await.unwrap();
+    }
 }
 
 #[tokio::test]

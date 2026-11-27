@@ -277,6 +277,27 @@ impl Compiled {
     fn all()->Self{Self{native:Box::new(AllQuery),expr:Expr::All}}
     fn empty()->Self{Self{native:Box::new(EmptyQuery),expr:Expr::Empty}}
     pub(super) fn matches(&self,row:&super::memory::Row,fields:&[Field])->bool{self.expr.matches(row,fields)}
+
+    /// A bounded scorer can traverse a term and its disjunction across fields.
+    /// Positions, exclusion and multi-term Boolean seeks require other bounds.
+    pub(super) fn supports_bounded_scoring(&self) -> bool {
+        let mut expr = &self.expr;
+        loop {
+            match expr {
+                Expr::Term(..) => return true,
+                Expr::Boolean(clauses) => match clauses.as_slice() {
+                    [(Occur::Must | Occur::Should, child)] => expr = child,
+                    [(Occur::Should, Expr::Term(_, word)), rest @ ..] => {
+                        return rest.iter().all(|(occur, child)| {
+                            matches!((occur, child), (Occur::Should, Expr::Term(_, term)) if term == word)
+                        });
+                    }
+                    _ => return false,
+                },
+                Expr::All | Expr::Empty | Expr::Phrase(..) => return false,
+            }
+        }
+    }
 }
 impl Expr {
     fn matches(&self,row:&super::memory::Row,fields:&[Field])->bool{match self {

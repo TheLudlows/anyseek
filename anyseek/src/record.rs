@@ -43,7 +43,7 @@ mod entity_view;
 pub use entity_view::{EntityAdjacencyView, EntityCandidate, EntityCandidates, EntityDirection};
 mod event_time_view;
 pub use event_time_view::{EventTimeResult, TimeVectorResult};
-pub(crate) use event_time_view::{EventTimeError, TimeVectorQuery};
+pub(crate) use event_time_view::{EventTimeError, TimeMixedQuery, TimeVectorQuery};
 #[cfg(test)]
 mod disk_read_fixture;
 mod query_output;
