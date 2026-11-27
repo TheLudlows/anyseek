@@ -1,0 +1,46 @@
+PASS optional vector HTTP: lexical before vector, exact version append-only enrichment, retry and readiness
+PASS vector enrichment HTTP faults: exact body version and receipt across uncertain/pending/process exits
+PASS ordinary source metadata: durable replay and removed business routes
+PASS real HTTP faults: rejection/unknown/durable pending, process exits before/after visibility and stopped batch tail; local backup/restore private and published snapshot crashes
+PASS Record lifecycle: stable-view iterator, non-atomic conditional batch/delete plans, backup retries, complete restore, Tenant-scoped restore, same-name recreation and stale delete retry across restart
+PASS real HTTP: default Record/catalog, service authentication and tenant namespaces, conditional writes, retry/response loss, checkpoint, crash restart, authenticated operation lookup, full query parameters, vectors
+PASS complete service snapshot: common catalog cut, all retained collections/live backups, new-root recovery, process-configured service credentials, historical control rejection, data retry preserved
+PASS Record client: stable IDs, retry, batch, immediate query, checkpoint (c913e61c6610d4d86a31581d4835471c4)
+PASS Record client: stable IDs, retry, batch, immediate query, checkpoint (c913e61c6610d4d86a31581d4835471c4)
+PASS committed ingest HTTP: mixed results, later execution, Record progress, retry and restart
+PASS publication comparison: two queued commands = 1 WAL publication; two serial commands = 2
+PASS cross-request HTTP batching: one durable publication, independent replies, conflicts and uncertain ranges
+PASS Busy preserves the earlier replay receipt and original-ID retry
+PASS committed ingest HTTP faults: paused indexes, disconnect, 429/503 item scopes, original-id restart recovery
+PASS temporal HTTP: logical filtering, background reclaim, durable floor, ID reuse and original retry
+PASS temporal HTTP fault matrix: append unknown, durable pending, exit after durable/visible, background fence and replay
+PASS removed sync routes: 404, rejected legacy HTTP config, get/iterator and receipt retry after restart
+PASS history trim faults: two-day default boundary, background fence/process exit recovery, retained retry receipt and current record
+PASS SIGTERM: cancelled accepted write, paused consumers, keepalive, root ownership and same-ID reopen
+PASS local reclamation: backup protection, same-name isolation, bounded eventual deletion, restart and old receipt fence
+PASS release panic=vector: SIGABRT and authority replay
+PASS release panic=queue: SIGABRT and authority replay
+PASS release panic=unknown: SIGABRT and authority replay
+
+running 1 test
+test record::group_write::tests::group_wal_process_exit_recovers_single_decision ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 528 filtered out; finished in 0.29s
+
+
+running 1 test
+test record::anchor::tests::incremental_state_closure_survives_rejection_gc_and_reopen ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 528 filtered out; finished in 4.10s
+
+
+running 1 test
+test record::anchor::tests::rejected_prepared_anchor_reclaims_only_unselected_objects ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 528 filtered out; finished in 4.75s
+
+
+running 1 test
+test record::anchor::tests::multisegment_delete_and_corrupt_selected_object_fail_closed ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 528 filtered out; finished in 3.42s

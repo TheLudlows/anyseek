@@ -378,7 +378,9 @@ impl Catalog {
                         );
                     }
                 }
-                if total > 1024 * 1024 * 1024 {
+                let limit = 1024 * 1024 * 1024;
+                log::debug!("service snapshot preflight payload_bytes={total} limit_bytes={limit}");
+                if total > limit {
                     return Err(CatalogError::Rejected(
                         "service snapshot payload budget (1 GiB) exceeded".into(),
                     ));

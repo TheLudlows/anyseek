@@ -1,0 +1,544 @@
+{
+  "B_manifest": {
+    "anyseek_version": "3.4.1",
+    "archived": 2,
+    "directory_sha256": "cd6c4f3e072d109154875f949a96157b14e483e27b27bf435d42009cac44bd96",
+    "format": "origence-private-archive-restore-v2"
+  },
+  "anyseek_binary_sha256": "b09aa6a5ef012a3be8221c8ed9d6546c3843e0995c5b5eeb7af205d6c0bdebfc",
+  "anyseek_collection_info": {
+    "pr_6ea09b420dec88f5974ed58cd1d9173c6233458cbe31837d72beb7c9101f": {
+      "info": {
+        "analysis": {
+          "fingerprint": "0bacdc68fc007568722bf5c3ef746446366ef654a08a706ebe989acf6d4ad481",
+          "format": "native-package-analysis:v1",
+          "stop_words": "None",
+          "stop_words_fingerprint": "f2953d2931e36d0c55640f51865f8394ebe52194765d04e521017232558f871c",
+          "tokenizer": "TantivySimpleV1",
+          "tokenizer_identity": "tantivy-simple-v1;tantivy=0.27.0;lowercase;no-stopwords;no-length-filter"
+        },
+        "embedding_space_id": "97792c255ac3b49759c1821243f3e3450ebbab701da71afe149d87940f4b4f67:synthetic-vector:3:v1",
+        "field_length_normalization": "Shared",
+        "id": "pr_6ea09b420dec88f5974ed58cd1d9173c6233458cbe31837d72beb7c9101f",
+        "limits": {
+          "max_candidates": 10000,
+          "max_journal_bytes": 268435456
+        },
+        "name": "origence-private-archive-v2",
+        "schema": [
+          {
+            "boost": 1.0,
+            "field": "archive",
+            "field_type": "String",
+            "filterable": true,
+            "index_lexical": false,
+            "index_vector": false,
+            "store": true
+          },
+          {
+            "boost": 1.0,
+            "field": "kind",
+            "field_type": "String",
+            "filterable": true,
+            "index_lexical": false,
+            "index_vector": false,
+            "store": true
+          },
+          {
+            "boost": 1.0,
+            "field": "body",
+            "field_type": "Json",
+            "filterable": false,
+            "index_lexical": false,
+            "index_vector": false,
+            "store": true
+          },
+          {
+            "boost": 1.0,
+            "field": "terms",
+            "field_type": "Text",
+            "filterable": false,
+            "index_lexical": true,
+            "index_vector": false,
+            "store": false
+          },
+          {
+            "boost": 1.0,
+            "field": "session",
+            "field_type": "String",
+            "filterable": true,
+            "index_lexical": false,
+            "index_vector": false,
+            "store": true
+          },
+          {
+            "boost": 1.0,
+            "field": "turn",
+            "field_type": "String",
+            "filterable": true,
+            "index_lexical": false,
+            "index_vector": false,
+            "store": true
+          },
+          {
+            "boost": 1.0,
+            "field": "source",
+            "field_type": "String",
+            "filterable": true,
+            "index_lexical": false,
+            "index_vector": false,
+            "store": true
+          },
+          {
+            "boost": 1.0,
+            "field": "sequence",
+            "field_type": "Int",
+            "filterable": true,
+            "index_lexical": false,
+            "index_vector": false,
+            "store": true
+          },
+          {
+            "boost": 1.0,
+            "field": "digest",
+            "field_type": "String",
+            "filterable": false,
+            "index_lexical": false,
+            "index_vector": false,
+            "store": true
+          },
+          {
+            "boost": 1.0,
+            "field": "metadata",
+            "field_type": "Json",
+            "filterable": false,
+            "index_lexical": false,
+            "index_vector": false,
+            "store": true
+          },
+          {
+            "boost": 1.0,
+            "field": "vector",
+            "field_type": "Json",
+            "filterable": false,
+            "index_lexical": false,
+            "index_vector": true,
+            "store": false
+          }
+        ],
+        "statistics": {
+          "active_records": 4,
+          "checkpoint_bytes": 7416,
+          "evaluation_time_ms": 1795782462060,
+          "physical_versions": 4,
+          "retained_identities": 4,
+          "retained_operations": 2,
+          "visible_seq": 2
+        },
+        "text_normalization": "None",
+        "vector_dimensions": 3,
+        "version": "3.4.1"
+      },
+      "status": 200
+    }
+  },
+  "anyseek_collection_listing": {
+    "entries": [
+      {
+        "analysis": {
+          "fingerprint": "0bacdc68fc007568722bf5c3ef746446366ef654a08a706ebe989acf6d4ad481",
+          "format": "native-package-analysis:v1",
+          "stop_words": "None",
+          "stop_words_fingerprint": "f2953d2931e36d0c55640f51865f8394ebe52194765d04e521017232558f871c",
+          "tokenizer": "TantivySimpleV1",
+          "tokenizer_identity": "tantivy-simple-v1;tantivy=0.27.0;lowercase;no-stopwords;no-length-filter"
+        },
+        "embedding_space_id": "97792c255ac3b49759c1821243f3e3450ebbab701da71afe149d87940f4b4f67:synthetic-vector:3:v1",
+        "field_length_normalization": "Shared",
+        "id": "pr_6ea09b420dec88f5974ed58cd1d9173c6233458cbe31837d72beb7c9101f",
+        "limits": {
+          "max_candidates": 10000,
+          "max_journal_bytes": 268435456
+        },
+        "name": "origence-private-archive-v2",
+        "schema": [
+          {
+            "boost": 1.0,
+            "field": "archive",
+            "field_type": "String",
+            "filterable": true,
+            "index_lexical": false,
+            "index_vector": false,
+            "store": true
+          },
+          {
+            "boost": 1.0,
+            "field": "kind",
+            "field_type": "String",
+            "filterable": true,
+            "index_lexical": false,
+            "index_vector": false,
+            "store": true
+          },
+          {
+            "boost": 1.0,
+            "field": "body",
+            "field_type": "Json",
+            "filterable": false,
+            "index_lexical": false,
+            "index_vector": false,
+            "store": true
+          },
+          {
+            "boost": 1.0,
+            "field": "terms",
+            "field_type": "Text",
+            "filterable": false,
+            "index_lexical": true,
+            "index_vector": false,
+            "store": false
+          },
+          {
+            "boost": 1.0,
+            "field": "session",
+            "field_type": "String",
+            "filterable": true,
+            "index_lexical": false,
+            "index_vector": false,
+            "store": true
+          },
+          {
+            "boost": 1.0,
+            "field": "turn",
+            "field_type": "String",
+            "filterable": true,
+            "index_lexical": false,
+            "index_vector": false,
+            "store": true
+          },
+          {
+            "boost": 1.0,
+            "field": "source",
+            "field_type": "String",
+            "filterable": true,
+            "index_lexical": false,
+            "index_vector": false,
+            "store": true
+          },
+          {
+            "boost": 1.0,
+            "field": "sequence",
+            "field_type": "Int",
+            "filterable": true,
+            "index_lexical": false,
+            "index_vector": false,
+            "store": true
+          },
+          {
+            "boost": 1.0,
+            "field": "digest",
+            "field_type": "String",
+            "filterable": false,
+            "index_lexical": false,
+            "index_vector": false,
+            "store": true
+          },
+          {
+            "boost": 1.0,
+            "field": "metadata",
+            "field_type": "Json",
+            "filterable": false,
+            "index_lexical": false,
+            "index_vector": false,
+            "store": true
+          },
+          {
+            "boost": 1.0,
+            "field": "vector",
+            "field_type": "Json",
+            "filterable": false,
+            "index_lexical": false,
+            "index_vector": true,
+            "store": false
+          }
+        ],
+        "statistics": {
+          "active_records": 4,
+          "checkpoint_bytes": 7416,
+          "evaluation_time_ms": 1795782462058,
+          "physical_versions": 4,
+          "retained_identities": 4,
+          "retained_operations": 2,
+          "visible_seq": 2
+        },
+        "text_normalization": "None",
+        "vector_dimensions": 3,
+        "version": "3.4.1"
+      }
+    ],
+    "status": 200
+  },
+  "archive_writes": [
+    {
+      "response": {
+        "session_id": "3cbc6493-289e-4567-9d64-6b1dd97c41ba",
+        "source_event_id": "574f6581-9e39-4171-9627-297aaba5df65",
+        "state": "archived",
+        "turn_id": "ea9bccce-8d79-460e-bdfc-78c256afdec2"
+      },
+      "status": 200
+    },
+    {
+      "response": {
+        "session_id": "3cbc6493-289e-4567-9d64-6b1dd97c41ba",
+        "source_event_id": "f7107d36-1ada-4f56-9fdb-48db1dae0366",
+        "state": "archived",
+        "turn_id": "4f094e6f-ed2b-4708-8699-0a05b8753930"
+      },
+      "status": 200
+    }
+  ],
+  "asset_publication": {
+    "http_status": 200,
+    "native_collections": [
+      {
+        "analysis": {
+          "fingerprint": "cb92f921321e526f70cc77e408602a4c647649e469873ac35b200dadb61ecb30",
+          "format": "native-package-analysis:v1",
+          "stop_words": "None",
+          "stop_words_fingerprint": "f2953d2931e36d0c55640f51865f8394ebe52194765d04e521017232558f871c",
+          "tokenizer": "TantivySimpleV1",
+          "tokenizer_identity": "tantivy-simple-v1;tantivy=0.27.0;lowercase;no-stopwords;no-length-filter"
+        },
+        "embedding_space_id": "97792c255ac3b49759c1821243f3e3450ebbab701da71afe149d87940f4b4f67:synthetic-vector:3:v1",
+        "field_length_normalization": "Shared",
+        "id": "ws_a304db2d0e294af0b2ab1d6726df2360",
+        "limits": {
+          "max_candidates": 10000,
+          "max_journal_bytes": 268435456
+        },
+        "name": "origence-content-sha256-v1",
+        "schema": [
+          {
+            "boost": 1.0,
+            "field": "format",
+            "field_type": "String",
+            "filterable": true,
+            "index_lexical": false,
+            "index_vector": false,
+            "store": true
+          },
+          {
+            "boost": 1.0,
+            "field": "kind",
+            "field_type": "String",
+            "filterable": true,
+            "index_lexical": false,
+            "index_vector": false,
+            "store": true
+          },
+          {
+            "boost": 1.0,
+            "field": "tenant",
+            "field_type": "String",
+            "filterable": true,
+            "index_lexical": false,
+            "index_vector": false,
+            "store": true
+          },
+          {
+            "boost": 1.0,
+            "field": "workspace",
+            "field_type": "String",
+            "filterable": true,
+            "index_lexical": false,
+            "index_vector": false,
+            "store": true
+          },
+          {
+            "boost": 1.0,
+            "field": "chunk_id",
+            "field_type": "String",
+            "filterable": true,
+            "index_lexical": false,
+            "index_vector": false,
+            "store": true
+          },
+          {
+            "boost": 1.0,
+            "field": "source_id",
+            "field_type": "String",
+            "filterable": true,
+            "index_lexical": false,
+            "index_vector": false,
+            "store": true
+          },
+          {
+            "boost": 1.0,
+            "field": "source_version",
+            "field_type": "String",
+            "filterable": true,
+            "index_lexical": false,
+            "index_vector": false,
+            "store": true
+          },
+          {
+            "boost": 1.0,
+            "field": "generation",
+            "field_type": "String",
+            "filterable": true,
+            "index_lexical": false,
+            "index_vector": false,
+            "store": true
+          },
+          {
+            "boost": 1.0,
+            "field": "publication",
+            "field_type": "String",
+            "filterable": true,
+            "index_lexical": false,
+            "index_vector": false,
+            "store": true
+          },
+          {
+            "boost": 1.0,
+            "field": "profile",
+            "field_type": "String",
+            "filterable": true,
+            "index_lexical": false,
+            "index_vector": false,
+            "store": true
+          },
+          {
+            "boost": 1.0,
+            "field": "dimension",
+            "field_type": "String",
+            "filterable": true,
+            "index_lexical": false,
+            "index_vector": false,
+            "store": true
+          },
+          {
+            "boost": 1.0,
+            "field": "terms",
+            "field_type": "Text",
+            "filterable": false,
+            "index_lexical": true,
+            "index_vector": false,
+            "store": true
+          },
+          {
+            "boost": 1.0,
+            "field": "payload",
+            "field_type": "Json",
+            "filterable": false,
+            "index_lexical": false,
+            "index_vector": false,
+            "store": true
+          },
+          {
+            "boost": 1.0,
+            "field": "graph",
+            "field_type": "Json",
+            "filterable": false,
+            "index_lexical": false,
+            "index_vector": false,
+            "store": true
+          },
+          {
+            "boost": 1.0,
+            "field": "endpoint_ids",
+            "field_type": "StringSet",
+            "filterable": true,
+            "index_lexical": false,
+            "index_vector": false,
+            "store": true
+          },
+          {
+            "boost": 1.0,
+            "field": "graph_keys",
+            "field_type": "StringSet",
+            "filterable": true,
+            "index_lexical": false,
+            "index_vector": false,
+            "store": true
+          },
+          {
+            "boost": 1.0,
+            "field": "vector",
+            "field_type": "Json",
+            "filterable": false,
+            "index_lexical": false,
+            "index_vector": true,
+            "store": true
+          }
+        ],
+        "statistics": {
+          "active_records": 0,
+          "checkpoint_bytes": 2667,
+          "evaluation_time_ms": 1795782466095,
+          "physical_versions": 0,
+          "retained_identities": 0,
+          "retained_operations": 0,
+          "visible_seq": 0
+        },
+        "text_normalization": "None",
+        "vector_dimensions": 3,
+        "version": "3.4.1"
+      }
+    ],
+    "native_index_status": 200,
+    "process_exit": 1,
+    "process_log_tail": "2026-11-27T12:27:46.064159Z  WARN origence::worker: job did not publish job_id=541ff627-2eb8-4d82-a3ba-a871fb6b3fee code=\"VERSION_OR_IDEMPOTENCY_CONFLICT\"\nError: incompatible AnySeek retrieval collection\n",
+    "response": {
+      "asset_id": "6f08ef36-7978-4653-a160-196b09f7e32c",
+      "job_id": "541ff627-2eb8-4d82-a3ba-a871fb6b3fee",
+      "source_event_id": "a02cc327-ecb9-4d41-a83b-774818d9eb88"
+    }
+  },
+  "asset_search": {
+    "response": {
+      "active_components": {
+        "graph": false,
+        "summaries": false
+      },
+      "effective_mode": "keyword",
+      "embedding_profile": "97792c255ac3b49759c1821243f3e3450ebbab701da71afe149d87940f4b4f67:synthetic-vector:3:v1",
+      "graph": {
+        "entities": [],
+        "relations": []
+      },
+      "hits": [],
+      "memory_identity": null,
+      "requested_mode": "keyword",
+      "retrieval": {
+        "omitted_requests": 0,
+        "requests": []
+      },
+      "retrieval_policy": "sqlite-anyseek-filtered-rrf60-v3",
+      "warnings": []
+    },
+    "status": 200
+  },
+  "external_anyseek": true,
+  "origence_binary_sha256": "9aee23c217a6cfd786d03eb70b7c216eeeb1dd35f0381aa3392be1579e3a2f2e",
+  "origence_revision": "d34804c52560936e0c654ef40a0440fba3a23ca8",
+  "restored_http": {
+    "listed_sequences": [
+      1,
+      2
+    ],
+    "post_withdrawal": 404,
+    "read_matches": true,
+    "withdrawal": 200
+  },
+  "restored_manifest": {
+    "anyseek_version": "3.4.1",
+    "archived": 2,
+    "directory_sha256": "cd6c4f3e072d109154875f949a96157b14e483e27b27bf435d42009cac44bd96",
+    "format": "origence-private-archive-restore-v2"
+  },
+  "service_start": "ready",
+  "status": "paired_restore_verified",
+  "workspace_created": true
+}
