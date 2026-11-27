@@ -251,6 +251,62 @@ def main():
             call('POST','/api/v1/restore',{'operation_id':operation(),'collection_id':'restored-vectors','backup_id':vector_backup['backup_id']})
             assert call('GET','/api/v1/index/restored-vectors/doc/v')['document']['vector']==[2,0]
             assert len(call('POST','/api/v1/index/restored-vectors/query',{'query_vector':[1,0],'all':True})['hits'])==2
+            # Group retries preserve one result across a lost response and a same-version reopen.
+            groups = '/api/v1/index/vectors'
+            replace = groups + '/group/replace'
+
+            def group(version, record_ids, term):
+                return {
+                    'operation_id': operation(), 'group_id': 'round', 'expected_group_version': version,
+                    'records': [
+                        {'record_id': record_id, 'document': {'body': term, 'vector': [-1, 0]}}
+                        for record_id in record_ids
+                    ],
+                }
+
+            def group_view(term, record_ids, seq):
+                for query in [
+                    {'query': term}, {'query_vector': [-1, 0], 'similarity_threshold': 0.9, 'all': True},
+                ]:
+                    result = call('POST', groups + '/query', query)
+                    assert {hit['record']['record_id'] for hit in result['hits']} == set(record_ids), result
+                    progress = result['diagnostics']['index_progress']
+                    assert all(progress[name] == seq for name in ('committed_seq', 'lexical_seq', 'vector_seq')), progress
+
+            initial = group(0, ['round-a', 'round-b'], 'roundprior')
+            initial_result = call('POST', replace, initial)
+            first_seq = initial_result['receipt']['seq']
+            group_view('roundprior', ['round-a', 'round-b'], first_seq)
+            next_group = group(1, ['round-a', 'round-c'], 'roundnext')
+            payload = json.dumps(next_group).encode()
+            with socket.create_connection(('127.0.0.1', port), timeout=40) as client:
+                client.sendall((
+                    f'POST {replace} HTTP/1.1\r\nHost: localhost\r\napikey: {master}\r\n'
+                    f'X-AnySeek-Tenant: test\r\nContent-Type: application/json\r\n'
+                    f'Content-Length: {len(payload)}\r\nConnection: close\r\n\r\n'
+                ).encode() + payload)
+                # The server has prepared a response. Drop it without reading the receipt.
+                assert client.recv(1)
+            assert call('GET', groups + '/group?group_id=round')['group_version'] == 2
+            restart()
+            second = call('POST', replace, next_group)
+            assert second['receipt'] == {
+                'group_id': 'round', 'group_version': 2, 'seq': first_seq + 1, 'record_count': 2,
+            }, second
+            assert call('POST', replace, initial) == initial_result
+            group_view('roundnext', ['round-a', 'round-c'], first_seq + 1)
+            call('GET', groups + '/doc/round-b', status=404)
+            assert call('POST', groups + '/query', {'query': 'roundprior'})['count_total'] == 0
+            withdrawal = group(2, [], '')
+            withdrawn = call('POST', replace, withdrawal)
+            assert withdrawn['receipt']['record_count'] == 0
+            assert withdrawn['receipt']['group_version'] == 3
+            restart()
+            assert call('POST', replace, withdrawal) == withdrawn
+            group_view('roundnext', [], first_seq + 2)
+            assert call('GET', groups + '/group?group_id=round')['group_version'] == 3
+            print('PASS group HTTP: replace, lost response replay, withdrawal, reopen and both index watermarks')
+
             if args.faults:
                 import http.client
                 for stage in ['after_append_unknown','after_durable','crash_after_durable','crash_after_visible']:

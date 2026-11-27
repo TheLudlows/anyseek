@@ -32,7 +32,7 @@ impl WireState {
         Ok(State{residency:None,lineage,history,independent_snapshot,seq,
             epoch_watermark,time_watermark_ms,retired_operation_prefix,groups,expirations,
             records:admitted_records,operations:admitted_operations,
-            operation_lookup:BTreeMap::new(),lookup_bytes:0})
+            operation_lookup:BTreeMap::new(),operation_epochs:ReceiptEpochs::default(),lookup_bytes:0})
     }
 }
 #[derive(Deserialize)]

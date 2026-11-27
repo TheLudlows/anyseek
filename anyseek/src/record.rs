@@ -288,6 +288,8 @@ struct State {
     #[serde(skip)]
     operation_lookup: BTreeMap<OperationId, usize>,
     #[serde(skip)]
+    operation_epochs: ReceiptEpochs,
+    #[serde(skip)]
     lookup_bytes: usize,
 }
 #[derive(Debug, Serialize, Deserialize)]
@@ -935,21 +937,55 @@ fn validate_restored_state(config:&RecordConfig,state:&State)->Result<(),RecordE
     group_plan::validate(state)?;
     Ok(())
 }
-fn restore_operation_lookup(state:&mut State)->Result<(),RecordError>{
-    let bytes=state.operations.iter().try_fold(0usize,|n,operation| {
-        n.checked_add(checkpoint_codec::json_length(&operation.request.operation_id)?).ok_or_else(||storage("lookup byte overflow"))
-    })?;
-    state.admit_lookup(bytes)?;
-    state.operation_lookup.clear();
-        for (position, operation) in state.operations.iter().enumerate() {
-            if state
-                .operation_lookup
-                .insert(operation.request.operation_id.clone(), position)
-                .is_some()
-            {
-                return Err(storage("duplicate checkpoint operation identity"));
-            }
+/// Retain only prefix minima of operation epoch in commit order. A receipt
+/// whose epoch is at least an earlier receipt's epoch can never change whether
+/// there is an expired receipt at or below a given history floor.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct ReceiptEpochs(Vec<(u64, u64)>);
+impl ReceiptEpochs {
+    fn push(&mut self, seq: u64, epoch: u64) {
+        if self.0.last().is_none_or(|&(_, oldest)| epoch < oldest) {
+            self.0.push((seq, epoch));
         }
+    }
+
+    fn has_expired(&self, floor: u64, epoch: u64) -> bool {
+        let end = self.0.partition_point(|&(seq, _)| seq <= floor);
+        end > 0 && self.0[end - 1].1.saturating_add(1) < epoch
+    }
+}
+
+fn operation_lookup_bytes(id: &OperationId) -> Result<usize, RecordError> {
+    // Charge the key and room for a sequence/epoch entry even when it does
+    // not add a new prefix minimum.
+    checkpoint_codec::json_length(id)?
+        .checked_add(size_of::<(u64, u64)>())
+        .ok_or_else(|| storage("lookup byte overflow"))
+}
+
+fn retained_lookup_bytes(state: &State) -> Result<usize, RecordError> {
+    state.operations.iter().map(|operation| &operation.request.operation_id)
+        .chain(state.groups.iter().flat_map(|groups| groups.receipts.iter()).map(|receipt| &receipt.operation_id))
+        .try_fold(0usize, |total, id| {
+            total.checked_add(operation_lookup_bytes(id)?)
+                .ok_or_else(|| storage("lookup byte overflow"))
+        })
+}
+
+fn restore_operation_lookup(state: &mut State) -> Result<(), RecordError> {
+    state.admit_lookup(retained_lookup_bytes(state)?)?;
+    state.operation_lookup.clear();
+    state.operation_epochs = ReceiptEpochs::default();
+    for (position, operation) in state.operations.iter().enumerate() {
+        let id = &operation.request.operation_id;
+        if state.operation_lookup.insert(id.clone(), position).is_some() {
+            return Err(storage("duplicate checkpoint operation identity"));
+        }
+        state.operation_epochs.push(operation.receipt.seq, id.epoch);
+    }
+    if let Some(groups) = &mut state.groups {
+        groups.rebuild_receipt_indexes(&state.operation_lookup)?;
+    }
     Ok(())
 }
 fn apply(state: &mut State, applied: &Applied) -> Result<(), RecordError> {
@@ -961,13 +997,12 @@ fn apply_prepared(state: &mut State, applied: &Applied, prepared: Option<state_m
         return Err(storage("non-contiguous record sequence"));
     }
     let r = &applied.request;
-    if applied.receipt.record_id != r.record_id || state.operation_lookup.contains_key(&r.operation_id) {
+    if applied.receipt.record_id != r.record_id || state.operation_lookup.contains_key(&r.operation_id)
+        || state.groups.as_ref().is_some_and(|groups| groups.receipt(&r.operation_id).is_some()) {
         return Err(storage("inconsistent committed operation identity"));
     }
     let previous = state.records.get(&r.record_id);
     if applied.receipt.version != previous.map_or(1, |r| if applied.request.vector_patch.is_some() { r.version } else { r.version.saturating_add(1) })
-        || applied.receipt.record_id != r.record_id
-        || state.operation_lookup.contains_key(&r.operation_id)
     {
         return Err(storage("inconsistent committed record operation"));
     }
@@ -980,7 +1015,9 @@ fn apply_prepared(state: &mut State, applied: &Applied, prepared: Option<state_m
     state
         .operation_lookup
         .insert(r.operation_id.clone(), state.operations.len()-1);
-    state.lookup_bytes=state.lookup_bytes.checked_add(checkpoint_codec::json_length(&r.operation_id)?).ok_or_else(||storage("lookup byte overflow"))?;
+    state.lookup_bytes = state.lookup_bytes.checked_add(operation_lookup_bytes(&r.operation_id)?)
+        .ok_or_else(|| storage("lookup byte overflow"))?;
+    state.operation_epochs.push(applied.receipt.seq, r.operation_id.epoch);
     Ok(())
 }
 impl RecordPartition {
@@ -1373,17 +1410,19 @@ impl RecordPartition {
         let mut recovery_apply_us=0u128;
         for bytes in entries {
             let _entry_decode = crate::storage::build_budget::reserve_memory((bytes.len() as u64).checked_mul(32).ok_or_else(||storage("tail decode estimate overflow"))?).map_err(storage)?;
-            if selected.is_none() {
-                let measure=Instant::now();
-                state.admit_replay_frame(bytes.len())?;
-                recovery_measure_us+=measure.elapsed().as_micros();
+            if selected.is_some() {
+                pending.push(serde_json::from_slice(&bytes).map_err(storage)?);
+                pending_decode.push(_entry_decode);
+                continue;
             }
+            let measure = Instant::now();
+            let state_bytes = state.admit_replay_frame(bytes.len())?;
+            recovery_measure_us += measure.elapsed().as_micros();
             let apply_started=Instant::now();
             let entry=serde_json::from_slice(&bytes).map_err(storage)?;
-            if selected.is_some(){pending_decode.push(_entry_decode);pending.push(entry);continue;}
             match entry {
                 Entry::Applied(applied) => apply(&mut state, &applied)?,
-                Entry::GroupApplied(d) => group_plan::apply(&mut state,&d)?,
+                Entry::GroupApplied(d) => group_plan::apply(&mut state,d,state_bytes)?,
                 Entry::Expired(event) => temporal::apply(&mut state, &event)?,
                 Entry::HistoryTrim(trim) => history::apply_trim(&mut state,&config.history,&trim)?,
                 Entry::Checkpoint { .. } | Entry::Anchor(_) => {
