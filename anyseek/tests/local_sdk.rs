@@ -2,6 +2,8 @@
 use anyseek::sdk::{LocalEngine, LocalErrorKind, OperationId};
 use serde_json::{Value, json};
 
+mod entity_one_hop;
+
 async fn group_view(engine: &LocalEngine, query_term: &str, ids: &[&str], seq: u64) {
     for query in [
         json!({"query":query_term,"length":5,"count":true}),
