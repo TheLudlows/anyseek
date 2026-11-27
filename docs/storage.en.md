@@ -22,6 +22,14 @@ A partition guard and package pin protect local readers and builds. Files used b
 
 Vector and metadata files keep their component format and publication order. A query or build owns an aligned vector window of at most 64 KiB and releases its reservation on completion. Filters read fixed-width fields. Custom sorting captures values for bounded candidates before comparison and stops the query on a read fault. Reads and sequential writes use file I/O admission, and buffers count toward the process and request limits. The operating system may cache ordinary file pages.
 
+### Disk record directory component
+
+One authenticated checkpoint descriptor selects the collection generation, primary index, record segments, payload objects, and committed cut. The primary tree uses 4 KiB ordinary-file pages with a byte-bounded page cache. Long ID suffixes live in a separate file and are verified on demand through their page references. A leaf authenticates the row at `(segment_id, doc_id)`. The doc ID is the zero-based segment ordinal. Rows carry the logical version, time metadata, a tombstone or candidate-validation fingerprint, and a payload location. The fingerprint and payload SHA-256 are independent. Point reads and pagination evaluate TTL at the caller's time. Only a body read allocates and verifies the selected payload range. Shared checkpoint owners retain the open files.
+
+The recent delta accepts consecutive committed decisions, with newer records and tombstones overriding sealed rows. Admission and validation are atomic for each byte-bounded batch. A rejection preserves the prior cut. Compaction may change row addresses and retain payload references. The directory and segments switch together under one root. Old readers retain their original root.
+
+The component tests standalone files using an injected range reader. [#225](https://github.com/TheLudlows/anyseek/issues/225) owns shared range I/O. [#224](https://github.com/TheLudlows/anyseek/issues/224) owns State, WAL, checkpoint publication, GET, and search integration.
+
 ## Authority and data ownership
 
 In S3 mode, SQLite is the mutable commit coordination authority for Record partitions. It stores head/owner epoch, commit and index watermarks, immutable references, bounded idempotency coordination, dependencies, pins, retirement, and backup/restore coordination. Object storage holds text, original vectors, indexes, and WAL contents. Local Record logs, payloads, and indexes are rebuildable cache, while Catalog and S3 SQLite metadata are durable authority.

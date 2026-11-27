@@ -18,7 +18,7 @@ fn valid_id(id: &str) -> bool {
             .bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
-fn path(root: &Path, id: &str) -> io::Result<PathBuf> {
+pub(super) fn path(root: &Path, id: &str) -> io::Result<PathBuf> {
     if !valid_id(id) {
         return Err(invalid("invalid payload object identity"));
     }
