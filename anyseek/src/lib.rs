@@ -66,7 +66,7 @@ pub mod server;
 
 /// In-process access to a local AnySeek catalog and record collections.
 pub mod sdk {
-    pub use crate::record::{GroupReceipt, GroupReplace, OperationId};
-    pub use crate::server::api_types::{CreateIndexRequest, SearchRequestObject};
+    pub use crate::record::{EventTimeResult, GroupReceipt, GroupReplace, OperationId};
+    pub use crate::server::api_types::{CreateIndexRequest, EventTimeRequest, SearchRequestObject};
     pub use crate::server::record_service::local::*;
 }

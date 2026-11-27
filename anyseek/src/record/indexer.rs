@@ -96,7 +96,6 @@ impl RecordPartition {
     }
     // Explicit local opt-in for one full base. The caller sees any optional
     // build refusal. No foreground or scheduled maintenance calls this path.
-    #[allow(dead_code, reason = "internal candidate pending the shared query cut")]
     pub(crate) fn start_event_time_checkpoint(&self, timeout: Duration) -> Result<IndexJob, RecordError> {
         self.start_owned_index_job(timeout, JobMode::EventTime(event_time::BuildLimits::DEFAULT))
     }

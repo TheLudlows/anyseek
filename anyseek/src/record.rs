@@ -40,6 +40,8 @@ mod index_consumers;
 mod publication;
 mod query;
 mod event_time_view;
+pub use event_time_view::EventTimeResult;
+pub(crate) use event_time_view::EventTimeError;
 #[cfg(test)]
 mod disk_read_fixture;
 mod query_output;

@@ -54,6 +54,8 @@ A read only advances in-process evaluation_time. It neither persists expiry/hist
 
 evaluation_time within one process is monotonic and bounded by persisted write/maintenance time. Restart retains only that persisted lower bound. Unreclaimed text could reappear after wall clock rolls back across its deadline. Large clock errors return `clock_uncertain`. Durably reclaimed versions cannot reappear spontaneously. WAL, backups, and old snapshots can still hold text. TTL does not guarantee privacy erasure.
 
+An opt-in event-time window starts at the current certified local base. It pins the canonical row overlay, which includes every selected manifest delta and the published WAL suffix. The query does not replay the log. A canonical identity shadows its old base key, including updates that move outside the window and tombstones. Pure time requires the base and canonical rows at the same cut, with a selected-root and TTL check before delivery. Exceeding the candidate or suffix budget rejects the entire window. See the [service guide](../anyseek/src/server/README.en.md#opt-in-event-time-windows) for HTTP and SDK entry points.
+
 ## Authorization and recovery
 
 Origence or the gateway handles user authentication and authorization. AnySeek checks only the derived service credential in `apikey`. Data requests also need trusted upstream `X-AnySeek-Tenant`. Tenants are namespaces, with no registration or tenant-key storage, issuance, or revocation. The service credential has service-level scope. Before forwarding, the gateway verifies authorization for the selected tenant and administrative action. The tenant header is not a user credential.

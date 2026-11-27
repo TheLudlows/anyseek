@@ -248,6 +248,28 @@ impl LocalEngine {
         .await
     }
 
+    /// Build the optional event-time projection for one local collection cut.
+    /// The embedding host must authorize this administrative operation.
+    pub async fn build_event_time_projection(&self, tenant: &str, collection: &str) -> Result<u64, LocalError> {
+        let deadline = tokio::time::Instant::now() + self.service()?.request_timeout;
+        tokio::time::timeout_at(deadline, self.run(tenant, collection, Lane::Background,
+            async move |service, tenant, collection| {
+                build_event_time_collection(&service, tenant, collection, deadline).await
+            })).await.map_err(|_| LocalError::unavailable("busy"))?
+    }
+
+    /// Query the selected event-time projection with the catalog's stored-field policy.
+    pub async fn query_event_time(
+        &self, tenant: &str, collection: &str, request: EventTimeRequest,
+    ) -> Result<EventTimeResult, LocalError> {
+        let deadline = tokio::time::Instant::now() + self.service()?.request_timeout;
+        tokio::time::timeout_at(deadline, self.run(tenant, collection, Lane::Foreground,
+            async move |service, tenant, collection| {
+                let (result, data) = query_event_time_collection(&service, tenant, collection, request, deadline).await?;
+                Ok(data.deliver_after_publication(|| result).await??)
+            })).await.map_err(|_| LocalError::unavailable("busy"))?
+    }
+
     /// Read the current version of a publication group if present.
     pub async fn group_version(
         &self,

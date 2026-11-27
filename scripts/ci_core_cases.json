@@ -1,4 +1,8 @@
 [
+  "server::record_service::event_time_tests::event_time_http_authority_reopen_and_work_limits",
+  "server::record_service::event_time_tests::event_time_http_original_deadline_returns_busy",
+  "record::anchor::event_time_tests::event_time_window_joins_all_manifest_deltas_and_wal_tail_then_reopens",
+  "record::anchor::event_time_tests::event_time_window_requires_only_selected_index_cursors",
   "server::record_service::cold::tests::http_cold_start_shares_one_open_and_lists_live_statistics",
   "server::record_service::cold::tests::http_cold_failure_retries_without_installing_a_deleted_generation",
   "server::record_service::cold::tests::http_shutdown_drains_an_abandoned_cold_open",
