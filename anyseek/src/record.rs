@@ -2015,6 +2015,18 @@ pub(crate) mod tests {
         let clock=Arc::new(TestClock(std::sync::atomic::AtomicU64::new(now)));
         p.inner.lock().await.clock=clock.clone(); (clock,now)
     }
+    pub(crate) async fn seal_test_cache_tail(p: &RecordPartition) -> usize {
+        let _writer = p.writer.lock().await;
+        let mut inner = p.inner.lock().await;
+        let certificate = inner.anchor.as_ref().unwrap().identity().to_owned();
+        inner.replay_context().stage_stable_tail().await.unwrap();
+        assert_eq!(inner.anchor.as_ref().unwrap().identity(), certificate);
+        let mut frozen = 0;
+        for component in inner.index.components().await {
+            frozen += usize::from(component.read().await.vector_levels > 0);
+        }
+        frozen
+    }
     pub(super) async fn wait_maintenance_idle(p:&RecordPartition) {
         maintenance_idle_with_deadline(p,std::time::Duration::from_secs(20)).await
             .unwrap_or_else(|diagnostic|panic!("{diagnostic}"));

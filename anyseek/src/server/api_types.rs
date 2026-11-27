@@ -117,6 +117,55 @@ pub struct TimeTextRequest {
     pub rrf: crate::search::TimeRrfOptions,
 }
 
+/// Maximum requested cluster probes per sealed level in mixed recall.
+pub(crate) const MAX_MIXED_NPROBE: usize = 128;
+
+/// Opt-in event time and bounded cosine ANN, with optional lexical recall.
+#[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TimeAnnRequest {
+    /// Independent event-time window.
+    pub recall: TimeVectorRecall,
+    /// External unquantized F32 cosine embedding in the collection's format.
+    pub query_vector: serde_json::Value,
+    /// Cluster probes per sealed level. Omit `all` when using this option.
+    #[schema(minimum = 1)]
+    pub nprobe: usize,
+    /// Optional third channel with one positive analyzed term.
+    #[serde(
+        default,
+        rename = "query",
+        deserialize_with = "present_value",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schema(min_length = 1, max_length = 1024, nullable = false)]
+    pub query_string: Option<String>,
+    /// Optional temporal predicates shared by all channels.
+    #[serde(default)]
+    #[schema(value_type = Object)]
+    pub temporal: Option<crate::record::TemporalFilter>,
+    /// Skip this many fused records.
+    #[serde(default)]
+    pub offset: usize,
+    /// Two channels allow offset plus length through 64 and three through 42.
+    #[serde(default = "length_api")]
+    #[schema(default = 10, minimum = 1, maximum = 64)]
+    pub length: usize,
+    /// Exact totals are unavailable. Must be false if supplied.
+    #[serde(default)]
+    pub count: bool,
+    /// Requested stored fields. An empty list selects all stored fields.
+    #[serde(default)]
+    pub fields: Vec<String>,
+    /// Metadata predicates shared by all channels.
+    #[serde(default, rename = "filter")]
+    #[schema(value_type = Vec<api_schema::FacetFilter>, max_items = 32)]
+    pub facet_filter: Vec<FacetFilter>,
+    /// Optional channel weights and rank constant. Defaults are equal.
+    #[serde(default)]
+    pub rrf: crate::search::TimeRrfOptions,
+}
+
 /// Search text, vectors, or both. Empty input browses documents. Pending writes are visible.
 #[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
 #[serde(deny_unknown_fields)]

@@ -17,7 +17,7 @@ mod diagnostic_tests;
 #[cfg(test)]
 #[path = "record_service/event_time_tests.rs"]
 mod event_time_tests;
-use super::api_types::{CreateIndexRequest, EventTimeRequest, FieldRequest, GetDocumentRequest, SearchRequestObject, TimeTextRequest, TimeVectorRecall, TimeVectorRequest};
+use super::api_types::{CreateIndexRequest, EventTimeRequest, FieldRequest, GetDocumentRequest, MAX_MIXED_NPROBE, SearchRequestObject, TimeAnnRequest, TimeTextRequest, TimeVectorRecall, TimeVectorRequest};
 use axum::{
     Json, Router,
     body::{Body, Bytes},
@@ -36,10 +36,11 @@ use anyseek::{
     index::Clustering,
     record::{
         EventTimeError, EventTimeResult, OperationId, RecordConfig, RecordCursor, RecordError, RecordPartition, RecordQuery,
-        TimeVectorQuery, TimeVectorResult,
+        TimeMixedQuery, TimeVectorQuery, TimeVectorResult,
         RecordWrite, DataOutputPermit, S3CompatibleRecordConfig, IndependentItem, GroupReplace,
     },
-    vector::Inference,
+    vector::{Inference, Precision, Quantization},
+    vector_similarity::{AnnMode, VectorSimilarity},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -1880,11 +1881,14 @@ struct QueryDispatch<'a> {
     recall: Option<&'a serde_json::value::RawValue>,
     #[serde(borrow)]
     query: Option<&'a serde_json::value::RawValue>,
+    #[serde(borrow)]
+    nprobe: Option<&'a serde_json::value::RawValue>,
 }
 
 enum MixedTimeRequest {
     Vector(TimeVectorRequest),
     Text(TimeTextRequest),
+    Ann(TimeAnnRequest),
 }
 
 async fn query(
@@ -1895,7 +1899,9 @@ async fn query(
 ) -> Result<Response, Error> {
     let dispatch: QueryDispatch<'_> = serde_json::from_slice(&bytes).map_err(bad)?;
     if dispatch.recall.is_some() {
-        let request = if dispatch.query.is_some() {
+        let request = if dispatch.nprobe.is_some() {
+            MixedTimeRequest::Ann(parse(&bytes)?)
+        } else if dispatch.query.is_some() {
             MixedTimeRequest::Text(parse(&bytes)?)
         } else {
             MixedTimeRequest::Vector(parse(&bytes)?)
@@ -1944,10 +1950,29 @@ async fn query_mixed_time_collection(
                 }
                 let vector = request.query_vector.as_ref().map(|vector|
                     anyseek::vector::parse_external_embedding(vector, &entry.config.index.inference))
-                    .transpose().map_err(bad)?;
+                    .transpose().map_err(bad)?.map(|vector| (vector, AnnMode::All));
                 let fields = stored_fields(&entry, &request.fields);
-                let query = anyseek::record::TimeMixedQuery { window: request.recall.time,
+                let query = TimeMixedQuery { window: request.recall.time,
                     temporal: request.temporal, lexical: Some(request.query_string), vector,
+                    facets: request.facet_filter, fields, offset: request.offset,
+                    length: request.length, rrf: request.rrf };
+                p.query_time_mixed(query, deadline).await.map_err(Error::from)
+            }
+            MixedTimeRequest::Ann(request) => {
+                if request.count || !(1..=MAX_MIXED_NPROBE).contains(&request.nprobe) {
+                    return Err(bad(format!("mixed ANN requires count=false and nprobe in 1..={MAX_MIXED_NPROBE}")));
+                }
+                let inference = &entry.config.index.inference;
+                if !matches!(inference, Inference::External {
+                    precision: Precision::F32, quantization: Quantization::None, similarity: VectorSimilarity::Cosine, ..
+                }) {
+                    return Err(bad("mixed ANN requires external unquantized F32 cosine vectors"));
+                }
+                let vector = anyseek::vector::parse_external_embedding(&request.query_vector, inference).map_err(bad)?;
+                let fields = stored_fields(&entry, &request.fields);
+                let query = TimeMixedQuery { window: request.recall.time,
+                    temporal: request.temporal, lexical: request.query_string,
+                    vector: Some((vector, AnnMode::Nprobe(request.nprobe))),
                     facets: request.facet_filter, fields, offset: request.offset,
                     length: request.length, rrf: request.rrf };
                 p.query_time_mixed(query, deadline).await.map_err(Error::from)
@@ -3406,7 +3431,7 @@ mod tests {
 fn openapi_document() -> Value {
     use utoipa::OpenApi;
     #[derive(utoipa::OpenApi)]
-    #[openapi(components(schemas(CreateIndexRequest, SearchRequestObject, CollectionCreate, EventTimeRequest, EventTimeCheckpointRequest, TimeVectorRequest, TimeVectorRecall, TimeTextRequest)))]
+    #[openapi(components(schemas(CreateIndexRequest, SearchRequestObject, CollectionCreate, EventTimeRequest, EventTimeCheckpointRequest, TimeVectorRequest, TimeVectorRecall, TimeTextRequest, TimeAnnRequest)))]
     struct Api;
     let mut doc = serde_json::to_value(Api::openapi()).unwrap();
     doc["openapi"] = json!("3.1.0");
@@ -3429,6 +3454,10 @@ fn openapi_document() -> Value {
     schemas.get_mut("TimeTextRequest").unwrap()["properties"]["all"] = json!({"const":true});
     schemas.get_mut("TimeTextRequest").unwrap()["properties"]["count"] = json!({"const":false,"default":false});
     schemas.get_mut("TimeTextRequest").unwrap()["dependentRequired"] = json!({"query_vector":["all"],"all":["query_vector"]});
+    schemas.get_mut("TimeAnnRequest").unwrap()["properties"]["temporal"] = json!({"anyOf":[{"$ref":"#/components/schemas/TemporalFilter"},{"type":"null"}]});
+    schemas.get_mut("TimeAnnRequest").unwrap()["properties"]["count"] = json!({"const":false,"default":false});
+    schemas.get_mut("TimeAnnRequest").unwrap()["properties"]["nprobe"]["maximum"] = json!(MAX_MIXED_NPROBE);
+    schemas.get_mut("TimeAnnRequest").unwrap()["additionalProperties"] = json!(false);
     schemas.get_mut("TimeVectorRecall").unwrap()["properties"]["time"] = json!({
         "type":"object","additionalProperties":false,"required":["from_ms","to_ms"],
         "properties":{"from_ms":{"type":"integer"},"to_ms":{"type":"integer"}}
@@ -3503,7 +3532,7 @@ fn openapi_document() -> Value {
             "/api/v1/index/{id}/query",
             "post",
             "Retrieve records and statistics from one view",
-            Some(json!({"oneOf":[{"$ref":"#/components/schemas/SearchRequestObject"},{"$ref":"#/components/schemas/TimeVectorRequest"},{"$ref":"#/components/schemas/TimeTextRequest"}]})),
+            Some(json!({"oneOf":[{"$ref":"#/components/schemas/SearchRequestObject"},{"$ref":"#/components/schemas/TimeVectorRequest"},{"$ref":"#/components/schemas/TimeTextRequest"},{"$ref":"#/components/schemas/TimeAnnRequest"}]})),
         ),
         (EVENT_TIME_QUERY_PATH, "post", "Query an opted-in pure event-time window",
             Some(json!({"$ref":"#/components/schemas/EventTimeRequest"}))),
