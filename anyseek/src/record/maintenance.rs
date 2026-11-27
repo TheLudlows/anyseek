@@ -114,7 +114,7 @@ mod tests {
                 let at=now+settings.history.retention_ms+1000;clock.0.store(at,std::sync::atomic::Ordering::SeqCst);
                 let _writer=p.writer.lock().await;let mut inner=p.inner.lock().await;
                 inner.expire_due().await.unwrap();inner.trim_history(at).await.unwrap();
-                assert_eq!(inner.state.seq,3);assert!(inner.state.records["a"].expired_at_ms.is_some());assert!(inner.state.history.floor>0);
+                assert_eq!(inner.state.seq,3);assert!(inner.state.records.load("a").unwrap().unwrap().expired_at_ms.is_some());assert!(inner.state.history.floor>0);
             }
             let (mut proof,expected)={let mut inner=p.inner.lock().await;
                 // Settle acknowledged background owners before asserting exact
@@ -154,7 +154,7 @@ mod tests {
             p.finish_service_shutdown().await.unwrap();drop(p);
             let reopened=RecordPartition::open(&path,settings.max_journal_bytes).await.unwrap();
             {let inner=reopened.inner.lock().await;assert_eq!(inner.state.seq,expected.seq);assert_eq!(inner.state.history.floor,expected.history.floor);
-                if events {assert!(inner.state.records["a"].expired_at_ms.is_some());assert!(inner.state.records["a"].document.is_none());}}
+                if events {assert!(inner.state.records.load("a").unwrap().unwrap().expired_at_ms.is_some());assert!(inner.state.records.load("a").unwrap().unwrap().document.is_none());}}
             reopened.finish_service_shutdown().await.unwrap();
         }
     }
@@ -405,7 +405,7 @@ mod tests {
         assert_eq!(state_proof::length(&state).unwrap(),state_proof::length(&changed).unwrap());
         assert!(state_proof::verify(&settings,&state,&changed).is_err());
         let mut unordered=state.try_clone().unwrap();
-        let mut reversed=state_values::Values::default();
+        let mut reversed=state_values::Operations::default();
         for operation in state.operations.iter().rev(){reversed.push(operation.clone()).unwrap();}
         unordered.operations=reversed;
         assert!(temporal::validate_state(&unordered).is_err());

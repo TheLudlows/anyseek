@@ -32,9 +32,9 @@ pub(super) struct Input<'a> {
     pub ttl_count: usize,
 }
 impl<'a> Input<'a> {
-    fn from_state(state: &'a State, request: &RecordWrite) -> Self {
+    fn from_state(state: &'a State, request: &RecordWrite, previous: Option<&'a Record>) -> Self {
         Self {
-            previous: state.records.get(&request.record_id),
+            previous,
             operation: state.operation_lookup.get(&request.operation_id).map(|&i| &state.operations[i]),
             seq: state.seq, epoch_watermark: state.epoch_watermark, time_watermark_ms: state.time_watermark_ms,
             record_count: state.records.len(), operation_count: state.operations.len(),
@@ -55,7 +55,8 @@ pub(super) fn prepare(
 }
 #[cfg(test)]
 pub(super) fn prepare_at(state:&State, config:&RecordConfig, current_snapshot_bytes:usize, request:RecordWrite, wall_epoch:u64, evaluation_time_ms:u64)->Result<PreparedWrite,RecordError> {
-    prepare_input(&Input::from_state(state, &request), config, current_snapshot_bytes, request, wall_epoch, evaluation_time_ms)
+    let previous = state.records.load(&request.record_id)?;
+    prepare_input(&Input::from_state(state, &request, previous.as_deref()), config, current_snapshot_bytes, request, wall_epoch, evaluation_time_ms)
 }
 pub(super) fn prepare_input(input: &Input<'_>, config:&RecordConfig, current_snapshot_bytes:usize, request:RecordWrite, wall_epoch:u64, evaluation_time_ms:u64)->Result<PreparedWrite,RecordError> {
     let epoch = wall_epoch.max(input.epoch_watermark);
@@ -195,7 +196,8 @@ pub(super) fn projected_record(previous: Option<&Record>, applied: &Applied, doc
 }
 
 pub(super) fn snapshot_after(state: &State, before: usize, applied: &Applied, next: &Record) -> Result<usize, RecordError> {
-    snapshot_after_input(&Input::from_state(state, &applied.request), before, applied, next)
+    let previous = state.records.load(&applied.request.record_id)?;
+    snapshot_after_input(&Input::from_state(state, &applied.request, previous.as_deref()), before, applied, next)
 }
 fn snapshot_after_input(input: &Input<'_>, before: usize, applied: &Applied, next: &Record) -> Result<usize, RecordError> {
     let old = input.previous;

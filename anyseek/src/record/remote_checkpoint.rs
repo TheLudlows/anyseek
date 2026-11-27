@@ -1031,7 +1031,7 @@ mod tests {
         {
             let inner = p.inner.lock().await;
             assert_eq!((inner.state.seq, inner.state.history.floor, inner.state.time_watermark_ms), basis);
-            assert!(inner.state.records["r"].document.is_some(), "reads must not reclaim the expired body");
+            assert!(inner.state.records.load("r").unwrap().unwrap().document.is_some(), "reads must not reclaim the expired body");
         }
         std::fs::remove_file(root.join(format!(".test-write-{phase}-pause"))).unwrap();
         assert!(matches!(task.await.unwrap(),Err(RecordError::Busy)));
@@ -1408,10 +1408,10 @@ mod tests {
         // The expiry append cannot fit beside the retained write. The first
         // owned job must checkpoint it rather than fail before capturing a cut.
         p.start_index_job(Duration::from_secs(20),true).unwrap().finish().await.unwrap();
-        {let inner=p.inner.lock().await;assert_eq!(inner.state.seq,1);assert!(inner.state.records["r"].document.is_some());
+        {let inner=p.inner.lock().await;assert_eq!(inner.state.seq,1);assert!(inner.state.records.load("r").unwrap().unwrap().document.is_some());
             let remote=inner.remote.as_ref().unwrap();let head=remote.authority.lock().await.read_head("source").unwrap().unwrap();assert_eq!(head.log_base_seq,1);}
         p.start_index_job(Duration::from_secs(20),true).unwrap().finish().await.unwrap();
-        assert_eq!(p.inner.lock().await.state.records["r"].version,2);
+        assert_eq!(p.inner.lock().await.state.records.load("r").unwrap().unwrap().version,2);
         let p=cold(p,&root,clock).await;
         assert!(p.get("r").await.unwrap().is_none());assert_eq!(p.write(request).await.unwrap(),receipt);
     }
@@ -2219,7 +2219,7 @@ impl RecordPartition {
             let p = Self::open_s3_with_remote(path, config.max_journal_bytes, remote).await?;
             return Ok(p);
         }
-        let p = Self::open(path, config.max_journal_bytes).await?;
+        let p = Self::open_remote_cache(path, config.max_journal_bytes).await?;
         {
             let mut inner = p.inner.lock().await;
             if !inner.state.independent_snapshot {

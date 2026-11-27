@@ -135,7 +135,7 @@ impl State {
     }
     pub(super) fn container_bytes(&self, total: usize) -> Result<usize, RecordError> {
         let values = self.records.bytes().checked_add(self.operations.bytes()).ok_or_else(||storage("shared value total overflow"))?;
-        total.checked_sub(values).and_then(|n|n.checked_add(self.lookup_bytes))
+        total.checked_sub(values).and_then(|n|n.checked_sub(self.records.sealed_keys_bytes())).and_then(|n|n.checked_add(self.lookup_bytes))
             .ok_or_else(||storage("state container size overflow"))
     }
     // Container keys, pointers, lookup and nonshared metadata are copied only
@@ -180,14 +180,16 @@ pub(super) struct Prepared {
     pub component:Option<index_consumers::ComponentCredit>,
     pub record: Shared<Record>,
     pub operation: Shared<Applied>,
+    pub previous: Option<state_values::PreviousRow>,
 }
 impl Prepared {
     pub(super) fn new(state: &State, applied: &Applied) -> Result<Self, RecordError> {
-        Self::from_previous(state.records.get(&applied.request.record_id), applied)
+        Self::from_previous(state.records.load(&applied.request.record_id)?.as_deref(), applied)
     }
     pub(super) fn from_previous(prior: Option<&Record>, applied: &Applied) -> Result<Self, RecordError> {
         let applied_bytes=checkpoint_codec::json_length(applied)?;
-        let prior_bytes=prior.map(checkpoint_codec::json_length).transpose()?.unwrap_or(0);
+        let previous = prior.map(state_values::PreviousRow::measure).transpose()?;
+        let prior_bytes = previous.map_or(0, |row| row.bytes);
         // Separate bounded allocations: new record projection, retained request
         // copy and small fixed record metadata. No giant aggregate single lease.
         let mut admission=[applied_bytes,applied_bytes,prior_bytes,1024].into_iter().map(|n|{
@@ -198,16 +200,15 @@ impl Prepared {
         let record=mutation::projected_record(prior,applied,document,temporal);
         let record=Shared::from_parts(record,&mut admission)?;
         let operation=Shared::copy_from_parts(applied,&mut admission)?;
-        Ok(Self{record,operation,lexical:None,component:None})
+        Ok(Self{record,operation,previous,lexical:None,component:None})
     }
     pub(super) fn admit_containers(&self,state:&mut State,total:usize)->Result<(),RecordError>{
-        let old=state.records.get(&self.record.record_id);
-        let old_bytes=old.map(checkpoint_codec::json_length).transpose()?.unwrap_or(0);
+        let old_bytes=self.previous.map_or(0, |row| row.bytes);
         let values=state.value_bytes()?.checked_sub(old_bytes)
             .and_then(|n|n.checked_add(self.record.wire_bytes())).and_then(|n|n.checked_add(self.operation.wire_bytes()))
             .ok_or_else(||storage("prepared retained value size overflow"))?;
         let lookup=state.lookup_bytes.checked_add(operation_lookup_bytes(&self.operation.request.operation_id)?).ok_or_else(||storage("prepared lookup size overflow"))?;
-        let metadata=total.checked_sub(values).and_then(|n|n.checked_add(lookup)).ok_or_else(||storage("prepared metadata size overflow"))?;
+        let metadata=total.checked_sub(values).and_then(|n|n.checked_sub(state.records.sealed_keys_bytes())).and_then(|n|n.checked_add(lookup)).ok_or_else(||storage("prepared metadata size overflow"))?;
         state.admit_containers(metadata)
     }
 }
@@ -266,7 +267,7 @@ mod ownership_tests {
         let first=write("first","d","alpha",ExpectedVersion::Absent);
         let receipt=p.write(first).await.unwrap();
         let old=p.inner.lock().await.state.try_clone().unwrap();
-        let value=old.records.shared("d").unwrap();
+        let value=old.records.load("d").unwrap().unwrap();
         let last=Arc::downgrade(&value.0);drop(value);
         let update=write("same-size","d","bravo",ExpectedVersion::Match(1));
         let full=crate::storage::build_budget::fill_memory_for_test();
@@ -276,13 +277,15 @@ mod ownership_tests {
             assert_eq!(live.state.seq,receipt.seq);
             assert_eq!(live.state.operations.len(),1);
             assert!(!live.state.operation_lookup.contains_key(&update.operation_id));
-            assert_eq!(live.state.records["d"].document.as_ref().unwrap()["body"],"alpha");
+            assert_eq!(live.state.records.load("d").unwrap().unwrap().document.as_ref().unwrap()["body"],"alpha");
         }
         drop(full);
         let second=p.write(update.clone()).await.unwrap();assert_eq!(second.version,2);
         assert_eq!(p.write(update).await.unwrap(),second);
-        assert_eq!(old.records["d"].version,1);
-        assert_eq!(old.records["d"].document.as_ref().unwrap()["body"],"alpha");
+        let old_value = old.records.load("d").unwrap().unwrap();
+        assert_eq!(old_value.version,1);
+        assert_eq!(old_value.document.as_ref().unwrap()["body"],"alpha");
+        drop(old_value);
         assert_eq!(old.operations.len(),1);
         assert!(last.upgrade().is_some());drop(old);assert!(last.upgrade().is_none());
         p.compact_journal().await.unwrap();drop(p);

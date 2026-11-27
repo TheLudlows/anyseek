@@ -71,12 +71,14 @@ impl Context<'_> {
         match entry {
             Entry::Applied(applied)=>{
                 #[cfg(test)] let _phase=(applied.receipt.seq%128==0).then(||maintenance::Phase::new("replay_applied",applied.receipt.seq));
-                let (index_bytes,updates)=build_budget::write_estimate(&*self.state,&self.config,&applied)?;
+                let prepared=state_memory::Prepared::new(&*self.state,&applied)?;
+                let (index_bytes, updates) = build_budget::document_write_estimate(
+                    self.config, &prepared.record.record_id, prepared.record.document.as_ref(),
+                )?;
                 if index_bytes>0 && !self.index.can_admit(index_bytes,updates).await {
                     if !publish_native {self.index.flush_replayed_native().await?;}
                     self.stage_stable_tail().await?;
                 }
-                let prepared=state_memory::Prepared::new(&*self.state,&applied)?;
                 if matches!(self.config.index.inference, crate::vector::Inference::External { precision: crate::vector::Precision::F32,
                     similarity: crate::vector_similarity::VectorSimilarity::Euclidean, .. })
                     && let Some(document) = &prepared.record.document {
@@ -90,11 +92,12 @@ impl Context<'_> {
             },
             Entry::GroupApplied(d)=>return self.replay_group(d,publish_native).await,
             Entry::Expired(event)=>{
-                let mut next=self.state.try_clone_with_growth(checkpoint_codec::json_length(&event)?)?;temporal::apply(&mut next,&event)?;
-                let visible=visibility::visible_records(&next.records)?;
-                let retired:Vec<_>=self.locations.keys().filter(|id|visible.get(*id)!=Some(&true)).cloned().collect();
-                for id in retired {let ordinal=self.locations.remove(&id).unwrap();self.index.retire(ordinal).await?;}
-                *self.state=next;
+                let prepared = temporal::PreparedExpiration::prepare(self.state, &event, *self.snapshot_bytes)?;
+                prepared.admit(self.state)?;
+                self.retire_expired(&event).await?;
+                *self.snapshot_bytes = prepared.snapshot_bytes;
+                prepared.install(self.state, event)?;
+                return Ok(());
             },
             Entry::HistoryTrim(event)=>history::apply_trim(&mut *self.state,&self.config.history,&event)?,
             Entry::Checkpoint{..}|Entry::Anchor(_)=>return Err(storage("unexpected anchor in operation stream")),

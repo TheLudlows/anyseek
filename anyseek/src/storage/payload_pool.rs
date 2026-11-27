@@ -100,6 +100,25 @@ impl PoolReader {
         self.closure.objects.get(id).map(|d| d.bytes)
             .ok_or_else(|| invalid("payload object outside authenticated closure"))
     }
+    pub(crate) fn object_paths(&self) -> impl Iterator<Item = io::Result<PathBuf>> + '_ {
+        self.closure.objects.keys().map(|id| path(&self.root, id))
+    }
+    pub(crate) fn metadata_bytes(&self) -> io::Result<u64> {
+        self.closure.objects.values().try_fold(0u64, |total, object| {
+            (object.payloads.len() as u64)
+                .checked_mul(256)
+                .and_then(|bytes| bytes.checked_add(1024))
+                .and_then(|bytes| total.checked_add(bytes))
+                .ok_or_else(|| invalid("payload reader metadata overflow"))
+        })
+    }
+    pub(crate) fn reference_len(&self, reference: &Reference) -> io::Result<usize> {
+        let payload = self.closure.objects.get(&reference.object)
+            .and_then(|object| object.payloads.get(reference.position))
+            .ok_or_else(|| invalid("payload reference outside authenticated closure"))?;
+        usize::try_from(payload.length).ok().filter(|len| *len <= self.budget.body_bytes)
+            .ok_or_else(|| invalid("payload reference length exceeds budget"))
+    }
     pub fn read(&self, reference: &Reference) -> io::Result<Vec<u8>> {
         self.read_limited(reference, self.budget.body_bytes)
     }

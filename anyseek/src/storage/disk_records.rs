@@ -186,6 +186,22 @@ impl Checkpoint {
         })
     }
 
+    pub(crate) fn find_sealed(&self, id: &str) -> io::Result<Option<Located<'_>>> {
+        self.primary
+            .find(id)?
+            .map(|reference| self.row(id, reference, 0))
+            .transpose()
+    }
+
+    pub(crate) fn sealed_cursor(&self, after: Option<&str>) -> io::Result<SealedCursor<'_>> {
+        Ok(SealedCursor {
+            checkpoint: self,
+            keys: self
+                .primary
+                .cursor(after.unwrap_or_default(), after.is_some())?,
+        })
+    }
+
     /// Visit every authenticated base row in key order, including tombstones.
     /// The callback borrows one row at a time and must admit any retained value.
     pub(crate) fn visit_sealed<E>(
@@ -193,12 +209,9 @@ impl Checkpoint {
         error: impl Fn(io::Error) -> E,
         mut accept: impl FnMut(&str, Located<'_>) -> Result<(), E>,
     ) -> Result<(), E> {
-        let mut rows = self.primary.cursor("", false).map_err(&error)?;
-        while let Some((id, reference)) = rows.next().map_err(&error)? {
-            accept(
-                id.as_str(),
-                self.row(id.as_str(), reference, 0).map_err(&error)?,
-            )?;
+        let mut rows = self.sealed_cursor(None).map_err(&error)?;
+        while let Some((id, row)) = rows.next().map_err(&error)? {
+            accept(id.as_str(), row)?;
         }
         Ok(())
     }
@@ -221,6 +234,23 @@ impl Checkpoint {
             bytes,
             _memory: memory,
         })
+    }
+}
+
+pub(crate) struct SealedCursor<'a> {
+    checkpoint: &'a Checkpoint,
+    keys: primary::Cursor<'a>,
+}
+
+impl<'a> SealedCursor<'a> {
+    pub(crate) fn next(&mut self) -> io::Result<Option<(primary::KeyOwned<'static>, Located<'a>)>> {
+        self.keys
+            .next()?
+            .map(|(id, reference)| {
+                let row = self.checkpoint.row(id.as_str(), reference, 0)?;
+                Ok((id, row))
+            })
+            .transpose()
     }
 }
 

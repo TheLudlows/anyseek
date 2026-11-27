@@ -213,6 +213,20 @@ impl LocalEngine {
         .await
     }
 
+    /// Read a live record by its exact collection identity.
+    pub async fn get(
+        &self,
+        tenant: &str,
+        collection: &str,
+        record: &str,
+    ) -> Result<Option<anyseek::record::Record>, LocalError> {
+        let record = record.to_owned();
+        self.run(tenant, collection, Lane::Foreground, async move |service, tenant, collection| {
+            let (record, permit) = read_collection(&service, tenant, collection, record).await?;
+            Ok(permit.deliver_after_publication(|| record).await?)
+        }).await
+    }
+
     /// Query a collection in process and return the admitted record view.
     pub async fn query(
         &self,

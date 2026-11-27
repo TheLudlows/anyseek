@@ -43,6 +43,12 @@ impl<'a> StateEncoding<'a> {
         let (length, digest) = json_measure(state)?;
         Ok(Self { state, length, digest })
     }
+    pub(super) async fn capture(state: &'a State) -> Result<Self, RecordError> {
+        if !state.records.has_sealed_base() {
+            return Self::new(state);
+        }
+        crate::resources::file_transaction(|| Self::new(state)).await.map_err(|_| RecordError::Busy)?
+    }
     pub(super) fn state(&self) -> &'a State { self.state }
     pub(super) fn length(&self) -> usize { self.length }
     pub(super) fn digest(&self) -> [u8; 32] { self.digest }

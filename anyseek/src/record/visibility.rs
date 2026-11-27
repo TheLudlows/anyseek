@@ -17,6 +17,3 @@ pub(super) fn status(record: &Record, evaluation:u64) -> RecordVisibility {
     else if record.document.is_some() { RecordVisibility::Visible }
     else { RecordVisibility::Deleted }
 }
-pub(super) fn visible_records(records: &state_values::Records) -> Result<BTreeMap<String, bool>, RecordError> {
-    Ok(records.iter().map(|(id,r)| (id.clone(),r.document.is_some())).collect())
-}

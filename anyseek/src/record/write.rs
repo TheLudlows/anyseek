@@ -358,7 +358,7 @@ impl RecordPartition {
                 if inner.state.groups.as_ref().is_some_and(|g|g.owners.contains_key(&request.record_id) || g.receipt(&request.operation_id).is_some()) {
                     return Err(RecordError::Conflict("record or operation belongs to a group".into()));
                 }
-                let (previous, operation) = candidate.read(&inner.state, &request);
+                let (previous, operation) = candidate.read(&inner.state, &request)?;
                 let input = candidate.input(previous.as_deref(), operation.as_deref());
                 if input.operation.is_none() {
                     if inner.maintenance_requested.is_some() {
@@ -392,8 +392,10 @@ impl RecordPartition {
                 else {
                     return Ok(plan);
                 };
-                let (growth, updates) =
-                    build_budget::write_estimate_for(input.previous, &inner.config, applied)?;
+                let mut prepared = state_memory::Prepared::from_previous(input.previous, applied)?;
+                let (growth, updates) = build_budget::document_write_estimate(
+                    &inner.config, &prepared.record.record_id, prepared.record.document.as_ref(),
+                )?;
                 if growth > 0 {
                     let fresh = (inner.config.schema.len() as u64)
                         .checked_mul(65536 * 32)
@@ -477,7 +479,6 @@ impl RecordPartition {
                 // TTL decision. Unrelated expired bodies await background GC.
                 let prior_deadline=input.previous
                     .filter(|r|temporal::visible(r,evaluation_time_ms)).and_then(|r|r.temporal.expire_at_ms);
-                let mut prepared = state_memory::Prepared::from_previous(input.previous, applied)?;
                 if let Some(document)=&prepared.record.document {
                     prepared.component=Some(inner.index.reserve_component(&prepared.record,&inner.config).await?);
                     prepared.lexical=Some(if growth<=crate::storage::build_budget::EXPLICIT_BUFFERS {
@@ -847,8 +848,8 @@ mod tests {
         patch.vector_patch=Some(serde_json::from_value(serde_json::json!({"vector":[2.0,0.0]})).unwrap());
         let second=p.write(patch.clone()).await.unwrap();
         {let inner=p.inner.lock().await;assert!(inner.healthy);assert_eq!(inner.state.seq,2);
-            assert_eq!(inner.state.records["large"].ingested_at_ms,now);
-            assert_eq!(inner.state.records["large"].temporal.expire_at_ms,Some(now+86_400_000));}
+            assert_eq!(inner.state.records.load("large").unwrap().unwrap().ingested_at_ms,now);
+            assert_eq!(inner.state.records.load("large").unwrap().unwrap().temporal.expire_at_ms,Some(now+86_400_000));}
         p.finish_service_shutdown().await.unwrap();drop(p);
         let reopened=RecordPartition::open(&root,settings.max_journal_bytes).await.unwrap();
         assert_eq!(reopened.write(initial).await.unwrap(),first);assert_eq!(reopened.write(patch).await.unwrap(),second);

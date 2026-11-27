@@ -133,7 +133,7 @@ pub(super) fn prepare(state:&State, config:&RecordConfig, request:GroupReplace,
         }
         match groups.owners.get(&member.record_id) {
             Some(owner) if owner!=&request.group_id=>return Err(RecordError::Conflict("record belongs to another group".into())),
-            None if state.records.get(&member.record_id).is_some()=>return Err(RecordError::Conflict("record belongs to independent writes".into())),
+            None if state.records.find(&member.record_id)?.is_some()=>return Err(RecordError::Conflict("record belongs to independent writes".into())),
             _=>{}
         }
     }
@@ -148,7 +148,8 @@ pub(super) fn prepare(state:&State, config:&RecordConfig, request:GroupReplace,
     let writes=request.records.iter().map(|r|(r.record_id.clone(),Some(r.document.clone()),r.temporal.clone()))
         .chain(removed.into_iter().map(|id|(id,None,None)));
     for (id,document,temporal) in writes {
-        let previous=state.records.get(&id);
+        let previous=state.records.load(&id)?;
+        let previous=previous.as_deref();
         let write=RecordWrite{operation_id:request.operation_id.clone(),record_id:id,expected:ExpectedVersion::Any,document,vector_patch:None,temporal};
         let input=mutation::Input{previous,operation:None,seq:state.seq,epoch_watermark:epoch,time_watermark_ms:state.time_watermark_ms,
             record_count:state.records.len(),operation_count:state.operations.len(),ttl_count:ttl};
@@ -191,11 +192,12 @@ fn validate_decision(state: &State, d: &Decision) -> Result<(), RecordError> {
     let actual:BTreeSet<_>=d.records.iter().map(|r|r.record_id.clone()).collect();
     if actual!=expected || actual.len()!=d.records.len() {return Err(storage("group decision omits or duplicates members"));}
     for r in &d.records {
-        if state.records.get(&r.record_id).map_or(Some(1),|old|old.version.checked_add(1))!=Some(r.version)
+        let previous = state.records.find(&r.record_id)?;
+        if previous.as_ref().map_or(Some(1),|old|old.version().checked_add(1))!=Some(r.version)
             || r.document.is_some()!=d.members.contains(&r.record_id) || r.expired_at_ms.is_some()
-            || r.ingested_at_ms!=if r.document.is_some(){d.observed_time_ms}else{state.records.get(&r.record_id).map_or(d.observed_time_ms,|r|r.ingested_at_ms)}
+            || r.ingested_at_ms!=if r.document.is_some(){d.observed_time_ms}else{previous.as_ref().map_or(d.observed_time_ms, state_values::CurrentRow::ingested_at_ms)}
             || groups.owners.get(&r.record_id).is_some_and(|g|g!=&d.receipt.group_id)
-            || (groups.owners.get(&r.record_id).is_none() && state.records.get(&r.record_id).is_some()) {
+            || (groups.owners.get(&r.record_id).is_none() && previous.is_some()) {
             return Err(storage("inconsistent group member decision"));
         }
     }
@@ -205,6 +207,7 @@ fn validate_decision(state: &State, d: &Decision) -> Result<(), RecordError> {
 pub(super) struct Prepared {
     pub(super) stored: StoredReceipt,
     pub(super) records: Vec<state_memory::Shared<Record>>,
+    previous: Vec<Option<state_values::PreviousRow>>,
     pub(super) snapshot_bytes: usize,
     pub(super) reserve_bytes: usize,
     head: Head,
@@ -268,11 +271,13 @@ impl Prepared {
         let mut has_owners = !groups.owners.is_empty();
         let mut ttl = state.records.live_ttl_count();
         let mut prepared = Vec::with_capacity(records.len());
+        let mut replaced = Vec::with_capacity(records.len());
         let group_owner_bytes = checkpoint_codec::json_length(&stored.receipt.group_id)?;
         for record in records {
             let id = &record.record_id;
-            let previous = state.records.shared(id);
-            let old = previous.as_ref().map_or(0, state_memory::Shared::wire_bytes);
+            let previous = state.records.find(id)?.map(|row| row.account(id)).transpose()?;
+            let old = previous.map_or(0, |row| row.bytes);
+            replaced.push(previous);
             if previous.is_none() {
                 snapshot_bytes = replace_bytes(snapshot_bytes, 0, map_key_bytes(id, has_records)?)?;
                 has_records = true;
@@ -283,7 +288,7 @@ impl Prepared {
                     key.checked_add(group_owner_bytes).ok_or_else(|| storage("group owner size overflow"))?)?;
                 has_owners = true;
             }
-            ttl = replace_bytes(ttl, usize::from(previous.as_deref().is_some_and(temporal::live_ttl)),
+            ttl = replace_bytes(ttl, usize::from(previous.is_some_and(state_values::PreviousRow::has_ttl)),
                 usize::from(temporal::live_ttl(&record)))?;
             let value = state_memory::Shared::admit(record)?;
             values = replace_bytes(values, old, value.wire_bytes())?;
@@ -291,8 +296,8 @@ impl Prepared {
             prepared.push(value);
         }
         let reserve_bytes = ttl.checked_mul(8192).ok_or_else(|| storage("group TTL budget overflow"))?;
-        let container_bytes = replace_bytes(snapshot_bytes, values, lookup_bytes)?;
-        Ok(Self { stored, records: prepared, snapshot_bytes, reserve_bytes, head, lookup_bytes, container_bytes })
+        let container_bytes = replace_bytes(snapshot_bytes, values.checked_add(state.records.sealed_keys_bytes()).ok_or(RecordError::Busy)?, lookup_bytes)?;
+        Ok(Self { stored, records: prepared, previous: replaced, snapshot_bytes, reserve_bytes, head, lookup_bytes, container_bytes })
     }
 
     pub(super) fn admit_containers(&self, state: &mut State) -> Result<(), RecordError> {
@@ -302,15 +307,15 @@ impl Prepared {
     /// Install while holding the publication guard. No state read or response
     /// can observe a subset, and unexpected failure fences the live partition.
     pub(super) fn install(self, state: &mut State) -> Result<GroupReceipt, RecordError> {
-        let Self { stored, records, head, lookup_bytes, .. } = self;
+        let Self { stored, records, previous, head, lookup_bytes, .. } = self;
         let receipt = stored.receipt.clone();
         let groups = state.groups.get_or_insert_with(Groups::default);
-        for record in records {
+        for (record, previous) in records.into_iter().zip(previous) {
             let id = record.record_id.clone();
             if !groups.owners.contains_key(&id) {
                 groups.owners.insert(id.clone(), receipt.group_id.clone());
             }
-            state.records.insert_shared(id, record)?;
+            state.records.replace_prepared(id, record, previous)?;
         }
         groups.heads.insert(receipt.group_id.clone(), head);
         groups.publication_seq = receipt.seq;
@@ -353,10 +358,12 @@ pub(super) fn validate(state:&State)->Result<(),RecordError>{
             .filter(|r|state.retired_operation_prefix.as_ref().is_none_or(|p|r.receipt.seq>p.seq)) {
             if last.receipt.group_version!=head.version || last.receipt.record_count!=head.members.len(){return Err(storage("group head differs from latest receipt"));}
         }
-        for member in &head.members {if g.owners.get(member)!=Some(id) || state.records.get(member).is_none_or(|r|r.document.is_none()&&r.expired_at_ms.is_none()){return Err(storage("orphan group member"));}}
+        for member in &head.members {if g.owners.get(member)!=Some(id) || state.records.find(member)?.is_none_or(|r|!r.live()&&r.expired_at_ms().is_none()){return Err(storage("orphan group member"));}}
     }
-    for (id,owner) in &g.owners {if !g.heads.contains_key(owner) || state.records.get(id).is_none(){return Err(storage("orphan group ownership"));}
-        if !g.heads[owner].members.contains(id)&&state.records[id].document.is_some(){return Err(storage("removed group member has a body"));}
+    for (id,owner) in &g.owners {
+        let row=state.records.find(id)?.ok_or_else(||storage("orphan group ownership"))?;
+        let head=g.heads.get(owner).ok_or_else(||storage("orphan group ownership"))?;
+        if !head.members.contains(id)&&row.live(){return Err(storage("removed group member has a body"));}
     }
     Ok(())
 }

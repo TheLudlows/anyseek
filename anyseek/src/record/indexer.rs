@@ -254,7 +254,7 @@ impl RecordPartition {
                 // The pinned cut already owns complete history. Verify the
                 // authenticated package against it and transfer that same owner
                 // into the candidate instead of decoding a duplicate State.
-                let loaded = reference.load_captured(&root, config.clone(), snapshot).await?;
+                let loaded = reference.load_captured(&root, config.clone(), snapshot, remote.is_none()).await?;
                 #[cfg(test)]
                 if mode==JobMode::Compact && root.join(".test-anchor-reject-loaded").exists() {
                     return Err(storage("injected loaded candidate rejection before certificate"));

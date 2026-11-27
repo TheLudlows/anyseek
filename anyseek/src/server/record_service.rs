@@ -982,15 +982,8 @@ async fn read(
     Query(params): Query<GetDocumentRequest>,
 ) -> Result<Response, Error> {
     let key = s.authenticate(&headers).await?;
-    let p = s.record(&key, &id).await?;
-    let data = p.output_permit_after_publication().await?;
-    let result = s
-        .catalog
-        .authorized_generation(key, id, p.generation, move |_| async move { p.get(&record_id).await })
-        .await?;
-    let value = result
-        .map_err(Error::from)
-        .and_then(|record| record.ok_or_else(not_found))
+    let (result, data) = read_collection(&s, key, id, record_id).await?;
+    let value = result.ok_or_else(not_found)
         .map(|mut record| {
             if !params.fields.is_empty() {
                 let fields: Vec<_> = params.fields.split(',').collect();
@@ -1001,6 +994,16 @@ async fn read(
             record
         });
     protected_after_publication(value, data).await
+}
+async fn read_collection(
+    service: &Service, tenant: String, collection: String, record: String,
+) -> Result<(Option<anyseek::record::Record>, DataOutputPermit), Error> {
+    let partition = service.record(&tenant, &collection).await?;
+    let data = partition.output_permit_after_publication().await?;
+    let value = service.catalog.authorized_generation(
+        tenant, collection, partition.generation, move |_| async move { partition.get(&record).await },
+    ).await??;
+    Ok((value, data))
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]

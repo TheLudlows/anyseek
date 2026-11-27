@@ -47,7 +47,6 @@ impl Image {
         validate_restored_state(self.config(), state)?;
         if state.operation_lookup.len() != state.operations.len()
             || state.operations.iter().enumerate().any(|(i, op)| state.operation_lookup.get(&op.request.operation_id) != Some(&i))
-            || state.records.iter().any(|(id, record)| id != &record.record_id)
         {
             return Err(storage("incremental state identity mismatch"));
         }
@@ -57,13 +56,33 @@ impl Image {
         &self, pool: &PoolReader, authority: u64,
         mut directory: impl FnMut(&str) -> Result<PathBuf, RecordError>,
     ) -> Result<State, RecordError> {
+        self.read_inner(pool, authority, &mut directory, None)
+    }
+    pub(super) fn read_local(
+        &self, pool: &Arc<state_values::OperationPool>, authority: u64,
+        mut directory: impl FnMut(&str) -> Result<PathBuf, RecordError>,
+    ) -> Result<State, RecordError> {
+        self.read_inner(&pool.reader, authority, &mut directory, Some(pool))
+    }
+    fn read_inner(
+        &self, pool: &PoolReader, authority: u64,
+        directory: &mut impl FnMut(&str) -> Result<PathBuf, RecordError>, local: Option<&Arc<state_values::OperationPool>>,
+    ) -> Result<State, RecordError> {
         self.owners()?;
-        let decoded = self.base.read(&directory(&self.base_owner)?, pool, authority)?;
+        let base = directory(&self.base_owner)?;
+        let decoded = if let Some(local) = local { self.base.read_local(&base, local, authority)? } else { self.base.read(&base, pool, authority)? };
         let mut state = decoded.state;
         for block in &self.deltas {
             Self::apply_block(&block.delta, &directory(&block.owner)?, pool, authority, self.config(), &mut state)?;
         }
-        self.validate_result(&state, authority)?;
+        if state.records.has_sealed_base() {
+            if state_proof::length(&state)? as u64 > authority.min(self.config().max_journal_bytes) {
+                return Err(storage("incremental state byte budget exceeded"));
+            }
+            validate_restored_state(self.config(), &state)?;
+        } else {
+            self.validate_result(&state, authority)?;
+        }
         Ok(state)
     }
     pub(super) fn apply_block(

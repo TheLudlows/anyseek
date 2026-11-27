@@ -34,7 +34,16 @@ impl replay::Context<'_> {
                 log::error!("Record input admission failed at sequence {}: {:?}", receipt.seq, error);
                 RecordError::DurablePending(receipt.seq)
             })?;
-            let id=self.index.append(receipt.record_id.clone(),receipt.version,receipt.seq,temporal::indexed(document, &temporal::retained(self.state.records.get(&receipt.record_id), &applied.request, applied.observed_time_ms).map_err(|_| RecordError::DurablePending(receipt.seq))?, if applied.request.vector_patch.is_some() { self.state.records[&receipt.record_id].ingested_at_ms } else { applied.observed_time_ms }),prepared.lexical.take(),prepared.component.take(),publish_native).await.map_err(|error| { log::error!("Record component publication failed at sequence {}: {:?}", receipt.seq, error); RecordError::DurablePending(receipt.seq) })?;
+            let indexed = temporal::indexed(
+                document, &prepared.record.temporal, prepared.record.ingested_at_ms,
+            );
+            let id = self.index.append(
+                receipt.record_id.clone(), receipt.version, receipt.seq, indexed,
+                prepared.lexical.take(), prepared.component.take(), publish_native,
+            ).await.map_err(|error| {
+                log::error!("Record component publication failed at sequence {}: {:?}", receipt.seq, error);
+                RecordError::DurablePending(receipt.seq)
+            })?;
             #[cfg(test)]
             if self.fail_publication_stage == 1 {
                 return Err(RecordError::DurablePending(receipt.seq));
@@ -68,6 +77,7 @@ impl replay::Context<'_> {
         *slot = record_id.to_owned();
         self.locations.insert(record_id.to_owned(), ordinal);
     }
+
 }
 
 impl Inner {

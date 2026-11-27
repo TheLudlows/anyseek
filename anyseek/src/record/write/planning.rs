@@ -15,6 +15,7 @@ pub(super) struct PlanningView {
     ttl_count: usize,
     value_bytes: usize,
     lookup_bytes: usize,
+    sealed_keys_bytes: usize,
     memory: MemoryLease,
 }
 
@@ -68,7 +69,7 @@ mod tests {
         let requests = vec![update.clone(), update, patch, delete, reuse, ttl, new, expired_reuse, seeds[0].clone(), conflict];
         for mut request in requests {
             request.operation_id.epoch = if request.operation_id.nonce.starts_with("seed-") { 9 } else { 10 };
-            let (previous, operation) = prefix.read(&basis, &request);
+            let (previous, operation) = prefix.read(&basis, &request).unwrap();
             let input = prefix.input(previous.as_deref(), operation.as_deref());
             assert_eq!((input.seq, input.epoch_watermark, input.time_watermark_ms),
                 (oracle.seq, oracle.epoch_watermark, oracle.time_watermark_ms));
@@ -117,7 +118,7 @@ mod tests {
         let mut oracle = basis.try_clone().unwrap();
         let mut request = write("epoch-step", "id-0", "updated", ExpectedVersion::Any);
         request.operation_id.epoch = 11;
-        let (previous, operation) = prefix.read(&basis, &request);
+        let (previous, operation) = prefix.read(&basis, &request).unwrap();
         let input = prefix.input(previous.as_deref(), operation.as_deref());
         let mutation::PreparedWrite::Append { applied, snapshot_bytes, .. } = mutation::prepare_input(
             &input, &config, checkpoint_codec::full_length(&config, &basis).unwrap(), request, 11, 101).unwrap()
@@ -140,6 +141,7 @@ impl PlanningView {
             record_count: basis.records.len(), operation_count: basis.operations.len(),
             ttl_count: basis.records.live_ttl_count(),
             value_bytes: basis.value_bytes()?, lookup_bytes: basis.lookup_bytes,
+            sealed_keys_bytes: basis.records.sealed_keys_bytes(),
             memory: reserve_memory(512 * 32).map_err(storage)?,
         })
     }
@@ -147,13 +149,20 @@ impl PlanningView {
     // A tombstone in this prefix is a value, not a missing map entry. Reads of
     // untouched rows borrow the unchanged canonical basis only under Inner.
     pub(super) fn read(&self, basis: &State, request: &RecordWrite)
-        -> (Option<Shared<Record>>, Option<Shared<Applied>>)
+        -> Result<(Option<Shared<Record>>, Option<Shared<Applied>>), RecordError>
     {
-        let record = self.records.get(&request.record_id).cloned()
-            .or_else(|| basis.records.shared(&request.record_id));
-        let operation = self.operations.get(&request.operation_id).cloned()
-            .or_else(|| basis.operation_lookup.get(&request.operation_id).map(|&i| basis.operations.shared(i)));
-        (record, operation)
+        let operation = match self.operations.get(&request.operation_id) {
+            Some(operation) => Some(operation.clone()),
+            None => basis.operation_lookup.get(&request.operation_id).map(|&i| basis.operations.load(i)).transpose()?,
+        };
+        if operation.is_some() {
+            return Ok((None, operation));
+        }
+        let record = match self.records.get(&request.record_id) {
+            Some(record) => Some(record.clone()),
+            None => basis.records.load(&request.record_id)?,
+        };
+        Ok((record, operation))
     }
     pub(super) fn input<'a>(&self, previous: Option<&'a Record>, operation: Option<&'a Applied>) -> mutation::Input<'a> {
         mutation::Input { previous, operation, seq: self.seq,
@@ -182,7 +191,7 @@ impl PlanningView {
             .ok_or_else(|| storage("planning value size overflow"))?;
         let lookup = self.lookup_bytes.checked_add(operation_lookup_bytes(&request.operation_id)?)
             .ok_or_else(|| storage("planning lookup size overflow"))?;
-        let container = snapshot_bytes.checked_sub(values).and_then(|n| n.checked_add(lookup))
+        let container = snapshot_bytes.checked_sub(values).and_then(|n| n.checked_sub(self.sealed_keys_bytes)).and_then(|n| n.checked_add(lookup))
             .ok_or_else(|| storage("planning container size overflow"))?;
         let records = self.record_count.checked_add(usize::from(input.previous.is_none()))
             .ok_or_else(|| storage("planning record count overflow"))?;

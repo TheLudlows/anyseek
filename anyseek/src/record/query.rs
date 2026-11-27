@@ -221,7 +221,9 @@ impl RecordPartition {
             {
                 continue;
             }
-            let Some(record) = inner.state.records.get(&candidate.identity.id).filter(|r|temporal::visible(r,inner.evaluation_time_ms)) else {
+            let Some(row) = inner.state.records.find(&candidate.identity.id)?.filter(|row|
+                row.visible(inner.evaluation_time_ms)
+                    && row.matches_candidate(candidate.identity.version, candidate.fingerprint)) else {
                 continue;
             };
             let channels = if let Some(channel) = channel {
@@ -251,9 +253,10 @@ impl RecordPartition {
                 }
                 continue;
             }
+            let record = row.load(&candidate.identity.id)?;
             hits.push(RecordHit {
                 channels,
-                record: QueryRecord::copy(record, output_fields)?,
+                record: QueryRecord::copy(&record, output_fields)?,
                 score: candidate.hit.score,
             });
         }
@@ -264,7 +267,7 @@ impl RecordPartition {
             query_terms: result.query_terms,
             visible_seq: inner.state.seq,
             hits,
-            statistics: inner.statistics(),
+            statistics: inner.statistics()?,
         })
     }
 }
@@ -574,7 +577,7 @@ mod tests {
             let inner = p.inner.lock().await;
             assert_eq!(inner.state.records.live_ttl_count(), 1);
             assert!(!inner.state.records.may_have_due_ttl(inner.evaluation_time_ms));
-            assert_eq!(inner.statistics().active_records, 1, "future TTL uses the cheap count");
+            assert_eq!(inner.statistics().unwrap().active_records, 1, "future TTL uses the cheap count");
         }
         let before = p.search("alpha".into(), None, SearchMode::Lexical, vec![], 10).await.unwrap();
         assert_eq!(before.statistics.active_records, 1);
@@ -593,8 +596,8 @@ mod tests {
         let inner = p.inner.lock().await;
         assert_eq!(inner.state.seq,1,"deadline revalidation is read-only");
         assert_eq!(inner.state.time_watermark_ms,1000);
-        assert!(inner.state.records["a"].document.is_some());
-        assert!(inner.state.records["a"].expired_at_ms.is_none());
+        assert!(inner.state.records.load("a").unwrap().unwrap().document.is_some());
+        assert!(inner.state.records.load("a").unwrap().unwrap().expired_at_ms.is_none());
         drop(inner);
         drop(writer);
     }

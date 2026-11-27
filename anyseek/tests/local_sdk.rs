@@ -121,6 +121,20 @@ async fn local_sdk_owns_publishes_isolates_and_recovers() {
     }));
 
     let reopened = LocalEngine::open(&root, false).await.unwrap();
+    let record = reopened
+        .get("1-tenant", "policy", "p1")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(record.version, 2);
+    assert_eq!(record.document.unwrap()["terms"], "subscription timeout");
+    assert!(
+        reopened
+            .get("1-tenant", "policy", "p2")
+            .await
+            .unwrap()
+            .is_none()
+    );
     let second = reopened
         .replace_group("1-tenant", "policy", replacement.clone())
         .await
@@ -166,6 +180,13 @@ async fn local_sdk_owns_publishes_isolates_and_recovers() {
     group_view(&reopened, "subscription", &[], 3).await;
     reopened.shutdown().await.unwrap();
     let reopened = LocalEngine::open(&root, false).await.unwrap();
+    assert!(
+        reopened
+            .get("1-tenant", "policy", "p1")
+            .await
+            .unwrap()
+            .is_none()
+    );
     assert_eq!(
         reopened
             .replace_group("1-tenant", "policy", withdrawal)

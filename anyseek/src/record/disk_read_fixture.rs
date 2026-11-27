@@ -155,7 +155,8 @@ async fn install(
     let mut segment_rows = rows::SegmentWriter::create(path, 1).unwrap();
     let mut writer = segment::Writer::create(&payload, 1024 * 1024, logical.records.len()).unwrap();
     let mut prepared = Vec::new();
-    for (id, record) in logical.records.iter() {
+    logical.records.scan(None, |id, row| {
+        let record = row.load(id)?;
         let doc = record.document.as_ref().unwrap();
         let fingerprint = crate::active::fingerprint(&temporal::indexed(
             doc,
@@ -165,7 +166,8 @@ async fn install(
         .unwrap();
         let position = writer.intern(&serde_json::to_vec(doc).unwrap()).unwrap();
         prepared.push((id.to_string(), record, fingerprint, position));
-    }
+        Ok(true)
+    }).unwrap();
     let sealed = writer.finish().unwrap();
     for (id, record, fingerprint, position) in prepared {
         let row = segment_rows

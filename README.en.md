@@ -34,7 +34,7 @@ Open the address shown in the terminal (default `http://127.0.0.1:5173`). Select
 
 Depend on the `anyseek` library and open the local Catalog with `anyseek::sdk::LocalEngine`.
 The caller supplies the authorized tenant and collection on each operation. Create a collection,
-atomically replace Record groups with a stable operation ID, query its text or vectors, and await
+atomically replace Record groups with a stable operation ID, read a Record with `get`, query text or vectors, and await
 `shutdown()` before reopening the directory. The SDK uses local disk and takes an exclusive root lock.
 
 Use `default-features = false` when the host needs the standard `serde_json` object ordering.

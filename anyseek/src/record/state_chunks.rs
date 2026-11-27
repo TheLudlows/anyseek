@@ -131,7 +131,7 @@ impl Delta {
     ) -> Result<(), RecordError> {
         if !matches!(self.frames.format, 7 | 9) || self.frames.records.is_some() { return Err(invalid("unsupported delta format")); }
         let mut actual = PieceDigest::new();
-        self.frames.visit_pieces(root, pool, authority, None, |wire, _, bytes| {
+        self.frames.visit_pieces(root, pool, authority, false, None, |wire, _, bytes| {
             actual.value(&wire, bytes)?;
             let Value::Object(mut object) = wire else { return Err(invalid("invalid delta entry")); };
             if object.len() != 1 { return Err(invalid("invalid delta entry")); }
@@ -284,7 +284,8 @@ fn visit_state(state: &State, sink: &mut impl Pieces) -> Result<(), RecordError>
             for (id,owner) in &groups.owners { sink.push(&BTreeMap::from([("group_owners", BTreeMap::from([(id,owner)]))]))?; }
             for receipt in &groups.receipts { sink.push(&BTreeMap::from([("group_receipts", [receipt])]))?; }
         }
-        for operation in &state.operations {
+        for position in 0..state.operations.len() {
+            let operation = state.operations.load(position)?;
             sink.push(&BTreeMap::from([("operations", [operation])]))?;
         }
         for event in &state.expirations {
@@ -364,7 +365,7 @@ impl Descriptor {
         })
     }
     fn visit_pieces(&self, root:&Path, pool:&PoolReader, authority:u64,
-        mut residency:Option<&mut crate::storage::build_budget::MemoryLease>,
+        defer_operations: bool, mut residency:Option<&mut crate::storage::build_budget::MemoryLease>,
         mut accept:impl FnMut(Value,u64,u64)->Result<u64,RecordError>) -> Result<(),RecordError> {
         validate_config(&self.config)?;
         let limit = authority.min(self.config.max_journal_bytes);
@@ -411,7 +412,7 @@ impl Descriptor {
                     .ok_or_else(|| invalid("state expansion budget exceeded"))?;
                 // Admission precedes buffer allocation and deserialization, and
                 // decoded state keeps the reservation after this function returns.
-                let charge=expanded.checked_mul(32).ok_or_else(||invalid("state residency overflow"))?;
+                let charge=(if defer_operations { bytes } else { expanded }).checked_mul(32).ok_or_else(||invalid("state residency overflow"))?;
                 let mut frame = reserve_memory(charge).map_err(storage)?;
                 let _temporary = reserve_memory(
                     bytes
@@ -422,6 +423,11 @@ impl Descriptor {
                 let mut buffer = vec![0; bytes as usize];
                 file.read_exact(&mut buffer).map_err(storage)?;
                 let mut wire: Value = snapshot_json::from_slice(&buffer).map_err(storage)?;
+                let deferred = defer_operations && wire.get("operations").is_some();
+                if deferred && wire.as_object().is_none_or(|fields| fields.len() != 1) {
+                    return Err(invalid("invalid sealed operation frame fields"));
+                }
+                let mut deferred_size = checkpoint_codec::json_length(&wire)?;
                 let mut body_bytes = 0usize;
                 segment_state::visit(&mut wire, |body| {
                     let object = body
@@ -435,6 +441,13 @@ impl Descriptor {
                             .clone(),
                     )
                     .map_err(storage)?;
+                    if deferred {
+                        let encoded = checkpoint_codec::json_length(body)?;
+                        let size = pool.reference_len(&reference).map_err(storage)?;
+                        deferred_size = deferred_size.checked_sub(encoded).and_then(|total| total.checked_add(size))
+                            .ok_or_else(|| invalid("sealed operation wire size overflow"))?;
+                        return Ok(());
+                    }
                     // Keep cumulative expansion within the frame's admitted size
                     // before allocating or parsing each referenced body.
                     let available = (expanded as usize)
@@ -450,11 +463,12 @@ impl Descriptor {
                     *body = snapshot_json::from_slice(&raw).map_err(storage)?;
                     Ok(())
                 })?;
-                if checkpoint_codec::json_length(&wire)? != expanded as usize {
+                let logical_size = if deferred { deferred_size } else { checkpoint_codec::json_length(&wire)? };
+                if logical_size != expanded as usize {
                     return Err(invalid("state frame expansion mismatch"));
                 }
                 let owned = accept(wire, entries, expanded)?;
-                if let Some(metadata)=residency.as_mut() {
+                if let Some(metadata)=residency.as_mut().filter(|_| !deferred) {
                     // Newly decoded immutable values already own their leases.
                     // Retain only this frame's key/container/header overhead;
                     // no complete-history allocation or aggregate single lease.
@@ -490,22 +504,23 @@ impl Descriptor {
             return Err(invalid("expected state closure mismatch"));
         }
         validate_restored_state(&self.config,state)?;
-        if state.operation_lookup.len()!=state.operations.len() || state.operations.iter().enumerate().any(|(i,op)|state.operation_lookup.get(&op.request.operation_id)!=Some(&i)) || state.records.iter().any(|(id,r)|id!=&r.record_id) {
+        if state.operation_lookup.len()!=state.operations.len() || state.operations.iter().enumerate().any(|(i,op)|state.operation_lookup.get(&op.request.operation_id)!=Some(&i)) {
             return Err(invalid("expected state identity mismatch"));
         }
         let mut expected=PieceDigest::new(); visit_state(state,&mut expected)?;
         let mut actual=PieceDigest::new();
-        self.visit_pieces(root,pool,authority,None,|wire,_,bytes|{actual.value(&wire,bytes)?;Ok(0)})?;
+        self.visit_pieces(root,pool,authority,false,None,|wire,_,bytes|{actual.value(&wire,bytes)?;Ok(0)})?;
         if actual.finish()!=expected.finish() { return Err(invalid("state piece order or content mismatch")); }
-        let mut rows = state.records.iter();
+        let mut count = 0;
         self.record_rows()?.visit(root, &state.lineage, state.seq, &self.config, pool, |id, record| {
-            let (key, expected) = rows.next().ok_or_else(|| invalid("unexpected disk record"))?;
-            if id != *key || checkpoint_codec::json_digest(&record)? != checkpoint_codec::json_digest(expected)? {
+            let expected = state.records.load(&id)?.ok_or_else(|| invalid("unexpected disk record"))?;
+            if checkpoint_codec::json_digest(&record)? != checkpoint_codec::json_digest(&expected)? {
                 return Err(invalid("disk record differs from its expected checkpoint"));
             }
+            count += 1;
             Ok(())
         })?;
-        if rows.next().is_some() { return Err(invalid("disk record missing from checkpoint")); }
+        if count != state.records.len() { return Err(invalid("disk record missing from checkpoint")); }
         Ok(())
     }
     fn record_rows(&self) -> Result<&state_rows::Descriptor, RecordError> {
@@ -518,6 +533,14 @@ impl Descriptor {
         pool: &PoolReader,
         authority: u64,
     ) -> Result<Decoded, RecordError> {
+        self.read_inner(root, pool, authority, None)
+    }
+
+    pub(super) fn read_local(&self, root: &Path, pool: &Arc<state_values::OperationPool>, authority: u64) -> Result<Decoded, RecordError> {
+        self.read_inner(root, &pool.reader, authority, Some(pool))
+    }
+
+    fn read_inner(&self, root: &Path, pool: &PoolReader, authority: u64, local: Option<&Arc<state_values::OperationPool>>) -> Result<Decoded, RecordError> {
         let sealed = match self.format {
             6 | 8 if self.records.is_none() => false,
             10 | 11 if self.records.is_some() => true,
@@ -525,7 +548,21 @@ impl Descriptor {
         };
         let mut state=None;
         let mut residency=reserve_memory(0).map_err(storage)?;
-        self.visit_pieces(root,pool,authority,Some(&mut residency),|wire,ordinal,_| {
+        let deferred = local.filter(|_| sealed);
+        self.visit_pieces(root,pool,authority,deferred.is_some(),Some(&mut residency),|mut wire,ordinal,expanded| {
+            if let Some(pool) = deferred
+                && let Some(operations) = wire.get_mut("operations") {
+                if ordinal == 0 {
+                    return Err(invalid("missing state header before operation frame"));
+                }
+                let operations = operations.as_array_mut().filter(|ops| ops.len() == 1)
+                    .ok_or_else(|| invalid("invalid sealed operation count"))?;
+                let bytes = (expanded as usize).checked_sub(b"{\"operations\":[]}".len())
+                    .ok_or_else(|| invalid("sealed operation frame size underflow"))?;
+                let state: &mut State = state.as_mut().ok_or_else(|| invalid("missing state header"))?;
+                state.operations.push_sealed(operations[0].take(), (*pool).clone(), bytes)?;
+                return Ok(0);
+            }
             let before=state.as_ref().map(State::value_bytes).transpose()?.unwrap_or(0);
             apply_piece(&mut state,wire,ordinal,sealed)?;
             let after=state.as_ref().map(State::value_bytes).transpose()?.unwrap_or(0);
@@ -534,27 +571,29 @@ impl Descriptor {
         let limit=authority.min(self.config.max_journal_bytes);
         let mut state = state.ok_or_else(|| invalid("missing state header"))?;
         if let Some(rows) = &self.records {
-            rows.visit(root, &state.lineage, state.seq, &self.config, pool, |id, record| {
+            if deferred.is_some() {
+                state.records = state_values::Records::from_base(rows.open(root, &state.lineage, state.seq, &self.config, pool)?)?;
+            } else { rows.visit(root, &state.lineage, state.seq, &self.config, pool, |id, record| {
                 let key_bytes = (id.len() as u64).checked_mul(32).and_then(|n| n.checked_add(128)).ok_or(RecordError::Busy)?;
                 residency.grow(key_bytes).map_err(memory_error)?;
                 if state.records.insert(id, record)?.is_some() {
                     return Err(invalid("duplicate disk record"));
                 }
                 Ok(())
-            })?;
+            })?; }
         }
         if matches!(self.format, 8 | 11) != state.groups.is_some() { return Err(invalid("group state format mismatch")); }
-        if checkpoint_codec::json_digest(&state)? != self.digest
+        if !state.records.has_sealed_base() && checkpoint_codec::json_digest(&state)? != self.digest
         {
             return Err(invalid("state closure mismatch"));
         }
-        if checkpoint_codec::json_length(&state)? as u64 > limit {
+        if state_proof::length(&state)? as u64 > limit {
             return Err(invalid("complete state byte budget exceeded"));
         }
         state.attach_residency(residency.bytes(), residency);
         restore_operation_lookup(&mut state)?;
         validate_restored_state(&self.config, &state)?;
-        state.admit_bytes(checkpoint_codec::json_length(&state)?)?;
+        state.admit_bytes(state_proof::length(&state)?)?;
         Ok(Decoded { state })
     }
 }
@@ -774,15 +813,15 @@ mod tests {
         assert!(directory.join("records-0000000000000000").is_file());
         let legacy_record = snapshot_json::to_value(BTreeMap::from([(
             "records",
-            BTreeMap::from([("s", &state.records["s"])]),
+            BTreeMap::from([("s", &state.records.load("s").unwrap().unwrap())]),
         )]))
         .unwrap();
         let mut legacy = Some(State::default());
         assert!(apply_piece(&mut legacy, legacy_record.clone(), 1, true).is_err());
         apply_piece(&mut legacy, legacy_record, 1, false).unwrap();
         assert_eq!(
-            checkpoint_codec::json_digest(&legacy.unwrap().records["s"]).unwrap(),
-            checkpoint_codec::json_digest(&state.records["s"]).unwrap(),
+            checkpoint_codec::json_digest(&legacy.unwrap().records.load("s").unwrap().unwrap()).unwrap(),
+            checkpoint_codec::json_digest(&state.records.load("s").unwrap().unwrap()).unwrap(),
         );
         // The persisted metadata must not retain original bodies.
         for slot in 0..descriptor.chunks.len() {

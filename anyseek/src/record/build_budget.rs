@@ -140,18 +140,6 @@ pub(super) fn admit<'a>(
 
 /// Admit the complete business operation, including its index updates,
 /// before WAL append. Native commits cannot split the operation's authority cut.
-pub(super) fn write_estimate(
-    state: &State,
-    config: &RecordConfig,
-    applied: &Applied,
-) -> Result<(u64, usize), RecordError> {
-    write_estimate_for(state.records.get(&applied.request.record_id), config, applied)
-}
-pub(super) fn write_estimate_for(previous: Option<&Record>, config: &RecordConfig, applied: &Applied) -> Result<(u64, usize), RecordError> {
-    let document = enrichment::document(previous, &applied.request)?;
-    document_write_estimate(config, &applied.request.record_id, document.as_ref())
-}
-
 pub(super) fn document_write_estimate(
     config: &RecordConfig, id: &str, document: Option<&Document>,
 ) -> Result<(u64, usize), RecordError> {
