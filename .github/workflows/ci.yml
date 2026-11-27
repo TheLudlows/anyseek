@@ -138,7 +138,7 @@ jobs:
       - name: Embedded SDK and ordered snapshot recovery
         if: matrix.lane == 'core' && runner.os == 'Linux'
         run: |
-          cargo test -p anyseek --locked --no-default-features --test local_sdk
+          cargo test -p anyseek --locked --no-default-features --test local_sdk --test local_time_vector
           cargo test -p anyseek --locked --no-default-features --lib record::state_chunks::tests::chunks_preserve_records_receipts_opaque_json_and_owned_residency -- --exact
       - name: Service persistence fences and shutdown ownership
         if: matrix.lane == 'core'

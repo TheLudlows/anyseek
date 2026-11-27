@@ -2,6 +2,7 @@
 use crate::{
     component::FacetReader,
     index::{FieldType, SchemaField, VectorSegment},
+    record::RecordError,
     search::FacetFilter,
     utils::{read_f64, read_i64, read_u32},
 };
@@ -71,18 +72,52 @@ fn validate_filter_fields<'a>(
 pub(crate) fn matches_document(
     document: &crate::index::Document,
     filters: &[FacetFilter],
-) -> bool {
-    filters.iter().all(|predicate| match predicate {
-        FacetFilter::Int { field, filter } | FacetFilter::Timestamp { field, filter } =>
-            document.get(field).and_then(serde_json::Value::as_i64).is_some_and(|value| filter.contains(&value)),
-        FacetFilter::Float { field, filter } =>
-            document.get(field).and_then(serde_json::Value::as_f64).is_some_and(|value| filter.contains(&value)),
-        FacetFilter::String { field, filter } =>
-            document.get(field).and_then(serde_json::Value::as_str).is_some_and(|value| filter.iter().any(|expected| expected == value)),
-        FacetFilter::StringSet { field, filter } =>
-            document.get(field).and_then(serde_json::Value::as_array).is_some_and(|values|
-                values.iter().any(|value| value.as_str().is_some_and(|value| filter.iter().any(|expected| expected == value)))),
-    })
+    mut charge: impl FnMut(usize) -> Result<(), RecordError>,
+) -> Result<bool, RecordError> {
+    for predicate in filters {
+        charge(0)?;
+        let matches = match predicate {
+            FacetFilter::Int { field, filter } | FacetFilter::Timestamp { field, filter } => {
+                document
+                    .get(field)
+                    .and_then(serde_json::Value::as_i64)
+                    .is_some_and(|value| filter.contains(&value))
+            }
+            FacetFilter::Float { field, filter } => document
+                .get(field)
+                .and_then(serde_json::Value::as_f64)
+                .is_some_and(|value| filter.contains(&value)),
+            FacetFilter::String { field, filter } => {
+                charge(filter.len())?;
+                document
+                    .get(field)
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|value| filter.iter().any(|expected| expected == value))
+            }
+            FacetFilter::StringSet { field, filter } => {
+                let Some(values) = document.get(field).and_then(serde_json::Value::as_array) else {
+                    return Ok(false);
+                };
+                let mut found = false;
+                for value in values {
+                    // Reserve this tag's worst-case comparisons before visiting it.
+                    charge(filter.len().max(1))?;
+                    if value
+                        .as_str()
+                        .is_some_and(|value| filter.iter().any(|expected| expected == value))
+                    {
+                        found = true;
+                        break;
+                    }
+                }
+                found
+            }
+        };
+        if !matches {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 /// Bound the temporary string-set expansion before copying IDs into a predicate.

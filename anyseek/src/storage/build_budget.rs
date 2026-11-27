@@ -332,6 +332,7 @@ impl File {
         let _io = io_admission()?;
         #[cfg(windows)]
         let _cursor = self.lock_cursor()?;
+        crate::search::QueryWork::charge_read(buf.len())?;
         super::platform::read_exact_at(&self.inner, offset, buf)
     }
 

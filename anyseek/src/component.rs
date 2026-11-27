@@ -164,6 +164,9 @@ struct Descriptor {
 
 /// I/O admission pressure is retryable, while short reads and corruption are storage faults.
 pub(crate) fn read_error(error: std::io::Error) -> crate::record::RecordError {
+    if let Some(reason) = error.get_ref().and_then(|cause| cause.downcast_ref::<crate::record::RecordError>()) {
+        return reason.clone();
+    }
     if error
         .get_ref()
         .and_then(|cause| cause.downcast_ref::<crate::resources::Busy>())

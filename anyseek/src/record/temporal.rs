@@ -254,17 +254,33 @@ pub(super) fn checked_time(clock: &dyn Clock, floor: u64) -> Result<u64, RecordE
     }
     Ok(now.max(floor))
 }
+
+/// Process-local high water shared by Record decisions and response delivery.
+/// Individual operations still use the evaluation captured under Inner.
+#[derive(Clone, Default)]
+pub(super) struct ObservedTime(Arc<std::sync::atomic::AtomicU64>);
+
+impl ObservedTime {
+    pub(super) fn get(&self) -> u64 {
+        self.0.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    pub(super) fn advance(&self, evaluation: u64) -> u64 {
+        self.0.fetch_max(evaluation, std::sync::atomic::Ordering::AcqRel).max(evaluation)
+    }
+}
+
 impl Inner {
     fn trusted_evaluation_time(&self) -> Result<u64, RecordError> {
         if !self.healthy {
             return Err(RecordError::RecoveryRequired);
         }
-        Ok(checked_time(self.clock.as_ref(), self.state.time_watermark_ms)?.max(self.evaluation_time_ms))
+        checked_time(self.clock.as_ref(), self.state.time_watermark_ms)
     }
 
     /// Observation is transient and never edits canonical State, WAL or indexes.
     pub(super) fn observe_time(&mut self) -> Result<u64, RecordError> {
-        let evaluation=self.trusted_evaluation_time()?;
+        let evaluation = self.observed_time.advance(self.trusted_evaluation_time()?);
         self.evaluation_time_ms=evaluation;
         Ok(evaluation)
     }

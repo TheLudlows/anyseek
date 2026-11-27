@@ -109,6 +109,11 @@ pub(super) fn describe_openapi(doc: &mut Value) {
             }
         }
     }
-    doc["paths"]["/api/v1/index/{id}/query"]["post"]["responses"]["200"]["content"] = json!({"application/json":{"schema":{"type":"object","required":["diagnostics"],"properties":{"diagnostics":{"$ref":"#/components/schemas/QueryDiagnostics"}}}}});
+    doc["paths"]["/api/v1/index/{id}/query"]["post"]["responses"]["200"]["content"] = json!({
+        "application/json":{"schema":{"oneOf":[
+            {"type":"object","required":["diagnostics"],"properties":{"diagnostics":{"$ref":"#/components/schemas/QueryDiagnostics"}}},
+            {"$ref":"#/components/schemas/TimeVectorResult"}
+        ]}}
+    });
     doc["paths"]["/api/v1/index/{id}"]["get"]["responses"]["200"]["content"] = json!({"application/json":{"schema":{"type":"object","required":["analysis"],"properties":{"analysis":{"$ref":"#/components/schemas/AnalysisContract"}}}}});
 }

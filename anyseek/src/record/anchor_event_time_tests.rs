@@ -482,8 +482,8 @@ async fn event_time_window_requires_all_retrieval_dependencies_at_the_cut() {
                 Err(RecordError::Busy)
             ));
         } else {
-            let (window, vector) = p
-                .probe_event_time_vector_cut(0..30, 3, deadline)
+            let (window, vector, _) = p
+                .probe_event_time_vector_cut(0..30, 3, 4096, vec![], deadline)
                 .await
                 .unwrap();
             assert_eq!(window.cut, cut);
@@ -591,7 +591,7 @@ async fn event_time_vector_cut_refuses_topology_handoff_and_group_publication() 
         let reader = p.clone();
         let pending = tokio::spawn(async move {
             reader
-                .probe_event_time_vector_cut(0..30, 3, native_deadline())
+                .probe_event_time_vector_cut(0..30, 3, 4096, vec![], native_deadline())
                 .await
         });
         wait_file(&started).await;
@@ -614,13 +614,279 @@ async fn event_time_vector_cut_refuses_topology_handoff_and_group_publication() 
     }
 
     assert_eq!(build(&p).await, 4);
-    let (window, vector) = p
-        .probe_event_time_vector_cut(0..30, 3, native_deadline())
+    let (window, vector, _) = p
+        .probe_event_time_vector_cut(0..30, 3, 4096, vec![], native_deadline())
         .await
         .unwrap();
     assert_eq!(window.cut, 4);
     assert_eq!(hit_ids(&window), ["new", "tail", "base"]);
     assert_eq!(vector, ["base", "new", "tail"]);
+}
+
+#[tokio::test]
+async fn event_time_vector_charges_positioned_ranges_and_bytes_through_delivery() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("records");
+    let p = RecordPartition::create(&root, config()).await.unwrap();
+    p.write(dated("base", "base", 25, ExpectedVersion::Absent))
+        .await
+        .unwrap();
+    assert_eq!(build(&p).await, 1);
+    let request = || TimeVectorQuery {
+        window: TimeRange {
+            from_ms: Some(20),
+            to_ms: Some(26),
+        },
+        temporal: None,
+        vector: Embedding::F32(vec![1., 0.]),
+        facets: vec![],
+        fields: vec!["body".into()],
+        offset: 0,
+        length: 1,
+    };
+    let deadline = native_deadline();
+    let initial = (128, 128 * 1024);
+    let work = Arc::new(crate::search::QueryWork::new(
+        4096, initial.0, initial.1, deadline,
+    ));
+    let output = p
+        .query_time_vector_with_work(request(), deadline, work.clone())
+        .await
+        .map_err(|error| error.record_error())
+        .unwrap();
+    assert_eq!(output.hits.len(), 1);
+    assert_eq!(output.hits[0].channels.len(), 2);
+    let remaining = work.remaining_io();
+    let measured = (initial.0 - remaining.0, initial.1 - remaining.1);
+    assert!(
+        measured.0 > 3 && measured.1 > 4096,
+        "positioned projection, Record and vector reads {measured:?}"
+    );
+    eprintln!(
+        "time, vector and selected-record readback: {} range requests / {} bytes",
+        measured.0, measured.1
+    );
+    for (reads, bytes) in [(measured.0 - 1, initial.1), (initial.0, measured.1 - 1)] {
+        let deadline = native_deadline();
+        let work = Arc::new(crate::search::QueryWork::new(4096, reads, bytes, deadline));
+        assert!(
+            matches!(p.query_time_vector_with_work(request(), deadline, work).await,
+            Err(EventTimeError::Record(RecordError::Rejected(message))) if message.contains("positioned read budget"))
+        );
+    }
+}
+
+#[tokio::test]
+async fn event_time_vector_budget_counts_filtered_work_across_selected_shards() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("records");
+    let mut settings = config();
+    settings.schema.push(serde_json::from_value(serde_json::json!({
+        "field":"priority", "field_type":"Int", "store":false, "facet":true, "index_lexical":false
+    })).unwrap());
+    let p = RecordPartition::create(&root, settings).await.unwrap();
+    let filter = FacetFilter::Int {
+        field: "priority".into(),
+        filter: 9..10,
+    };
+    // Three time visits, two shard entries and their fixed predicate workspace,
+    // one frozen level and its cluster, and four vector visits with two predicates.
+    let combined_cost = 3 + 2 * (1 + 128) + 2 + 4 * 3;
+    let short_budget = combined_cost - 1;
+    for (id, time) in [("a", 25), ("b", 26), ("c", 27), ("d", 28)] {
+        let mut row = dated(id, id, time, ExpectedVersion::Absent);
+        row.document
+            .as_mut()
+            .unwrap()
+            .insert("priority".into(), 1.into());
+        p.write(row).await.unwrap();
+        if id == "b" {
+            assert_eq!(build(&p).await, 2);
+            let (window, vector, single) = p
+                .probe_event_time_vector_cut(
+                    25..26,
+                    1,
+                    short_budget,
+                    vec![filter.clone()],
+                    native_deadline(),
+                )
+                .await
+                .unwrap();
+            assert!(window.hits.is_empty() && vector.is_empty());
+            assert_eq!(single, combined_cost - 2 - 2 * 3);
+        }
+    }
+    let inner = p.inner.lock().await;
+    let components = inner.index.components().await;
+    let mut nonempty = 0;
+    for component in &components {
+        nonempty += usize::from(component.read().await.indexed_vector_count != 0);
+    }
+    assert_eq!(
+        nonempty, 2,
+        "the fixture must cross a frozen shard and the live tail"
+    );
+    drop(inner);
+
+    let legacy = p
+        .search(
+            String::new(),
+            Some(Embedding::F32(vec![1.0, 0.0])),
+            SearchMode::Vector {
+                similarity_threshold: None,
+                ann_mode: crate::vector_similarity::AnnMode::All,
+            },
+            vec![filter.clone()],
+            1,
+        )
+        .await
+        .unwrap();
+    assert!(legacy.hits.is_empty());
+
+    let (window, vector, spent) = p
+        .probe_event_time_vector_cut(25..26, 1, 4096, vec![filter.clone()], native_deadline())
+        .await
+        .unwrap();
+    assert!(window.hits.is_empty() && vector.is_empty());
+    assert_eq!(spent, combined_cost);
+    assert!(
+        matches!(p.probe_event_time_vector_cut(25..26, 1, short_budget, vec![filter.clone()], native_deadline()).await,
+        Err(RecordError::Rejected(reason)) if reason == "shared query work budget exhausted")
+    );
+    let (window, vector, exact) = p
+        .probe_event_time_vector_cut(25..26, 1, spent, vec![filter.clone()], native_deadline())
+        .await
+        .unwrap();
+    assert!(window.hits.is_empty() && vector.is_empty());
+    assert_eq!(exact, spent);
+    eprintln!("four filtered vectors across two nonempty shards: {spent} shared work units");
+
+    let permits = p.admission.available_permits();
+    let held = components[0].write().await;
+    let deadline = NativeDeadline::now() + std::time::Duration::from_millis(25);
+    assert!(matches!(
+        p.probe_event_time_vector_cut(25..26, 1, spent, vec![filter.clone()], deadline)
+            .await,
+        Err(RecordError::Busy)
+    ));
+    drop(held);
+    let (_, _, after_deadline) = p
+        .probe_event_time_vector_cut(25..26, 1, spent, vec![filter], native_deadline())
+        .await
+        .unwrap();
+    assert_eq!(after_deadline, spent);
+
+    // The caller timeout can precede the first worker's final release.
+    // Wait for that worker before measuring the next request's admission.
+    tokio::time::timeout_at(native_deadline(), async {
+        while p.admission.available_permits() != permits {
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let worker_gate = root.join(".test-event-time-vector-worker-pause");
+    std::fs::write(&worker_gate, b"pause").unwrap();
+    let reader = p.clone();
+    let pending = tokio::spawn(async move {
+        let deadline = NativeDeadline::now() + std::time::Duration::from_millis(500);
+        reader
+            .probe_event_time_vector_cut(25..26, 1, spent, vec![], deadline)
+            .await
+    });
+    wait_file(&root.join(".test-event-time-vector-worker-pause-entered")).await;
+    assert_eq!(p.admission.available_permits(), permits - 1);
+    assert!(matches!(pending.await.unwrap(), Err(RecordError::Busy)));
+    assert_eq!(
+        p.admission.available_permits(),
+        permits - 1,
+        "a timed-out waiter cannot release the worker's admission"
+    );
+    std::fs::remove_file(worker_gate).unwrap();
+    tokio::time::timeout_at(native_deadline(), async {
+        while p.admission.available_permits() != permits {
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn event_time_vector_cut_rejects_expiry_outside_the_time_window_and_version_changes() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("records");
+    let p = RecordPartition::create(&root, config()).await.unwrap();
+    let now = p.inner.lock().await.observe_time().unwrap();
+    let clock = Arc::new(EventClock(AtomicU64::new(now)));
+    p.inner.lock().await.clock = clock.clone();
+    p.write(dated("base", "base", 25, ExpectedVersion::Absent))
+        .await
+        .unwrap();
+    let mut vector_only = dated("expiry", "outside", 300, ExpectedVersion::Absent);
+    vector_only.temporal.as_mut().unwrap().expire_at_ms = Some(now + 2000);
+    p.write(vector_only).await.unwrap();
+    assert_eq!(build(&p).await, 2);
+    let request = || TimeVectorQuery {
+        window: TimeRange {
+            from_ms: Some(25),
+            to_ms: Some(26),
+        },
+        temporal: None,
+        vector: Embedding::F32(vec![1., 0.]),
+        facets: vec![],
+        fields: vec![],
+        offset: 0,
+        length: 2,
+    };
+    let output = p
+        .query_time_vector(request(), native_deadline())
+        .await
+        .map_err(|error| error.record_error())
+        .unwrap();
+    assert_eq!(output.hits[0].record.record_id, "base");
+    assert_eq!(output.hits[1].record.record_id, "outside");
+    assert_eq!(output.hits[1].channels.len(), 1);
+    assert_eq!(output.hits[1].channels[0].channel, "vector");
+    let transport = p
+        .output_permit()
+        .unwrap()
+        .with_time_fence(output.delivery_time);
+
+    let gate = root.join(".test-event-time-delivery-pause");
+    let started = root.join(".test-event-time-delivery-started");
+    for expiry in [true, false] {
+        std::fs::write(&gate, b"pause").unwrap();
+        let reader = p.clone();
+        let pending =
+            tokio::spawn(
+                async move { reader.query_time_vector(request(), native_deadline()).await },
+            );
+        wait_file(&started).await;
+        if expiry {
+            clock.0.store(now + 2000, Ordering::Release);
+            assert_eq!(p.committed_progress().await.committed_seq, Some(2));
+            assert!(matches!(transport.deliver(|| ()), Err(RecordError::Busy)));
+        } else {
+            p.write(dated("replace", "base", 25, ExpectedVersion::Match(1)))
+                .await
+                .unwrap();
+        }
+        std::fs::remove_file(&gate).unwrap();
+        std::fs::remove_file(&started).unwrap();
+        assert!(matches!(
+            pending.await.unwrap(),
+            Err(EventTimeError::Record(RecordError::Busy))
+        ));
+    }
+    let output = p
+        .query_time_vector(request(), native_deadline())
+        .await
+        .map_err(|error| error.record_error())
+        .unwrap();
+    assert_eq!(output.hits.len(), 1);
+    assert_eq!(output.hits[0].record.record_id, "base");
+    assert_eq!(output.hits[0].record.version, 2);
 }
 
 #[tokio::test]

@@ -134,7 +134,7 @@ async fn truncated_component_reads_fail_without_returning_partial_hits() {
     drop(root);
     let score = |filters| component.search_vector_segment(
         Some((crate::vector::Embedding::F32(vec![1.0, 0.0]), 0.0, 0.0, 0, 0)),
-        2, true, None, AnnMode::All, Vec::new(), filters,
+        2, true, None, AnnMode::All, Vec::new(), filters, None,
     );
     let filter: crate::search::FacetFilter = serde_json::from_value(serde_json::json!({
         "Int": {"field":"number", "filter":{"start":42, "end":43}}

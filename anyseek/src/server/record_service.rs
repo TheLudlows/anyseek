@@ -14,7 +14,7 @@ mod diagnostic_tests;
 #[cfg(test)]
 #[path = "record_service/event_time_tests.rs"]
 mod event_time_tests;
-use super::api_types::{CreateIndexRequest, EventTimeRequest, FieldRequest, GetDocumentRequest, SearchRequestObject};
+use super::api_types::{CreateIndexRequest, EventTimeRequest, FieldRequest, GetDocumentRequest, SearchRequestObject, TimeVectorRecall, TimeVectorRequest};
 use axum::{
     Json, Router,
     body::{Body, Bytes},
@@ -33,6 +33,7 @@ use anyseek::{
     index::Clustering,
     record::{
         EventTimeError, EventTimeResult, OperationId, RecordConfig, RecordCursor, RecordError, RecordPartition, RecordQuery,
+        TimeVectorQuery, TimeVectorResult,
         RecordWrite, DataOutputPermit, S3CompatibleRecordConfig, IndependentItem, GroupReplace,
     },
     vector::Inference,
@@ -51,6 +52,7 @@ use tokio::sync::{Mutex, RwLock, Semaphore};
 
 tokio::task_local! { static AUTHENTICATED: String; }
 tokio::task_local! { static REQUEST_DEADLINE: tokio::time::Instant; }
+tokio::task_local! { static EVENT_TIME_READ: Arc<std::sync::atomic::AtomicBool>; }
 tokio::task_local! { static ROUTED_COLLECTION: Option<admission::RoutedCollection>; }
 #[derive(Clone)]
 struct Principal(String);
@@ -1854,6 +1856,12 @@ async fn query_event_time_collection(
         p.query_event_time(request.temporal, request.facet_filter, fields, request.length, deadline)
             .await.map_err(Error::from)
     }).await?;
+    let data = match &result {
+        Ok(output) => data.with_time_fence(output.delivery_time.clone()),
+        Err(_) => data,
+    };
+    #[cfg(test)]
+    if result.is_ok() { pause_event_read_handoff(s, deadline).await; }
     Ok((result, data))
 }
 
@@ -1863,17 +1871,69 @@ fn stored_fields(entry: &CollectionEntry, requested: &[String]) -> Vec<String> {
         .map(|field| field.field.clone()).collect()
 }
 
+#[derive(Deserialize)]
+struct QueryDispatch<'a> {
+    #[serde(borrow)]
+    recall: Option<&'a serde_json::value::RawValue>,
+}
+
 async fn query(
     State(s): State<Arc<Service>>,
     headers: HeaderMap,
     Path(id): Path<String>,
     bytes: Bytes,
 ) -> Result<Response, Error> {
+    let dispatch: QueryDispatch<'_> = serde_json::from_slice(&bytes).map_err(bad)?;
+    if dispatch.recall.is_some() {
+        let request = parse::<TimeVectorRequest>(&bytes)?;
+        let tenant = s.authenticate(&headers).await?;
+        let _ = EVENT_TIME_READ.try_with(|read| read.store(true, std::sync::atomic::Ordering::Release));
+        let deadline = REQUEST_DEADLINE.with(|deadline| *deadline);
+        let (result, data) = query_time_vector_collection(&s, tenant, id, request, deadline).await?;
+        return protected_after_publication(result, data).await;
+    }
     let request_id = diagnostics::REQUEST_ID.try_with(Clone::clone).unwrap_or_else(|_| diagnostics::new_id());
     let request: SearchRequestObject = parse(&bytes)?;
     let key = s.authenticate(&headers).await?;
     let (result, data) = query_collection(&s, key, id, request, request_id).await?;
     protected_after_publication(result, data).await
+}
+
+async fn query_time_vector_collection(
+    s: &Arc<Service>, tenant: String, id: String, request: TimeVectorRequest,
+    deadline: tokio::time::Instant,
+) -> Result<(Result<TimeVectorResult, Error>, DataOutputPermit), Error> {
+    let p = s.record(&tenant, &id).await?;
+    let data = p.output_permit_after_publication().await?;
+    let result = s.catalog.authorized_generation(tenant, id, p.generation, move |entry| async move {
+        if !request.all || request.count {
+            return Err(bad("time and vector recall requires all=true and count=false"));
+        }
+        let vector = anyseek::vector::parse_external_embedding(&request.query_vector, &entry.config.index.inference)
+            .map_err(bad)?;
+        let fields = stored_fields(&entry, &request.fields);
+        let query = TimeVectorQuery { window: request.recall.time, temporal: request.temporal,
+            vector, facets: request.facet_filter, fields, offset: request.offset, length: request.length };
+        p.query_time_vector(query, deadline).await.map_err(Error::from)
+    }).await?;
+    let data = match &result {
+        Ok(output) => data.with_time_fence(output.delivery_time.clone()),
+        Err(_) => data,
+    };
+    #[cfg(test)]
+    if result.is_ok() { pause_event_read_handoff(s, deadline).await; }
+    Ok((result, data))
+}
+
+#[cfg(test)]
+async fn pause_event_read_handoff(s: &Service, deadline: tokio::time::Instant) {
+    let gate = s.root.join(".test-event-read-handoff-pause");
+    if gate.exists() {
+        std::fs::write(s.root.join(".test-event-read-handoff-started"), b"ready").unwrap();
+        while gate.exists() && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
+    }
 }
 
 async fn query_collection(
@@ -2010,6 +2070,9 @@ async fn request_admitted(
         && request.extensions().get::<axum::extract::MatchedPath>()
             .is_some_and(|path| path.as_str() == EVENT_TIME_CHECKPOINT_PATH))
         .then(EventTimeCheckpointWait::default);
+    let event_time_read = request.extensions().get::<axum::extract::MatchedPath>()
+        .is_some_and(|path| path.as_str() == EVENT_TIME_QUERY_PATH);
+    let read_timeout = || Error(StatusCode::TOO_MANY_REQUESTS, "busy", "event-time query deadline exceeded".into());
     let (mut request, scope) = match tokio::time::timeout_at(deadline, admission::request(&service, request)).await {
         Ok(Ok(value)) => value,
         Ok(Err(error)) => {
@@ -2021,6 +2084,8 @@ async fn request_admitted(
         Err(_) => {
             let error = if let Some(wait) = &checkpoint {
                 event_time_checkpoint_error(wait.timeout_error())
+            } else if event_time_read {
+                read_timeout()
             } else {
                 Error(StatusCode::TOO_MANY_REQUESTS, "busy", "admission deadline exceeded; retry the original operation identity".into())
             };
@@ -2037,8 +2102,7 @@ async fn request_admitted(
     }
     let principal = request.extensions().get::<Principal>().cloned();
     let collection = request.extensions().get::<admission::RoutedCollection>().cloned();
-    let event_time_read = request.extensions().get::<axum::extract::MatchedPath>()
-        .is_some_and(|path| path.as_str() == EVENT_TIME_QUERY_PATH);
+    let read = Arc::new(std::sync::atomic::AtomicBool::new(event_time_read));
     let run = async move {
         match principal {
             Some(principal) => AUTHENTICATED.scope(principal.0, next.run(request)).await,
@@ -2047,10 +2111,9 @@ async fn request_admitted(
     };
     let response =
         match tokio::time::timeout_at(deadline, scope.clone().run(
-            REQUEST_DEADLINE.scope(deadline, ROUTED_COLLECTION.scope(collection, run)))).await {
+            REQUEST_DEADLINE.scope(deadline, EVENT_TIME_READ.scope(read.clone(), ROUTED_COLLECTION.scope(collection, run))))).await {
             Ok(response) => response,
-            Err(_) if event_time_read => Error(StatusCode::TOO_MANY_REQUESTS, "busy",
-                "event-time query deadline exceeded".into()).into_response(),
+            Err(_) if read.load(std::sync::atomic::Ordering::Acquire) => read_timeout().into_response(),
             Err(_) => {
                 let error = if let Some(wait) = &checkpoint {
                     event_time_checkpoint_error(wait.timeout_error())
@@ -3303,7 +3366,7 @@ mod tests {
 fn openapi_document() -> Value {
     use utoipa::OpenApi;
     #[derive(utoipa::OpenApi)]
-    #[openapi(components(schemas(CreateIndexRequest, SearchRequestObject, CollectionCreate, EventTimeRequest, EventTimeCheckpointRequest)))]
+    #[openapi(components(schemas(CreateIndexRequest, SearchRequestObject, CollectionCreate, EventTimeRequest, EventTimeCheckpointRequest, TimeVectorRequest, TimeVectorRecall)))]
     struct Api;
     let mut doc = serde_json::to_value(Api::openapi()).unwrap();
     doc["openapi"] = json!("3.1.0");
@@ -3319,6 +3382,13 @@ fn openapi_document() -> Value {
     schemas.insert("TemporalFilter".into(),json!({"type":"object","additionalProperties":false,"properties":{"event":{"anyOf":[{"$ref":"#/components/schemas/TimeRange"},{"type":"null"}]},"ingested":{"anyOf":[{"$ref":"#/components/schemas/TimeRange"},{"type":"null"}]},"valid_at_ms":{"type":["integer","null"]}}}));
     schemas.get_mut("RecordWrite").unwrap()["properties"]["temporal"]=json!({"anyOf":[{"$ref":"#/components/schemas/TemporalMetadata"},{"type":"null"}]});
     schemas.get_mut("SearchRequestObject").unwrap()["properties"]["temporal"]=json!({"anyOf":[{"$ref":"#/components/schemas/TemporalFilter"},{"type":"null"}]});
+    schemas.get_mut("TimeVectorRequest").unwrap()["properties"]["temporal"]=json!({"anyOf":[{"$ref":"#/components/schemas/TemporalFilter"},{"type":"null"}]});
+    schemas.get_mut("TimeVectorRequest").unwrap()["properties"]["all"] = json!({"const":true});
+    schemas.get_mut("TimeVectorRequest").unwrap()["properties"]["count"] = json!({"const":false,"default":false});
+    schemas.get_mut("TimeVectorRecall").unwrap()["properties"]["time"] = json!({
+        "type":"object","additionalProperties":false,"required":["from_ms","to_ms"],
+        "properties":{"from_ms":{"type":"integer"},"to_ms":{"type":"integer"}}
+    });
     schemas.get_mut("EventTimeRequest").unwrap()["properties"]["temporal"] = json!({
         "type":"object","additionalProperties":false,"required":["event"],"properties":{
             "event":{"type":"object","additionalProperties":false,"required":["from_ms","to_ms"],
@@ -3337,6 +3407,16 @@ fn openapi_document() -> Value {
                         "document":{"type":"object"},"temporal":{"$ref":"#/components/schemas/TemporalMetadata"},
                         "ingested_at_ms":{"type":"integer","minimum":0},"expired_at_ms":{"type":["integer","null"]}}}}
         }}));
+    let record = schemas["EventTimeResult"]["properties"]["hits"]["items"].clone();
+    schemas.insert("TimeVectorResult".into(), json!({
+        "type":"object","required":["visible_seq","evaluation_time_ms","count_total","hits"],"properties":{
+            "visible_seq":{"type":"integer","minimum":0},"evaluation_time_ms":{"type":"integer","minimum":0},
+            "count_total":{"type":"null"},"hits":{"type":"array","maxItems":64,"items":{
+                "type":"object","required":["record","score","channels"],"properties":{
+                    "record":record,"score":{"type":"number"},"channels":{"type":"array","minItems":1,"maxItems":2,
+                        "items":{"type":"object","required":["channel","rank","rank_basis","raw_score","rrf_contribution"],"properties":{
+                            "channel":{"enum":["time","vector"]},"rank":{"type":"integer","minimum":0},"rank_basis":{"enum":["window_time","score"]},
+                            "raw_score":{"type":["number","null"]},"rrf_contribution":{"type":"number"}}}}}}}}}));
     schemas.insert("GroupRecord".into(),json!({"type":"object","additionalProperties":false,"required":["record_id","document"],"properties":{
         "record_id":{"type":"string"},"document":{"type":"object"},"temporal":{"anyOf":[{"$ref":"#/components/schemas/TemporalMetadata"},{"type":"null"}]}}}));
     schemas.insert("GroupReplace".into(),json!({"type":"object","additionalProperties":false,"required":["operation_id","group_id","expected_group_version","records"],"properties":{
@@ -3379,7 +3459,7 @@ fn openapi_document() -> Value {
             "/api/v1/index/{id}/query",
             "post",
             "Retrieve records and statistics from one view",
-            Some(json!({"$ref":"#/components/schemas/SearchRequestObject"})),
+            Some(json!({"oneOf":[{"$ref":"#/components/schemas/SearchRequestObject"},{"$ref":"#/components/schemas/TimeVectorRequest"}]})),
         ),
         (EVENT_TIME_QUERY_PATH, "post", "Query an opted-in pure event-time window",
             Some(json!({"$ref":"#/components/schemas/EventTimeRequest"}))),
@@ -3518,6 +3598,10 @@ fn openapi_document() -> Value {
             operation["responses"]["400"] = json!({"description":"Invalid request (rejected), projection unavailable (event_time_unavailable), or work budget exceeded (event_time_budget)"});
             operation["responses"]["429"] = json!({"description":"Temporary admission, publication, or deadline refusal (busy)"});
             operation["responses"]["503"] = json!({"description":"Storage integrity or recovery failure (storage_error or recovery_required)"});
+        }
+        if path == "/api/v1/index/{id}/query" {
+            operation["description"] = json!("The explicit recall.time mode requires all=true and returns two-channel RRF at one local cut. The default query contract is unchanged.");
+            operation["responses"]["200"]["description"] = json!("Ordinary query response or bounded time/vector result");
         }
         if path == EVENT_TIME_CHECKPOINT_PATH {
             operation["description"] = json!("No operation ID. After a timeout, query the current projection before explicitly starting a new build. A successful query can use a previous projection and does not confirm the refresh.");

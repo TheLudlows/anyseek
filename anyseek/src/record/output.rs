@@ -17,6 +17,36 @@ pub struct DataOutputPermit {
     // rule that a saved response cannot keep a retired partition alive.
     publications: Vec<Weak<tokio::sync::Mutex<super::Inner>>>,
     residency: Vec<crate::resources::residency::Pin>,
+    time_fences: Vec<ReadTimeFence>,
+}
+
+#[derive(Clone)]
+pub(crate) struct ReadTimeFence {
+    pub(super) clock: Arc<dyn super::temporal::Clock>,
+    pub(super) observed: super::temporal::ObservedTime,
+    pub(super) certified_floor: u64,
+    pub(super) deadline: tokio::time::Instant,
+    pub(super) expires: Option<u64>,
+    pub(super) monotonic_expiry: Option<tokio::time::Instant>,
+}
+
+impl ReadTimeFence {
+    pub(super) fn check(&self) -> Result<(), RecordError> {
+        let now = tokio::time::Instant::now();
+        if now >= self.deadline || self.monotonic_expiry.is_some_and(|expiry| now >= expiry) {
+            return Err(RecordError::Busy);
+        }
+        if let Some(expiry) = self.expires {
+            if self.observed.get() >= expiry {
+                return Err(RecordError::Busy);
+            }
+            let time = super::temporal::checked_time(self.clock.as_ref(), self.certified_floor)?;
+            if self.observed.advance(time) >= expiry {
+                return Err(RecordError::Busy);
+            }
+        }
+        Ok(())
+    }
 }
 impl DataOutputPermit {
     pub(super) fn new(state: Arc<RwLock<OutputState>>, revision: u64) -> Self {
@@ -24,6 +54,7 @@ impl DataOutputPermit {
             states: vec![(state, revision)],
             publications: Vec::new(),
             residency: Vec::new(),
+            time_fences: Vec::new(),
         }
     }
     /// Combine already captured views for bounded collection listings. This
@@ -32,8 +63,10 @@ impl DataOutputPermit {
         let mut states = std::collections::BTreeMap::new();
         let mut publications = std::collections::BTreeMap::new();
         let mut residency = Vec::new();
+        let mut time_fences = Vec::new();
         for permit in permits {
             residency.extend(permit.residency);
+            time_fences.extend(permit.time_fences);
             for owner in permit.publications {
                 publications.insert(owner.as_ptr() as usize, owner);
             }
@@ -48,6 +81,7 @@ impl DataOutputPermit {
             states: states.into_values().collect(),
             publications: publications.into_values().collect(),
             residency,
+            time_fences,
         }
     }
 
@@ -56,10 +90,15 @@ impl DataOutputPermit {
         self
     }
 
+    pub(crate) fn with_time_fence(mut self, time: ReadTimeFence) -> Self {
+        self.time_fences.push(time);
+        self
+    }
+
     /// Receipt and progress responses keep residency without adding a new
     /// publication fence to their existing contracts.
     pub(crate) fn residency_only(pin: crate::resources::residency::Pin) -> Self {
-        Self { states: Vec::new(), publications: Vec::new(), residency: vec![pin] }
+        Self { states: Vec::new(), publications: Vec::new(), residency: vec![pin], time_fences: Vec::new() }
     }
     /// Wait for an in-progress publication before checking the unchanged failure
     /// barrier and handing off. No lock is retained after the synchronous callback.
@@ -85,6 +124,7 @@ impl DataOutputPermit {
                 return Err(RecordError::RecoveryRequired);
             }
         }
+        for fence in &self.time_fences { fence.check()?; }
         Ok(handoff())
     }
 }

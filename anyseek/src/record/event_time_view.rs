@@ -2,6 +2,7 @@
 //! The suffix is the existing materialized Record overlay. It already covers
 //! every selected manifest delta and the committed WAL after that manifest.
 use super::*;
+use crate::search::{ChannelExplanation, QueryWork, rrf_contribution};
 use crate::storage::{
     build_budget::{MemoryLease, reserve_memory},
     disk_records::event_time,
@@ -21,6 +22,43 @@ const MAX_RESULT_ID_BYTES: usize = 8 * 1024 * 1024;
 const MAX_BODY_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_FACETS: usize = 32;
 const MAX_FACET_TERMS: usize = 128;
+const MIXED_WORK: usize = 65_536;
+const MIXED_RANGES: usize = 2_048;
+const MIXED_READ_BYTES: usize = 16 * 1024 * 1024;
+
+pub(crate) struct TimeVectorQuery {
+    pub window: TimeRange,
+    pub temporal: Option<TemporalFilter>,
+    pub vector: Embedding,
+    pub facets: Vec<FacetFilter>,
+    pub fields: Vec<String>,
+    pub offset: usize,
+    pub length: usize,
+}
+
+/// Ranked time and exact-vector hits from one authorized Record cut.
+#[derive(Serialize)]
+pub struct TimeVectorResult {
+    /// Common Record cut.
+    pub visible_seq: u64,
+    /// Trusted capture time shared by the participating channels.
+    pub evaluation_time_ms: u64,
+    /// A bounded union does not provide an exact total.
+    pub count_total: Option<usize>,
+    /// Page of fused hits, with per-channel rank and score evidence.
+    pub hits: Vec<RecordHit>,
+    #[serde(skip)]
+    pub(crate) delivery_time: output::ReadTimeFence,
+}
+impl std::fmt::Debug for TimeVectorResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TimeVectorResult")
+            .field("visible_seq", &self.visible_seq)
+            .field("evaluation_time_ms", &self.evaluation_time_ms)
+            .field("hit_count", &self.hits.len())
+            .finish()
+    }
+}
 
 /// Index publications required by a consumer of this Record view. Native
 /// lexical membership and facets currently use the vector/metadata component.
@@ -35,6 +73,7 @@ pub(crate) struct Window {
     pub(crate) cut: u64,
     pub(crate) evaluation_time_ms: u64,
     pub(crate) hits: Vec<Hit>,
+    delivery_time: output::ReadTimeFence,
     _memory: MemoryLease,
 }
 
@@ -56,6 +95,8 @@ pub struct EventTimeResult {
     pub evaluation_time_ms: u64,
     /// Exact matches ordered by descending event time, then ascending record ID.
     pub hits: Vec<QueryRecord>,
+    #[serde(skip)]
+    pub(crate) delivery_time: output::ReadTimeFence,
     #[serde(skip_serializing)]
     _memory: MemoryLease,
 }
@@ -77,9 +118,36 @@ struct Selection {
     fields: Option<Vec<String>>,
 }
 
+impl Selection {
+    fn matches_facets(
+        &self,
+        document: Option<&Document>,
+        deadline: Deadline,
+        work: Option<&QueryWork>,
+    ) -> Result<bool, RecordError> {
+        if self.facets.is_empty() {
+            return Ok(true);
+        }
+        let Some(document) = document else {
+            return Ok(false);
+        };
+        crate::metadata_filter::matches_document(document, &self.facets, |cost| match work {
+            Some(work) => work.charge(cost),
+            None if Deadline::now() >= deadline => Err(RecordError::Busy),
+            None => Ok(()),
+        })
+    }
+}
+
 struct View {
+    #[cfg(test)]
+    root: PathBuf,
     cut: u64,
     evaluation: u64,
+    clock: Arc<dyn temporal::Clock>,
+    observed_time: temporal::ObservedTime,
+    certified_floor: u64,
+    observed_at: Deadline,
     anchor: String,
     group_revision: u64,
     base: Arc<state_rows::Base>,
@@ -109,7 +177,7 @@ impl From<RecordError> for EventTimeError {
 
 impl EventTimeError {
     #[cfg(test)]
-    fn record_error(self) -> RecordError {
+    pub(super) fn record_error(self) -> RecordError {
         match self {
             Self::Unavailable(reason) | Self::Budget(reason) => {
                 RecordError::Rejected(format!("event-time view unavailable: {reason}"))
@@ -146,7 +214,211 @@ fn published_cut(
     Ok(cut)
 }
 
+fn check_facets(facets: &[FacetFilter]) -> Result<(), EventTimeError> {
+    if facets.len() > MAX_FACETS
+        || facets.iter().any(|predicate| match predicate {
+            FacetFilter::String { filter, .. } | FacetFilter::StringSet { filter, .. } => {
+                filter.len() > MAX_FACET_TERMS
+                    || filter
+                        .iter()
+                        .try_fold(0usize, |sum, term| sum.checked_add(term.len()))
+                        .is_none_or(|bytes| bytes > 64 * 1024)
+            }
+            _ => false,
+        })
+    {
+        return Err(EventTimeError::Budget(
+            "event-time facet filter exceeds its budget",
+        ));
+    }
+    Ok(())
+}
+
+struct FusedHit {
+    version: u64,
+    score: f32,
+    channels: Vec<ChannelExplanation>,
+}
+
+fn add_channel(
+    fused: &mut BTreeMap<String, FusedHit>,
+    id: String,
+    version: u64,
+    channel: &str,
+    rank_basis: &str,
+    rank: usize,
+    raw_score: Option<f32>,
+) -> Result<(), RecordError> {
+    let hit = fused.entry(id).or_insert_with(|| FusedHit {
+        version,
+        score: 0.0,
+        channels: Vec::new(),
+    });
+    if hit.version != version || hit.channels.iter().any(|prior| prior.channel == channel) {
+        return Err(RecordError::Busy);
+    }
+    let contribution = rrf_contribution(1.0, crate::search::RrfOptions::default().constant, rank);
+    hit.score += contribution;
+    hit.channels.push(ChannelExplanation {
+        channel: channel.into(),
+        rank,
+        rank_basis: rank_basis.into(),
+        raw_score,
+        rrf_contribution: Some(contribution),
+    });
+    Ok(())
+}
+
 impl RecordPartition {
+    pub(crate) async fn query_time_vector(
+        &self,
+        request: TimeVectorQuery,
+        deadline: Deadline,
+    ) -> Result<TimeVectorResult, EventTimeError> {
+        let work = Arc::new(QueryWork::new(
+            MIXED_WORK,
+            MIXED_RANGES,
+            MIXED_READ_BYTES,
+            deadline,
+        ));
+        self.query_time_vector_with_work(request, deadline, work)
+            .await
+    }
+
+    pub(super) async fn query_time_vector_with_work(
+        &self,
+        request: TimeVectorQuery,
+        deadline: Deadline,
+        work: Arc<QueryWork>,
+    ) -> Result<TimeVectorResult, EventTimeError> {
+        let TimeVectorQuery {
+            window,
+            temporal,
+            vector,
+            facets,
+            fields,
+            offset,
+            length,
+        } = request;
+        let limit = offset
+            .checked_add(length)
+            .filter(|&window| length > 0 && window <= MAX_RESULTS / 2)
+            .ok_or(EventTimeError::Budget(
+                "mixed query requires a positive window of at most 64",
+            ))?;
+        let (window, _) = temporal::event_window(TemporalFilter {
+            event: Some(window),
+            ..TemporalFilter::default()
+        })?;
+        let temporal = temporal
+            .map(temporal::filters)
+            .transpose()?
+            .unwrap_or_default();
+        check_facets(&facets)?;
+        let mut vector_filters = facets.clone();
+        vector_filters.extend(temporal.iter().cloned());
+        let selection = Selection {
+            temporal,
+            facets,
+            fields: None,
+        };
+        let (view, time) = self
+            .capture_and_read(
+                window,
+                limit,
+                IndexDependencies::VectorMetadata,
+                deadline,
+                selection,
+                Some(work.clone()),
+            )
+            .await?;
+        let (view, vectors) = self
+            .read_vector_candidates(view, vector, vector_filters, limit, deadline, work.clone())
+            .await?;
+        let expiry = time
+            .hits
+            .iter()
+            .filter_map(|hit| hit.expires_at_ms)
+            .chain(vectors.iter().filter_map(|hit| hit.expiry))
+            .min();
+        let mut fused = BTreeMap::new();
+        for (rank, hit) in time.hits.iter().enumerate() {
+            add_channel(
+                &mut fused,
+                hit.id.clone(),
+                hit.version,
+                "time",
+                "window_time",
+                rank,
+                None,
+            )?;
+        }
+        for (rank, hit) in vectors.into_iter().enumerate() {
+            add_channel(
+                &mut fused,
+                hit.id,
+                hit.version,
+                "vector",
+                "score",
+                rank,
+                Some(hit.score),
+            )?;
+        }
+        let mut ranked: Vec<_> = fused.into_iter().collect();
+        ranked.sort_unstable_by(|(a, left), (b, right)| {
+            right.score.total_cmp(&left.score).then_with(|| a.cmp(b))
+        });
+        let inner = timeout_at(deadline, self.inner.lock())
+            .await
+            .map_err(|_| RecordError::Busy)?;
+        view.recheck(self, &inner)?;
+        let winners = ranked
+            .into_iter()
+            .skip(offset)
+            .take(length)
+            .map(|(id, hit)| {
+                work.charge(1)?;
+                let source = inner.state.records.source(&id).ok_or(RecordError::Busy)?;
+                Ok::<_, RecordError>((id, hit, source))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(inner);
+        let worker = crate::resources::spawn_blocking(move || {
+            work.clone().with_reads(|| {
+                let hits = winners
+                    .into_iter()
+                    .map(|(id, hit, source)| {
+                        work.charge(0)?;
+                        let row = source.find(&id)?.ok_or(RecordError::Busy)?;
+                        if !row.visible(view.evaluation) || row.version() != hit.version {
+                            return Err(RecordError::Busy);
+                        }
+                        let record = row.load(&id)?;
+                        let record = QueryRecord::copy(&record, Some(&fields))?;
+                        Ok(RecordHit {
+                            channels: hit.channels,
+                            record,
+                            score: hit.score,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, RecordError>>()?;
+                let output = TimeVectorResult {
+                    visible_seq: view.cut,
+                    evaluation_time_ms: view.evaluation,
+                    count_total: None,
+                    hits,
+                    delivery_time: view.time_fence(deadline, expiry),
+                };
+                Ok::<_, RecordError>((view, output))
+            })
+        });
+        let (view, output) = timeout_at(deadline, worker)
+            .await
+            .map_err(|_| RecordError::Busy)?
+            .map_err(storage)??;
+        self.deliver_view(view, output, deadline, expiry).await
+    }
+
     pub(crate) async fn query_event_time(
         &self,
         temporal: TemporalFilter,
@@ -156,22 +428,7 @@ impl RecordPartition {
         deadline: Deadline,
     ) -> Result<EventTimeResult, EventTimeError> {
         let (window, temporal) = temporal::event_window(temporal)?;
-        if facets.len() > MAX_FACETS
-            || facets.iter().any(|predicate| match predicate {
-                FacetFilter::String { filter, .. } | FacetFilter::StringSet { filter, .. } => {
-                    filter.len() > MAX_FACET_TERMS
-                        || filter
-                            .iter()
-                            .try_fold(0usize, |sum, term| sum.checked_add(term.len()))
-                            .is_none_or(|bytes| bytes > 64 * 1024)
-                }
-                _ => false,
-            })
-        {
-            return Err(EventTimeError::Budget(
-                "event-time facet filter exceeds its budget",
-            ));
-        }
+        check_facets(&facets)?;
         let selection = Selection {
             temporal,
             facets,
@@ -183,6 +440,7 @@ impl RecordPartition {
         Ok(EventTimeResult {
             visible_seq: window.cut,
             evaluation_time_ms: window.evaluation_time_ms,
+            delivery_time: window.delivery_time,
             hits: window
                 .hits
                 .into_iter()
@@ -210,60 +468,142 @@ impl RecordPartition {
             .map_err(EventTimeError::record_error)
     }
 
-    // Exercise vector scoring on exactly the handles shared with the time
-    // window. The probe returns identities only, without a mixed API.
     #[cfg(test)]
     pub(crate) async fn probe_event_time_vector_cut(
         &self,
         window: Range<i64>,
         limit: usize,
+        work_limit: usize,
+        facets: Vec<FacetFilter>,
         deadline: Deadline,
-    ) -> Result<(Window, Vec<String>), RecordError> {
+    ) -> Result<(Window, Vec<String>, usize), RecordError> {
+        let work = Arc::new(QueryWork::new(
+            work_limit,
+            MIXED_RANGES,
+            MIXED_READ_BYTES,
+            deadline,
+        ));
         let (view, output) = self
             .capture_and_read(
                 window,
                 limit,
                 IndexDependencies::VectorMetadata,
                 deadline,
-                Selection::default(),
+                Selection {
+                    facets: facets.clone(),
+                    ..Selection::default()
+                },
+                Some(work.clone()),
             )
             .await
             .map_err(EventTimeError::record_error)?;
-        let retrieval = view.retrieval.as_ref().unwrap();
-        let result = timeout_at(
-            deadline,
-            lexical::runtime_query::search(
-                &retrieval.index,
-                String::new(),
-                Some(Embedding::F32(vec![1.0, 0.0])),
-                SearchMode::Vector {
-                    similarity_threshold: None,
-                    ann_mode: crate::vector_similarity::AnnMode::All,
-                },
-                QueryType::Union,
-                0,
+        let (view, candidates) = self
+            .read_vector_candidates(
+                view,
+                Embedding::F32(vec![1.0, 0.0]),
+                facets,
                 limit,
-                ResultType::TopkCount,
-                vec![],
-                vec![temporal::expiry_filter(view.evaluation)],
-                vec![],
-                lexical::Cut {
-                    sequence: view.cut,
-                    evaluation_time_ms: view.evaluation,
-                },
-            ),
-        )
-        .await
-        .map_err(|_| RecordError::Busy)??;
-        let mut ids = timeout_at(deadline, retrieval.candidate_ids(result.results))
-            .await
-            .map_err(|_| RecordError::Busy)??;
+                deadline,
+                work.clone(),
+            )
+            .await?;
+        let expiry = candidates
+            .iter()
+            .filter_map(|candidate| candidate.expiry)
+            .min();
+        let mut ids: Vec<_> = candidates
+            .into_iter()
+            .map(|candidate| candidate.id)
+            .collect();
         ids.sort_unstable();
         let window = self
-            .deliver_window(view, output, deadline)
+            .deliver_window(view, output, deadline, expiry)
             .await
             .map_err(EventTimeError::record_error)?;
-        Ok((window, ids))
+        Ok((window, ids, work_limit - work.remaining()))
+    }
+
+    async fn read_vector_candidates(
+        &self,
+        view: View,
+        vector: Embedding,
+        facets: Vec<FacetFilter>,
+        limit: usize,
+        deadline: Deadline,
+        work: Arc<QueryWork>,
+    ) -> Result<(View, Vec<query::VectorEvidence>), RecordError> {
+        let runtime = tokio::runtime::Handle::current();
+        let scorer_work = work.clone();
+        let worker = crate::resources::spawn_blocking(move || {
+            #[cfg(test)]
+            query::blocking_pause(&view.root, ".test-event-time-vector-worker-pause")?;
+            let result = scorer_work.clone().with_reads(|| {
+                runtime.block_on(async {
+                    let mut filters = facets;
+                    filters.push(temporal::expiry_filter(view.evaluation));
+                    timeout_at(
+                        deadline,
+                        crate::search::search_with_counts(
+                            &view.retrieval.as_ref().unwrap().index,
+                            String::new(),
+                            Some(vector),
+                            SearchMode::Vector {
+                                similarity_threshold: None,
+                                ann_mode: crate::vector_similarity::AnnMode::All,
+                            },
+                            0,
+                            limit,
+                            ResultType::TopkCount,
+                            true,
+                            vec![],
+                            filters,
+                            vec![],
+                            &mut Vec::new(),
+                            Some(scorer_work),
+                        ),
+                    )
+                    .await
+                    .map_err(|_| RecordError::Busy)?
+                })
+            });
+            result.map(|result| (view, result.results))
+        });
+        let (view, hits) = timeout_at(deadline, worker)
+            .await
+            .map_err(|_| RecordError::Busy)?
+            .map_err(storage)??;
+        let candidates = timeout_at(deadline, view.retrieval.as_ref().unwrap().candidates(hits))
+            .await
+            .map_err(|_| RecordError::Busy)??;
+        let inner = timeout_at(deadline, self.inner.lock())
+            .await
+            .map_err(|_| RecordError::Busy)?;
+        view.recheck(self, &inner)?;
+        let mut pinned = Vec::with_capacity(candidates.len());
+        for (rank, candidate) in candidates.into_iter().enumerate() {
+            work.charge(1)?;
+            pinned.push(
+                timeout_at(deadline, candidate.pin(rank, &inner))
+                    .await
+                    .map_err(|_| RecordError::Busy)??
+                    .ok_or(RecordError::Busy)?,
+            );
+        }
+        drop(inner);
+        let worker = crate::resources::spawn_blocking(move || {
+            work.clone().with_reads(|| {
+                let mut evidence = Vec::with_capacity(pinned.len());
+                for candidate in pinned {
+                    work.charge(0)?;
+                    evidence.push(candidate.strict_evidence(view.evaluation)?);
+                }
+                Ok::<_, RecordError>((view, evidence))
+            })
+        });
+        timeout_at(deadline, worker)
+            .await
+            .map_err(|_| RecordError::Busy)?
+            .map_err(storage)?
     }
 
     async fn read_window(
@@ -275,9 +615,9 @@ impl RecordPartition {
         selection: Selection,
     ) -> Result<Window, EventTimeError> {
         let (view, output) = self
-            .capture_and_read(window, limit, dependencies, deadline, selection)
+            .capture_and_read(window, limit, dependencies, deadline, selection, None)
             .await?;
-        self.deliver_window(view, output, deadline).await
+        self.deliver_window(view, output, deadline, None).await
     }
 
     async fn capture_and_read(
@@ -287,6 +627,7 @@ impl RecordPartition {
         dependencies: IndexDependencies,
         deadline: Deadline,
         selection: Selection,
+        work: Option<Arc<crate::search::QueryWork>>,
     ) -> Result<(View, Window), EventTimeError> {
         if window.is_empty() || limit == 0 || limit > MAX_RESULTS {
             return Err(
@@ -308,6 +649,16 @@ impl RecordPartition {
             )
             .map_err(RecordError::Rejected)?;
         }
+        if work.is_some() && (inner.archive.is_some() || inner.remote.is_some()) {
+            return Err(EventTimeError::Unavailable(
+                "mixed event-time queries require local storage without archive",
+            ));
+        }
+        if work.is_some() && limit > inner.config.max_candidates / 2 {
+            return Err(EventTimeError::Budget(
+                "combined candidate window exceeds the collection budget",
+            ));
+        }
         let view = timeout_at(
             deadline,
             View::capture(self, &mut inner, admission, limit, dependencies),
@@ -317,7 +668,12 @@ impl RecordPartition {
         drop(inner);
 
         let task = crate::resources::spawn_blocking(move || {
-            let output = view.read(window, limit, deadline, &selection)?;
+            let output = match work {
+                Some(work) => work
+                    .clone()
+                    .with_reads(|| view.read(window, limit, deadline, &selection, Some(&work)))?,
+                None => view.read(window, limit, deadline, &selection, None)?,
+            };
             Ok::<_, EventTimeError>((view, output))
         });
         timeout_at(deadline, task)
@@ -331,7 +687,22 @@ impl RecordPartition {
         view: View,
         output: Window,
         deadline: Deadline,
+        additional_expiry: Option<u64>,
     ) -> Result<Window, EventTimeError> {
+        let expiry = additional_expiry
+            .into_iter()
+            .chain(output.hits.iter().filter_map(|hit| hit.expires_at_ms))
+            .min();
+        self.deliver_view(view, output, deadline, expiry).await
+    }
+
+    async fn deliver_view<T>(
+        &self,
+        view: View,
+        output: T,
+        deadline: Deadline,
+        expiry: Option<u64>,
+    ) -> Result<T, EventTimeError> {
         #[cfg(test)]
         pause_delivery(&self.inner, deadline).await;
         let mut inner = timeout_at(deadline, self.inner.lock())
@@ -342,11 +713,7 @@ impl RecordPartition {
             return Err(RecordError::Busy.into());
         }
         view.recheck(self, &inner)?;
-        if output
-            .hits
-            .iter()
-            .any(|hit| hit.expires_at_ms.is_some_and(|expiry| expiry <= evaluation))
-        {
+        if expiry.is_some_and(|expiry| expiry <= evaluation) {
             return Err(RecordError::Busy.into());
         }
         Ok(view.barrier.deliver(|| output)?)
@@ -362,6 +729,7 @@ impl View {
         dependencies: IndexDependencies,
     ) -> Result<Self, EventTimeError> {
         let evaluation = inner.observe_time()?;
+        let observed_at = Deadline::now();
         let cut = published_cut(partition, inner, dependencies)?;
         let records = &inner.state.records;
         let base = records
@@ -433,8 +801,14 @@ impl View {
             Some(inner.index.capture_query(limit).await?)
         };
         let view = Self {
+            #[cfg(test)]
+            root: inner.journal.root().to_owned(),
             cut,
             evaluation,
+            clock: inner.clock.clone(),
+            observed_time: inner.observed_time.clone(),
+            certified_floor: inner.state.time_watermark_ms,
+            observed_at,
             anchor: anchor.selected_owner().to_owned(),
             group_revision: inner.state.group_publication_revision(),
             base: base.clone(),
@@ -474,15 +848,35 @@ impl View {
         Ok(())
     }
 
+    fn time_fence(&self, deadline: Deadline, expires: Option<u64>) -> output::ReadTimeFence {
+        output::ReadTimeFence {
+            clock: self.clock.clone(),
+            observed: self.observed_time.clone(),
+            certified_floor: self.certified_floor,
+            deadline,
+            expires,
+            monotonic_expiry: expires.and_then(|expiry| {
+                self.observed_at
+                    .checked_add(std::time::Duration::from_millis(
+                        expiry.saturating_sub(self.evaluation),
+                    ))
+            }),
+        }
+    }
+
     fn read(
         &self,
         window: Range<i64>,
         limit: usize,
         deadline: Deadline,
         selection: &Selection,
+        work: Option<&crate::search::QueryWork>,
     ) -> Result<Window, EventTimeError> {
         let mut suffix_hits = Vec::with_capacity(self.suffix.len());
         for row in &self.suffix {
+            if let Some(work) = work {
+                work.charge(1)?;
+            }
             if Deadline::now() >= deadline {
                 return Err(RecordError::Busy.into());
             }
@@ -496,10 +890,7 @@ impl View {
                     &row.temporal,
                     row.ingested_at_ms,
                 )
-                && (selection.facets.is_empty()
-                    || row.document.as_ref().is_some_and(|doc| {
-                        crate::metadata_filter::matches_document(doc, &selection.facets)
-                    }))
+                && selection.matches_facets(row.document.as_ref(), deadline, work)?
             {
                 suffix_hits.push(TailHit { time, row });
             }
@@ -517,6 +908,9 @@ impl View {
                 window,
                 |error| EventTimeError::from(state_rows::read_error(error)),
                 |id, time, reference| {
+                    if let Some(work) = work {
+                        work.charge(1)?;
+                    }
                     if Deadline::now() >= deadline {
                         return Err(RecordError::Busy.into());
                     }
@@ -545,7 +939,8 @@ impl View {
                             &row.metadata.temporal,
                             row.metadata.ingested_at_ms,
                         )
-                        && let Some(hit) = output.sealed_hit(id, time, row, selection)?
+                        && let Some(hit) =
+                            output.sealed_hit(id, time, row, selection, deadline, work)?
                     {
                         base_hits.push(hit);
                     }
@@ -569,6 +964,10 @@ impl View {
         Ok(Window {
             cut: self.cut,
             evaluation_time_ms: self.evaluation,
+            delivery_time: self.time_fence(
+                deadline,
+                hits.iter().filter_map(|hit| hit.expires_at_ms).min(),
+            ),
             hits,
             _memory: memory,
         })
@@ -619,6 +1018,8 @@ impl OutputBudget {
         time: i64,
         row: crate::storage::disk_records::Located<'_>,
         selection: &Selection,
+        deadline: Deadline,
+        work: Option<&QueryWork>,
     ) -> Result<Option<Hit>, EventTimeError> {
         let version = row.metadata.version;
         let expiry = row.metadata.temporal.expire_at_ms;
@@ -634,11 +1035,7 @@ impl OutputBudget {
             .filter(|bytes| *bytes <= MAX_BODY_BYTES)
             .ok_or(EventTimeError::Budget("candidate payload budget exhausted"))?;
         let output = state_rows::decode(id, row, |record| {
-            if !selection.facets.is_empty()
-                && !record.document.as_ref().is_some_and(|doc| {
-                    crate::metadata_filter::matches_document(doc, &selection.facets)
-                })
-            {
+            if !selection.matches_facets(record.document.as_ref(), deadline, work)? {
                 return Ok(None);
             }
             let output = selection
