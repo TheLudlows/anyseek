@@ -51,9 +51,9 @@ Deltas from the asynchronous consumer can be queried before native materializati
 
 ### Query views and locks
 
-Under a short Record guard, queries capture derived topology and evaluation_time. They score outside the guard and revalidate current Record versions, fingerprints, deletion, and TTL. Component ordinal is an address only. Consumer progress can differ. Ordinary queries do not present one immutable business snapshot across lanes, record reads, and statistics. Updates or expiry can shorten pages.
+Under a short Record guard, queries capture derived topology and evaluation_time. They score outside the guard, then pin the bounded set of candidate sources under a second guard. A pinned source retains the sealed files or an immutable recent row for readback and projection outside the guard. Delivery rechecks publication, group revision, current identity and TTL. Component ordinal is an address only. Consumer progress can differ. Ordinary queries do not present one immutable business snapshot across lanes, record reads, and statistics. Updates or expiry can shorten pages.
 
-Pure full-text Count, default ordering, and queries sorted only by `_id`/`_score` release vector and metadata component read locks after capturing identities and the lexical snapshot. Hybrid and field sorting retain the relevant component locks. Query projection copies text after scoring and identity revalidation. Each query uses one blocking worker. Final identity and TTL checks still use current authority.
+Pure full-text Count, default ordering, and queries sorted only by `_id`/`_score` release vector and metadata component read locks after capturing identities and the lexical snapshot. Hybrid and field sorting retain the relevant component locks. Scoring and candidate readback use separate blocking phases. Count-only requests have no candidate bodies to read.
 
 Lexical, Vector, and Hybrid share stable Record identity. Hybrid applies one RRF after global per-lane ranking across components. Candidate-window counts and field ordering inside ANN/Hybrid candidates do not guarantee exact corpus-wide results. Vector-only collections support metadata browsing. See the [search contract](search.en.md) for settings, scoring, and ordering.
 
@@ -65,7 +65,7 @@ A logical VectorIndex owns a bounded `segments` topology with one mutable tail a
 | --- | --- | --- |
 | RecordPartition | Canonical data, version/TTL, receipts, and ordinal-to-stable-identity mapping | Authoritative commit and recovery |
 | VectorIndex / RetrievalView | Topology, global Top-K and candidate budget, reader pins | Capture views and replace topology on rotation or merge |
-| VectorSegment | Files and mmap, ANN clusters and quantization, physical row identity, active mask, and component admission | Build, freeze, merge, and eventually release one component |
+| VectorSegment | Explicit range reads and writes, ANN clusters and quantization, physical row identity, active mask, and component admission | Build, freeze, merge, and eventually release one component |
 | Tantivy runtime | Native Searcher, queryable deltas, native files, writer, directory owner | Full-text publication, materialization, and pinned readers |
 
 VectorIndex schema, distance, and quantization are logical query configuration. Component configuration interprets local files. `indexed_*`, `committed_doc_count`, `uncommitted`, and `failed` describe progress. `active`, `delete_hashset`, and retirement tokens describe derived active state. Component admission accounts for held and pending-transfer leases. Rotation closes old-generation admission, while work already admitted can finish under its original binding.
@@ -78,7 +78,9 @@ Canonical payloads store original text and vectors. A full-text package records 
 
 `record/lexical/directory_gate.rs` shares one I/O mutex per physical index directory. Different directories no longer share a process-wide file lock. Unix uses the canonical path's device/inode as the key. Other platforms use the canonical path. The global registry stores weak references and is locked briefly on open, without file I/O or capacity waits inside the lock.
 
-Directory/Writer clones and pinned readers retain the directory lock via the existing owner. Memory, service and collection I/O limits, OS writer/owner locks, cancellation, and package pins still apply. External replacement of a directory in use is unsupported. This change removes mutex waits between unrelated directories. End-to-end throughput and Windows aliases require separate acceptance. [Native I/O evidence](../benchmarks/native-io/README.md)
+The full-text directory accesses open files through `storage::build_budget::File`. Opens, metadata replacement, and sequential writes use the directory's I/O gate. Reads on open immutable segments use file offsets independently of that gate. Admission precedes read-buffer allocation. Tantivy's `OwnedBytes` and its slices retain the reservation until the last reference drops. Record writes reserve memory for native build reads and snapshot reloads before WAL, and reloads transfer the reservation to their buffers. The directory or writer holds the budget for reading and decoding native JSON metadata. Fixed Searchers, file handles, and writers hold package pins through the existing sealing and reclamation protocol. Record publication controls manual reader reloads.
+
+Unix positioned reads preserve the file cursor. Windows serializes range reads and cursor operations per open handle. Native writers keep their process and collection I/O limits, OS writer and owner locks, and cancellation. See the existing throughput and Windows alias validation boundaries. [Native I/O evidence](../benchmarks/native-io/README.md)
 
 A standalone snapshot borrows one I/O reservation for the file phase, shared by internal file operations. If materialization competes, it waits for existing capacity without extra reservation or relaxed limits. Native build and network operations run outside this file transaction. A fully certified standalone output does not cache a State container for live incremental proofs.
 
@@ -103,7 +105,7 @@ Production release uses `panic = "abort"`. A Rust panic, native crash, or alloca
 | Authoritative publication unknown or unhealthy | Reads and writes are fenced. A missing response does not prove no commit. | Recover authority, then rebuild caches |
 | Process panic | API disconnect. Only durable authority is recoverable. | Restart, reopen, look up or retry with the original identity |
 
-Independent consumption does not imply independent failure isolation. Do not advance cursors manually, clear shared errors to serve partial results, remove caches in use, or reuse failed writers. Failed recovery keeps the partition unavailable. Regressions cover consumer errors, failed metadata mmap growth, partial vector commits, partial authoritative frames, and reopen. Execution results belong to the matching source revision.
+Independent consumption does not imply independent failure isolation. Do not advance cursors manually, clear shared errors to serve partial results, remove caches in use, or reuse failed writers. Failed recovery keeps the partition unavailable. Regressions cover consumer errors, failed metadata writes, partial vector commits, partial authoritative frames, and reopen. Execution results belong to the matching source revision.
 
 The blocking worker holds query admission, resource scope, handles, and package pins until join. Client cancellation does not revoke these resources. Checkpoint journal install also transfers partition/writer guards and I/O leases to a blocking worker while still holding the publication lock. Moving work off an async executor does not prove the publishing pause disappeared or throughput improved.
 
@@ -115,7 +117,7 @@ Shutdown order follows.
 
 1. Join the periodic maintenance coordinator. Stop new automatic checkpoint/cache maintenance and retries without admission. Already accepted consumers finish existing bounded flush and merge.
 2. Drain owned HTTP, indexing, and blocking executor activity, including cancelled tasks, frames held after a body is dropped, and undelivered task results. Completed handles storing only status do not count as in flight.
-3. Join index consumers, lexical materialization, and native writers. Release partitions, readers, package pins, mmap, and Catalog.
+3. Join index consumers, lexical materialization, and native writers. Release partitions, readers, package pins, index file handles, and Catalog.
 4. Release the service root lock last. Report `Shutdown complete` only after full success. The directory can then be reopened or reclaimed immediately.
 
 Shutdown does not force a checkpoint, TTL sweep, or GC and makes no stronger durability guarantee. It waits for outstanding transport owners. Repeated calls share a completion state. Reopening can recover consumer health errors. Worker join failure, native writer termination failure, or remaining partition owners report incomplete shutdown, retain the root lock until process exit, and produce a nonzero executable exit.

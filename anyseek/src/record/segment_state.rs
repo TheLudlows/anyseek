@@ -191,7 +191,7 @@ mod tests {
         assert_eq!(snapshot_json::to_vec(&state).unwrap(),expected);
         assert_eq!(state.operations[0].request.document,original);
         assert_eq!(state.operations[1].request.vector_patch.as_ref().unwrap()["vector"],::serde_json::json!([7.0,0.0]));
-        assert_eq!(state.records["s"].version,2);
+        assert_eq!(state.records.load("s").unwrap().unwrap().version,2);
         drop(pool);drop(inner);partition.finish_service_shutdown().await.unwrap();drop(partition);std::fs::remove_dir_all(root).unwrap();
     }
 

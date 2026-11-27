@@ -10,15 +10,27 @@
 
 每个向量/元数据组件记录包必须完整保存与 keys 一一对应的 revisions 和 fingerprint（SHA-256）。加载时统一检查数量及活动身份；缺失字段、空 fingerprint 或身份数量不一致均会导致加载失败。空组件也显式保存空身份数组。
 
-`record/anchor.rs` 认证不可变 anchor、Segment 和 payload 闭包。完整原始 Document（含输入向量）保存在规范 payload pool；记录与操作回执通过引用共享。派生 Segment 不再存一份完整搜索正文，量化向量不能替代原始输入。全文使用锁定的 Tantivy 0.27.0 原生包，向量和元数据使用独立组件。数据访问统一使用 RecordPartition。当前持久化格式为 RecordCheckpointV19、完整和增量 state descriptor 6/7（包含分组状态时为 8/9）、私有向量和元数据 descriptor 3、anchor manifest 9、检索 package manifest 3。
+`record/anchor.rs` 认证不可变 anchor、Segment 和 payload 闭包。完整原始 Document（含输入向量）保存在规范 payload pool；记录与操作回执通过引用共享。派生 Segment 不再存一份完整搜索正文，量化向量不能替代原始输入。全文使用锁定的 Tantivy 0.27.0 原生包，向量和元数据使用独立组件。数据访问统一使用 RecordPartition。当前持久化格式为 RecordCheckpointV19、完整和增量 state descriptor 10/7（包含分组状态时为 11/9）、私有向量和元数据 descriptor 3、anchor manifest 9、检索 package manifest 3。
 
-`record/view.rs` 在 partition guard 下捕获冻结段与可变 tail 的派生拓扑，在 guard 外评分，最终回到当前权威状态重验版本、删除及 TTL。全文按选中的活动身份构建跨段 N/df/字段长度上下文，每个通道先形成全局排名再融合。异步消费者可处于不同进度，不能将权威 visible_seq 当作完整索引水位，也不能承诺查询、回表及返回统计来自同一不可变业务快照；最终重验可能缩短结果页。
+`record/view.rs` 在 partition guard 下捕获冻结段与可变 tail 的派生拓扑。评分后，查询只固定入选候选的记录来源，在 guard 外定位封存行、读取正文并复制输出字段。交付前复核发布健康、组修订号、当前身份和 TTL。全文按选中的活动身份构建跨段 N/df/字段长度上下文，每个通道先形成全局排名再融合。异步消费者可处于不同进度，不能将权威 visible_seq 当作完整索引水位，也不能承诺查询、回表及返回统计来自同一不可变业务快照；最终重验可能缩短结果页。
 
 认证 checkpoint 可复用冻结段；compaction 重建完整等价闭包。可变 tail 按字节和 128 次原生更新额度准入。全文可查增量在原生物化完成前参与查询，工作区在 WAL 前预留；其可见发布、物化交接和派生缓存封存/轮换都不推进或替换 WAL 权威，恢复依据完整已提交 suffix。尾段和 owner 保护详见[架构](architecture.md#wal-支撑的可查全文尾段)。权威 checkpoint 先完成构建、校验及同步，再发布选择证书并安装视图；发布后应用失败保持 fenced，退休失败不回滚已提交状态。
 
 私有批量构建结束时，`finish_build` 复用有界小段合并，再由 Tantivy 按活跃文件引用执行 GC，之后封存并收集库存。1,024 文件上限保留；不得直接删除仍被旧读者、构建或备份引用的文件。预算不足或无法进一步合并时仍可能安全拒绝，不承诺任意规模都可构建。
 
-本地读者/构建由 partition guard 和包 pin 保护；固定 Searcher、原生 worker 与 mmap 使用的文件在最后一个持有者退出前不能删除。备份导出独立权威，不借用将被源端 GC 的可变路径。构建与回收有显式预算，当前仍保留完整内存 State 与保守准入，不承诺全进程 RSS 硬上限。
+本地读者和构建由 partition guard 与包 pin 保护。全文 Searcher 通过固定的文件句柄按范围读取；固定 Searcher、原生 worker、向量和元数据视图使用的文件在最后一个持有者退出前不能删除。备份导出独立权威，不借用将被源端 GC 的可变路径。构建与回收有显式预算，准入使用保守估算。
+
+向量和元数据文件沿用组件格式和发布顺序。向量读取使用请求或构建持有的至多 64 KiB 对齐窗口，批次结束释放该窗口及额度。过滤先读取固定字段字节，重复访问同一块时，在该查询的组件读取器内复用至多 4 KiB 的读块。跨块字段直接读取。自定义排序先保存有界候选的字段值再比较，读失败会终止查询。读取和顺序写入经过文件 I/O 准入，缓冲按进程和请求资源约束计量。操作系统可缓存普通文件页。
+
+### 磁盘记录目录组件
+
+首期组件由一个已认证 checkpoint 描述选择集合代次、主键索引、记录段、正文对象和已提交切点。主键树使用 4 KiB 的普通文件页，按字节限制页缓存。长 ID 的后缀存于单独文件，从页引用按需校验。叶页认证 `(segment_id, doc_id)` 上的记录行，`doc_id` 是段内零基行号。行保存逻辑版本、时间、墓碑或候选重验指纹及正文定位。指纹与正文 SHA-256 分开。点查与分页按调用时刻判断 TTL，只有读取正文时才为选中的范围分配缓冲并校验正文。文件句柄由 checkpoint 的共享持有者保留。
+
+近期增量按已提交序号连续装入，通过较新记录和墓碑覆盖封存行。增量整批校验和按字节准入，拒绝时保留先前切点。压实可以重排记录行并沿用原正文引用。目录和段随同一个根切换，旧读者持有原来的根。
+
+新建完整 checkpoint 的当前记录元数据保存在磁盘目录。State 帧保存其余元数据和操作历史。两者引用同一个正文池，由同一 anchor 认证。本地库冷开带封存目录的 checkpoint 时，先认证文件，核算行元数据和回执引用，再重放选中切点之后的增量。封存正文按需解码。近期记录和请求沿用 WAL 与共享内存准入。GET 在锁外固定文件并读取，交付前复核发布序号和有效期。
+
+已有完整 descriptor 6 和 8 及 S3 恢复保留原有解码契约。本地检索仍按地址预算在内存保留索引位置。组元数据、回执元数据和正文定位符与正文读取分别计量。冷开认证仍可能顺序读取整文件校验摘要。本阶段尚未建立全进程 RSS 或冷开 I/O 上限，见 [#224](https://github.com/TheLudlows/anyseek/issues/224)。
 
 ## 权威与数据归属
 
@@ -73,19 +85,19 @@ Catalog 保留必要的管理元数据事务，S3 路径减少重复 SQL、建�
 
 私有临时文件完整写入并同步后同目录原子发布；跨进程非阻塞文件锁保护扫描、删除与发布；锁文件在缓存目录旁，清空缓存不能替换锁 inode。临时文件、孤儿块计入清理，删除失败不释放额度；启动后不要求缓存持久化成功。PUT 和不确定 PUT 的确认始终从远端读回，不能用缓存代替后端持久化证明。SQLite 仍独立验证当前 owner/head/水位，缓存命中不授予读取或输出权限。
 
-缓存只返回自有字节，不供 mmap；materialize 后的 Segment 位于独立目录，由现有认证流程映射与保护。淘汰、损坏和清空缓存均不删除在用 Segment mmap。预取和直接映射缓存块暂不实现。服务已有分级准入与显式缓冲/I/O 预算，跨 collection 缓存总容量和完整资源隔离验收仍待完成；该缓存上限不是全服务磁盘或 RSS 硬上限。
+缓存只返回自有字节，不供 mmap；materialize 后的 Segment 位于独立目录，由现有认证流程校验和保护。淘汰、损坏和清空缓存均不删除视图固定的 Segment 文件。预取和直接映射缓存块暂不实现。服务已有分级准入与显式缓冲/I/O 预算，跨 collection 缓存总容量和完整资源隔离验收仍待完成；该缓存上限不是全服务磁盘或 RSS 硬上限。
 
 ### 有界后台 cut 发布
 
 `RecordPartition::start_index_committed` 在准入后返回 owned job，`finish` 等待结果；丢弃句柄不取消已接受工作。`index_committed` 是等待式包装。HTTP PATCH 在集合生命周期屏障内启动任务，屏障外等待；已接管任务保留原命名空间，不重新查询上游用户权限，失败 fence 的输出保护仍保留。
 
-当前进程最多两个构建，每 partition 一个；显式构建准入超额返回 Busy，自动维护有下文所述的有界等待。期限由调用者指定，最大五分钟，HTTP 为三十秒。快照与新增 tail 分别使用既有共享内存准入；捕获 tail 上限为 journal 预算与 64 MiB 的较小值，超限取消本轮构建，保留前台已确认操作，构建文件及并发 WAL 使用同一个磁盘 scope；这是保守估算，继续不承诺 RSS 硬上限。完整 State 仍驻内存。完整 checkpoint 按固定 cut 构建，另有自动时间回收、日志压力维护和派生缓存合并，不等同于通用增量 checkpoint。
+当前进程最多两个构建，每 partition 一个；显式构建准入超额返回 Busy，自动维护有下文所述的有界等待。期限由调用者指定，最大五分钟，HTTP 为三十秒。快照与新增 tail 分别使用既有共享内存准入；捕获 tail 上限为 journal 预算与 64 MiB 的较小值，超限取消本轮构建，保留前台已确认操作，构建文件及并发 WAL 使用同一个磁盘 scope；这是保守估算，继续不承诺 RSS 硬上限。本地构建固定封存目录并保留有界尾部。完整 checkpoint 按固定 cut 构建，另有自动时间回收、日志压力维护和派生缓存合并，不等同于通用增量 checkpoint。
 
 SQLite 新增每 partition 一行 `index_builds`，只保存单调 build epoch、owner/cut/基础 manifest 与期限等发布绑定，完成后保留 epoch 防止 ABA，不复制 Record 或索引。登记与输入闭包 pin 同事务提交；输出对象在 PUT 前原子登记并 pin；后台构建期间新的共同 S3 备份返回 Busy，避免把未完成上传作为备份输入。对象 I/O 使用同一 SQLite 文件的独立连接，避免跨网络持有前台 authority mutex；不会产生另一套 head。pin 不因时间经过自行解除，过期只禁止发布，清理必须精确绑定 epoch。取得独占 owner 锁后，重开会取消未完成任务及其 pin。
 
 候选在 partition 屏障外构建和认证；本地 owned worker 保护候选及输入文件，期间显式 GC 返回 Busy，同步维护不能替换基础。发布时在 guard 内重放有界新增 tail，对比完整逻辑状态，检查本地基础和期限；SQLite 再检查持久 build/owner epoch、基础 manifest/indexed seq 和期限。它只推进 manifest/indexed/log base 至固定 cut，保留后续 committed seq 和 WAL tip，不消费业务序号。
 
-本地证书与完整新增 suffix 在私有 generation 中一起同步，然后发布目录，避免证书可见但后续已确认写入未落入新 generation。S3 在 SQLite 发布后本地失败继续 fenced，冷启动从远端 manifest 加完整 tail 恢复。构建失败、过期或 panic 不能把旧 cut 当成当前视图；panic 关闭输出，必须重开恢复。物理回收在候选 mmap 释放和任务结束后执行。
+本地证书与完整新增 suffix 在私有 generation 中一起同步，然后发布目录，避免证书可见但后续已确认写入未落入新 generation。S3 在 SQLite 发布后本地失败继续 fenced，冷启动从远端 manifest 加完整 tail 恢复。构建失败、过期或 panic 不能把旧 cut 当成当前视图；panic 关闭输出，必须重开恢复。物理回收在候选文件句柄释放和任务结束后执行。
 
 ### collection 生命周期与快照执行屏障
 
@@ -139,6 +151,37 @@ metadata snapshot 和 descriptor 使用不可变对象；备份 ID 按 Tenant、
 
 完整服务备份完成后，同一操作重试先核验 manifest 与完成见证，直接返回原回执，避免每次重新物化全部输入而再次超过 HTTP 期限。这是已完成操作的结果查询；恢复仍须重新验证完整归档闭包。未完成的归档继续既有发布/修复协议。
 
+### 本地 WAL 窗口与指定提交切点
+
+普通 HTTP 恢复按 `backup_id` 恢复备份自身的切点。本地离线工具在保存该备份后，从停机的原分区捕获当前保留的已提交 WAL 后缀。备份必须对应当前选中的日志起始切点。工具核对原分区身份、备份内容、组决定和连续业务序号，并返回绑定整个窗口的 SHA-256 见证。把见证同备份分开保存。若 checkpoint 已回收此前的日志代次，则需使用此前已捕获的窗口。
+
+```sh
+cargo build --locked -p anyseek --no-default-features --example local_archive_cut
+target/debug/examples/local_archive_cut capture SOURCE BACKUP ARCHIVE BUDGET_BYTES > witness.json
+target/debug/examples/local_archive_cut restore BACKUP ARCHIVE NEW_ROOT BUDGET_BYTES TARGET_SEQ witness.json
+```
+
+恢复先复核整段窗口和基础备份，再重放到指定业务决定（含该决定）并原子发布新路径。组写的成员和原回执属于同一个提交序号；目标决定后的变更及同序号维护不纳入输出。原始路径、服务目录和 Origence SQLite 配套备份由调用方管理。多代恢复使用 `restore-chain BACKUP NEW_ROOT BUDGET_BYTES TARGET_SEQ parts.json`。JSON 列表按顺序记录最多 64 段，每项含 `path` 和 `witness`。工具核验所有相邻边界和清单中的全部段，包括目标切点之后的段。每个代次需在其活动日志回收前捕获，见 [#224](https://github.com/TheLudlows/anyseek/issues/224)。
+
+### 自动归档已选本地 WAL
+
+对停机的本地 Record 分区注册归档。用已选 WAL 的起始切点备份作为基准，把备份和归档目录放在预先挂载的独立持久介质上。路径隔离和介质标识用于检测挂载丢失或路径被替换，部署者负责验证实际设备独立性。本地 SDK 和独立 HTTP 打开同一个分区时都会读取持久注册。S3 缓存不支持此注册。
+
+```sh
+local_archive_cut base SOURCE BACKUP WAL_BUDGET_BYTES
+local_archive_cut enroll SOURCE BACKUP MEDIUM WAL_BUDGET_BYTES ARCHIVE_BYTES GENERATIONS
+local_archive_cut manifest STREAM WAL_BUDGET_BYTES > parts.json
+local_archive_cut restore-chain BACKUP NEW_ROOT WAL_BUDGET_BYTES TARGET_SEQ parts.json
+```
+
+`base` 导出已选 checkpoint 本身，活动 WAL 中较新的尾段留给下一窗口。若已有同一切点的独立备份，可以直接注册。启动后每次 checkpoint 对固定的已提交 WAL 前缀导出经校验的窗口。归档文件、提交见证和目录发布持久确认后，才允许选择新主盘代次并回收旧 WAL。捕获后并发提交的后缀由新主盘代次接收，后续归档只追加其应覆盖的决定。跨过含收据回收的切点时，按认证窗口内的原固定 epoch 重演回收。恢复到该业务切点仍保留决定自身的回执。
+
+在已有主盘 WAL 剩余额度内，归档盘丢失、认证失败和归档额度不足都保留原选中的主盘 WAL。归档 I/O 在后台执行，主盘不跨这段归档写入持有发布锁。故障会延后 checkpoint。持续失败可能耗尽活动 WAL 的预算，新写的准入随后返回 `Busy` 或原预算错误。已有确认的记录及回执继续按主盘的恢复契约读取。进程在归档持久之后、主盘证书之前退出时，重开仍选择原 WAL。重试先校验旧归档决定是当前 WAL 的精确前缀，再扩展同一归档代次。
+
+`GENERATIONS` 为每个窗口的代次数上限（1–64），`ARCHIVE_BYTES` 是该流普通文件的逻辑字节预算，包含重试同时持有的旧副本和暂存空间。各流共享介质时还需为所有分区、基础备份和文件系统开销预留容量。达到边界时，停机导出当前选中切点并用 `renew` 启动新流，参数与 `enroll` 相同。更新前校验旧流覆盖当前基准，旧流和备份由调用方按保留期管理。`manifest` 校验已存在的连续窗口。用已停机或已选定的稳定窗口导出清单，并将清单与配套备份保存在独立位置，以便恢复时识别曾声明但后续丢失的末段。
+
+独立介质的 RPO 以最后持久确认且可与基础备份连续验证的归档切点为准。归档随 checkpoint 触发，低写入期间的归档间隔没有固定上限。当前活动 WAL 中尚未归档的提交受同盘故障恢复保护，盘丢失后可能超出 RPO。RTO 还包含归档认证、重放、写新根和重建检索结构的耗时，需要在目标介质上实测。自动归档启用后的开销单独测量，早先冻结的无归档性能对照不包含这项成本。
+
 ## 维护发布与失败边界
 
 S3 模式由 SQLite 选择远端 manifest，owner epoch 与失败 fence 阻止陈旧写者和不可信输出。普通写入和 TTL 共用缓存追加入口；SQLite 已明确提交成功时，缓存追加失败返回 `durable_pending` 并保持输出封锁，重开恢复原回执。SQLite 提交结果未知仍为 `outcome_unknown`，不能据此另发新操作。
@@ -163,6 +206,8 @@ S3 模式由 SQLite 选择远端 manifest，owner epoch 与失败 fence 阻止�
 HTTP fixture 不等于真实 S3 服务认证，实际 endpoint、系统/文件系统崩溃与硬断电单独待验收。SQLite 为单主机持久卷权威，不提供跨主机 HA 或权威卷丢失零 RPO。
 
 Catalog 管理操作在写事务之前仅做一次完整预算/可恢复性校验。完整服务归档格式为 2；恢复只保留源 Catalog cut/hash、来源身份及必要旧 Operation ID 隔离，不复制完整历史 Catalog，数据库和归档均不包含 Key 验证材料。HTTP 中间件在读取 body 前认证一次，已认证上下文供 handler 和 owned 工作复用；集合实际执行仍在生命周期屏障内检查代次。
+
+整服务备份重开保留分区时，封存行校验使用文件事务额度。该额度在原生索引工作之外取得和释放。发布前的资源拒绝返回 `busy`，存储故障与发布结果未知继续使用各自的恢复语义。
 
 ## 已删除集合代次的最终回收
 

@@ -73,12 +73,17 @@ impl RecordPartition {
         // Recheck deadlines after every fallible/awaiting admission, before authority.
         inner.observe_time()?;
         if prepared.records.iter().any(|r|r.document.is_some()&&r.temporal.expire_at_ms.is_some_and(|t|t<=inner.evaluation_time_ms)) {return Err(RecordError::Rejected("group deadline elapsed before commit".into()));}
-        let deadline=prepared.records.iter().flat_map(|r|[
-            r.document.as_ref().and(r.temporal.expire_at_ms),
-            inner.state.records.get(&r.record_id).filter(|r|temporal::visible(r,prepared.stored.observed_time_ms)).and_then(|r|r.temporal.expire_at_ms)
-        ]).flatten().min();
+        let mut deadline = None;
+        for row in &prepared.records {
+            let previous = inner.state.records.find(&row.record_id)?;
+            let previous = previous.as_ref().filter(|r| r.visible(prepared.stored.observed_time_ms));
+            deadline = [deadline, row.document.as_ref().and(row.temporal.expire_at_ms),
+                previous.and_then(|r| r.temporal().expire_at_ms)].into_iter().flatten().min();
+        }
         if deadline.is_some_and(|t|t<=inner.evaluation_time_ms){return Err(RecordError::Busy);}
         prepared.admit_containers(&mut inner.state)?;
+        #[cfg(test)]
+        let prepared_disk = disk_read_fixture::prepare_group(inner, seq, &prepared.records)?;
         if let Some(remote)=inner.remote.as_ref() {
             let id=format!("{}:{}",prepared.stored.operation_id.epoch,prepared.stored.operation_id.nonce);
             if remote.batch_tail_needs_checkpoint(&[(seq,id.clone(),&payload)]).await? {return Err(inner.request_checkpoint("group_remote_tail_room"));}
@@ -114,6 +119,10 @@ impl RecordPartition {
             let snapshot_bytes = prepared.snapshot_bytes;
             let receipt = prepared.install(&mut inner.state)?;
             inner.snapshot_bytes = snapshot_bytes;
+            #[cfg(test)]
+            if let Some(view) = prepared_disk {
+                inner.disk_read_fixture = Some(view);
+            }
             self.indexes.immediate(seq);
             Ok::<_, RecordError>(receipt)
         }.await;

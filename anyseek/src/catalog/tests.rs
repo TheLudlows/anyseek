@@ -496,6 +496,127 @@ async fn complete_service_snapshot_drains_owned_lifecycle_work_and_excludes_queu
 }
 
 #[tokio::test]
+async fn service_backup_waits_for_io_during_retained_record_validation() {
+    use crate::record::{RecordPartition, RecordWrite};
+    use crate::resources::{Governor, Lane, hold_io_for_test};
+
+    let parent = tempfile::tempdir().unwrap();
+    let root = parent.path().join("service");
+    let catalog = setup(&root).await;
+    let partition = RecordPartition::create(&parent.path().join("seed"), config())
+        .await
+        .unwrap();
+    let write: RecordWrite = serde_json::from_value(json!({
+        "operation_id": OperationId::new("backup-io".into()),
+        "record_id": "record", "expected": "Absent",
+        "document": {"body": "sealed source"}
+    })).unwrap();
+    let receipt = partition.write(write).await.unwrap();
+    let id = "a".repeat(64);
+    let retained = root.join(format!("backup-{id}"));
+    partition.checkpoint(&retained).await.unwrap();
+    partition.finish_service_shutdown().await.unwrap();
+    drop(partition);
+
+    let marker = retained.join(".test-open-final-validation-pause");
+    let entered = retained.join(".test-open-final-validation-pause-entered");
+    std::fs::write(&marker, b"pause before validating the selected Record cut").unwrap();
+    let scope = Arc::new(Governor::default()).admit("service".into(), Lane::Background, 0).unwrap();
+    let destination = parent.path().join("archive");
+    let mut backup = {
+        let destination = destination.clone();
+        tokio::spawn(scope.clone().run(async move {
+            catalog.backup_service(root, destination, "cut".into(), BTreeMap::new()).await
+        }))
+    };
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !entered.exists() {
+            assert!(!backup.is_finished());
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }).await.unwrap();
+    let io = tokio::time::timeout(Duration::from_secs(10), hold_io_for_test(&scope)).await.unwrap();
+    std::fs::remove_file(marker).unwrap();
+    let early = tokio::time::timeout(Duration::from_millis(100), &mut backup).await;
+    assert!(early.is_err(), "the same backup must wait for the file transaction, got {early:?}");
+    assert!(!destination.exists());
+    drop(io);
+
+    let snapshot = tokio::time::timeout(Duration::from_secs(10), backup)
+        .await.unwrap().unwrap().unwrap();
+    assert_eq!(snapshot.collection_backups[&id], receipt.seq);
+    assert_eq!(Catalog::completed_service_backup(&destination).unwrap(), Some(snapshot));
+}
+
+#[tokio::test]
+async fn service_backup_uses_sealed_cut_under_io_pressure() {
+    use crate::record::{RecordPartition, RecordWrite};
+    use crate::resources::{Governor, Lane, hold_io_for_test};
+
+    let parent = tempfile::tempdir().unwrap();
+    let root = parent.path().join("service");
+    let catalog = setup(&root).await;
+    create(&catalog, "alpha", "documents").await;
+    let entry = catalog.listing("alpha").await.unwrap().pop().unwrap();
+    entry.prepare_parent(&root).unwrap();
+    let partition = RecordPartition::create(&root.join(entry.directory()), config())
+        .await
+        .unwrap();
+    let write: RecordWrite = serde_json::from_value(json!({
+        "operation_id": OperationId::new("sealed-backup".into()),
+        "record_id": "record", "expected": "Absent",
+        "document": {"body": "sealed source"}
+    }))
+    .unwrap();
+    let receipt = partition.write(write.clone()).await.unwrap();
+    assert_eq!(partition.compact_journal().await.unwrap(), receipt.seq);
+    partition.finish_service_shutdown().await.unwrap();
+    drop(partition);
+    let partition = RecordPartition::open(&root.join(entry.directory()), config().max_journal_bytes)
+        .await
+        .unwrap();
+
+    let archive = parent.path().join("archive");
+    let scope = Arc::new(Governor::default())
+        .admit("service".into(), Lane::Background, 0)
+        .unwrap();
+    let io = hold_io_for_test(&scope).await;
+    let mut backup = {
+        let archive = archive.clone();
+        let records = BTreeMap::from([(entry.scope(), partition.clone())]);
+        tokio::spawn(scope.run(async move {
+            catalog.backup_service(root, archive, "backup".into(), records).await
+        }))
+    };
+    let early = tokio::time::timeout(Duration::from_millis(100), &mut backup).await;
+    assert!(early.is_err(), "the admitted backup must wait for file I/O, got {early:?}");
+    assert!(!archive.exists());
+    drop(io);
+
+    let snapshot = tokio::time::timeout(Duration::from_secs(10), backup)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(snapshot.record_seqs[&entry.scope()], receipt.seq);
+    assert_eq!(Catalog::completed_service_backup(&archive).unwrap(), Some(snapshot));
+
+    let restored = parent.path().join("restored");
+    Catalog::restore_service(archive, restored.clone(), "restore".into())
+        .await
+        .unwrap();
+    let restored = RecordPartition::open(&restored.join(entry.directory()), config().max_journal_bytes)
+        .await
+        .unwrap();
+    assert_eq!(restored.write(write).await.unwrap(), receipt);
+    let record = restored.get("record").await.unwrap().unwrap();
+    assert_eq!(record.version, receipt.version);
+    assert_eq!(record.document.unwrap()["body"], json!("sealed source"));
+    restored.finish_service_shutdown().await.unwrap();
+    partition.finish_service_shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn collection_recreation_keeps_generations_receipts_and_backups_separate() {
     use crate::record::{RecordPartition, RecordWrite};
     let parent = tempfile::tempdir().unwrap();

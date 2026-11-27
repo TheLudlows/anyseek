@@ -27,14 +27,14 @@ impl Snapshot {
     pub(super) fn capture(state:&State,_config:&RecordConfig,sources:&view::MergeSources)->Result<Self,RecordError> {
         let mut input=0u64;
         for key in &sources.keys {
-            let record=state.records.shared(key).ok_or_else(||storage("cache merge source record missing"))?;
-            if record.document.is_none(){return Err(storage("cache merge source body absent"));}
-            input=input.checked_add(record.wire_bytes() as u64)
+            let record=state.records.find(key)?.ok_or_else(||storage("cache merge source record missing"))?;
+            if !record.live(){return Err(storage("cache merge source body absent"));}
+            input=input.checked_add(record.account(key)?.bytes as u64)
                 .filter(|n|*n<=MAX_INPUT_BYTES).ok_or(RecordError::Busy)?;
         }
         let memory=crate::storage::build_budget::reserve_memory((sources.keys.len() as u64).checked_mul(128)
             .ok_or_else(||storage("cache snapshot inventory overflow"))?).map_err(storage)?;
-        let records=sources.keys.iter().map(|key|state.records.shared(key)
+        let records=sources.keys.iter().map(|key|state.records.load(key)?
             .ok_or_else(||storage("cache merge source owner missing"))).collect::<Result<Vec<_>,_>>()?;
         Ok(Self{seq:state.seq,records,_memory:memory})
     }
@@ -63,15 +63,26 @@ pub(super) async fn build_candidate(root:&Path,config:&RecordConfig,snapshot:&Sn
 /// state when no optional pair fits; no checkpoint/certificate is published.
 pub(super) async fn rebuild_recovery_view(root:&Path,config:&RecordConfig,state:&State)
     ->Result<(view::RetrievalView,Vec<String>,BTreeMap<String,usize>),RecordError> {
-    let inventory_bytes=state.records.keys().try_fold(0u64,|bytes,key|bytes.checked_add(512+key.len() as u64*8)
-        .ok_or_else(||storage("recovery cache inventory overflow")))?;
+    let mut inventory_bytes = 0u64;
+    state.records.scan(None, |key, _| {
+        inventory_bytes = inventory_bytes.checked_add(512 + key.len() as u64 * 8)
+            .ok_or_else(||storage("recovery cache inventory overflow"))?;
+        Ok(true)
+    })?;
     let inventory=crate::storage::build_budget::reserve_memory(inventory_bytes).map_err(storage)?;
     let inventory_scope=crate::resources::Scope::current().map(|scope|scope.bytes(inventory_bytes)).transpose().map_err(storage)?;
-    let records=state.records.values().filter(|record|record.document.is_some()).collect::<Vec<_>>();
     let mut indexes=Vec::new();
-    for chunk in records.chunks(capacity::PACKAGE_RECORDS) {
+    let mut after: Option<String> = None;
+    loop {
+        let mut records = Vec::new();
+        state.records.scan(after.as_deref(), |id, row| {
+            if row.live() { records.push(row.load(id)?); }
+            Ok(records.len() < capacity::PACKAGE_RECORDS)
+        })?;
+        if records.is_empty() { break; }
+        after = records.last().map(|record| record.record_id.clone());
         let path=root.join(format!("cache-{:032x}",rand::random::<u128>()));
-        let (index,_)=build_records_at(root,&path,config,state.seq,chunk.to_vec()).await?;
+        let (index,_)=build_records_at(root,&path,config,state.seq,records.iter().map(|record| &**record).collect()).await?;
         index.commit().await.map_err(storage)?;
         index.read().await.segments[0].lexical.seal().await?;
         indexes.push(index);

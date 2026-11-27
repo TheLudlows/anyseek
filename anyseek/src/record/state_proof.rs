@@ -53,7 +53,7 @@ pub(super) fn verify(config:&RecordConfig,expected:&State,replayed:&State)->Resu
         if state.lookup_bytes!=lookup_bytes {return Err(storage("replayed State lookup accounting mismatch"));}
         if state.operation_lookup.len()!=state.operations.len()
             || state.operations.iter().enumerate().any(|(i,op)|state.operation_lookup.get(&op.request.operation_id)!=Some(&i))
-            || state.records.iter().any(|(id,r)|id!=&r.record_id) {
+            {
             return Err(storage("replayed State identity mismatch"));
         }
     }
@@ -96,7 +96,7 @@ mod tests {
         assert!(verify(&settings,state,&other).is_err());
         let mut other=state.try_clone().unwrap();other.operation_lookup.clear();
         assert!(verify(&settings,state,&other).is_err());
-        let mut other=state.try_clone().unwrap();let mut reversed=state_values::Values::default();
+        let mut other=state.try_clone().unwrap();let mut reversed=state_values::Operations::default();
         for op in state.operations.iter().rev(){reversed.push(op.clone()).unwrap();}
         other.operations=reversed;assert!(verify(&settings,state,&other).is_err());
         let empty=State::default();assert_eq!(length(&empty).unwrap(),checkpoint_codec::json_length(&empty).unwrap());

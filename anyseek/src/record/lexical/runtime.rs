@@ -20,7 +20,7 @@ enum RowInput<'a> {
 
 // Every accepted row owns its native progress budget before WAL append.
 struct RowWorkspace { analysis: Charge, identity: Charge }
-struct PublishWorkspace { temporary: Charge, snapshot: Charge }
+struct PublishWorkspace { temporary: Charge, snapshot: Charge, native_reads: Charge }
 pub(super) struct Escrow {
     row: RowWorkspace,
     writer: Arc<super::directory::WriterReservation>,
@@ -150,11 +150,9 @@ impl Runtime {
             super::directory::BudgetDirectory::persistent(path, limit, 65536, 0)?;
         directory.retain_pin(pin.clone())?;
         let index = NativeIndex::create(directory.clone(), schema, Default::default()).map_err(storage)?;
-        let reader = index
-            .reader_builder()
-            .reload_policy(ReloadPolicy::Manual)
-            .try_into()
-            .map_err(storage)?;
+        let reader = super::directory::with_snapshot_reads(None, || {
+            index.reader_builder().reload_policy(ReloadPolicy::Manual).try_into()
+        }).map_err(storage)?;
         Ok(Arc::new(Self {
             config: config.clone(),
             analyzer,
@@ -439,6 +437,16 @@ impl Runtime {
         Ok(())
     }
     fn commit_snapshot_locked(&self, data: &mut Data,workspace:Option<PublishWorkspace>) -> Result<Arc<Snapshot>, RecordError> {
+        match workspace {
+            Some(PublishWorkspace { temporary, snapshot, native_reads }) => {
+                super::directory::with_snapshot_reads(Some(native_reads), || {
+                    self.build_snapshot_locked(data, Some((temporary, snapshot)))
+                })
+            }
+            None => super::directory::with_snapshot_reads(None, || self.build_snapshot_locked(data, None)),
+        }
+    }
+    fn build_snapshot_locked(&self, data: &mut Data, workspace: Option<(Charge, Charge)>) -> Result<Arc<Snapshot>, RecordError> {
         if self.directory.is_none() {return Err(storage("immutable lexical package"));}
         self.drain_analysis(data)?;
         data.reader.reload().map_err(storage)?;
@@ -447,9 +455,9 @@ impl Runtime {
             n.checked_add(256 + id.id.len() as u64 * 8)
         }).ok_or_else(|| storage("native manifest memory overflow"))?;
         let (_temporary,snapshot_charge)=match workspace {
-            Some(workspace)=>{
-                if workspace.temporary.bytes()<temporary_bytes{return Err(storage("native manifest workspace mismatch"));}
-                (workspace.temporary,Some(workspace.snapshot))
+            Some((temporary, snapshot))=>{
+                if temporary.bytes()<temporary_bytes{return Err(storage("native manifest workspace mismatch"));}
+                (temporary,Some(snapshot))
             },
             None=>(retained_memory(temporary_bytes)?,None),
         };
@@ -997,24 +1005,30 @@ impl Runtime {
             let mut settings = config();
             settings.max_record_bytes = 1024 * 1024;
             let native = Runtime::create(&package.join("native"), &settings).unwrap();
-            let document = serde_json::from_str(r#"{"body":"alpha"}"#).unwrap();
+            let document = serde_json::from_str(r#"{"body":"alpha beta"}"#).unwrap();
             for i in 0..8 {
                 native.append(Identity { id: format!("r-{i}"), version: 1, revision: i+1 }, &document, true).await.unwrap();
             }
             let held = native.snapshot().await.unwrap();
             assert_eq!(held.searcher.segment_readers().len(), 8);
+            let phrase = tantivy::query::PhraseQuery::new(vec![
+                Term::from_field_text(held.fields[0], "alpha"),
+                Term::from_field_text(held.fields[0], "beta"),
+            ]);
             native.merge_small_segments().await.unwrap();
             let merged = native.snapshot().await.unwrap();
             assert_eq!(merged.searcher.segment_readers().len(), 1);
             assert_eq!(merged.identities, held.identities);
             assert_eq!(merged.cut, held.cut);
-            assert_eq!(held.searcher.search(&tantivy::query::AllQuery, &tantivy::collector::Count).unwrap(), 8);
+            assert_eq!(held.searcher.search(&phrase, &tantivy::collector::Count).unwrap(), 8);
             native.append(Identity { id: "later".into(), version: 1, revision: 9 }, &document, true).await.unwrap();
-            assert_eq!(merged.searcher.search(&tantivy::query::AllQuery, &tantivy::collector::Count).unwrap(), 8);
+            assert_eq!(merged.searcher.search(&phrase, &tantivy::collector::Count).unwrap(), 8);
             native.seal().await.unwrap();
             drop(native);
+            assert_eq!(held.searcher.search(&phrase, &tantivy::collector::Count).unwrap(), 8);
             let reopened = Runtime::open(&package.join("native"), &settings).unwrap();
-            assert_eq!(reopened.snapshot().await.unwrap().identities.len(), 9);
+            let reopened = reopened.snapshot().await.unwrap();
+            assert_eq!(reopened.searcher.search(&phrase, &tantivy::collector::Count).unwrap(), 9);
         }
 
         #[tokio::test]
@@ -1106,7 +1120,11 @@ impl Runtime {
             });
             let current = tokio::time::timeout(std::time::Duration::from_secs(1),native.snapshot()).await.unwrap().unwrap();
             assert!(Arc::ptr_eq(&held,&current));
-            assert_eq!(current.searcher.search(&tantivy::query::AllQuery,&tantivy::collector::Count).unwrap(),8);
+            let term = tantivy::query::TermQuery::new(
+                Term::from_field_text(held.fields[0], "alpha"),
+                tantivy::schema::IndexRecordOption::Basic,
+            );
+            assert_eq!(current.searcher.search(&term,&tantivy::collector::Count).unwrap(),8);
             std::fs::remove_file(native_path.join(".test-merge-pause")).unwrap();
             merger.await.unwrap().unwrap();
             appender.await.unwrap().unwrap();

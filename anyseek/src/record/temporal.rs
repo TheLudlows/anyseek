@@ -143,36 +143,109 @@ pub(super) struct Expiration {
     pub(super) evaluation_time_ms: u64,
     targets: Vec<ExpiredTarget>,
 }
-pub(super) fn apply(state: &mut State, event: &Expiration) -> Result<(), RecordError> {
-    if event.seq != state.seq + 1
-        || event.evaluation_time_ms < state.time_watermark_ms
-        || event.targets.is_empty()
-    {
-        return Err(storage("inconsistent expiration command"));
-    }
-    let mut seen = BTreeSet::new();
-    for target in &event.targets {
-        let record = state
-            .records
-            .get(&target.record_id)
-            .ok_or_else(|| storage("expired identity absent"))?;
-        if !seen.insert(&target.record_id)
-            || record.version != target.previous_version
-            || !live_ttl(record)
-            || record.expired_at_ms.is_some()
-            || record.temporal.expire_at_ms.unwrap() > event.evaluation_time_ms
+pub(super) struct PreparedExpiration {
+    replacements: Vec<(state_values::PreviousRow, state_memory::Shared<Record>)>,
+    pub(super) snapshot_bytes: usize,
+    pub(super) reserve_bytes: usize,
+    _temporary: crate::storage::build_budget::MemoryLease,
+}
+
+impl PreparedExpiration {
+    pub(super) fn prepare(
+        state: &State,
+        event: &Expiration,
+        before: usize,
+    ) -> Result<Self, RecordError> {
+        if state.seq.checked_add(1) != Some(event.seq)
+            || event.evaluation_time_ms < state.time_watermark_ms
+            || event.targets.is_empty()
         {
-            return Err(storage("inconsistent expiration target"));
+            return Err(storage("inconsistent expiration command"));
         }
-        state.records.edit(&target.record_id,128,|record| {
-            record.version=record.version.checked_add(1).ok_or_else(||storage("version exhausted"))?;
-            record.document=None;record.expired_at_ms=Some(event.evaluation_time_ms);Ok(())
-        })?;
+        let temporary = crate::storage::build_budget::reserve_memory(
+            (event.targets.len() as u64).checked_mul(256).ok_or(RecordError::Busy)?,
+        ).map_err(memory_error)?;
+        let mut seen = BTreeSet::new();
+        let mut replacements = Vec::with_capacity(event.targets.len());
+        let mut snapshot_bytes = before
+            .checked_add(checkpoint_codec::json_length(event)?)
+            .and_then(|size| size.checked_add(usize::from(!state.expirations.is_empty())))
+            .and_then(|size| size.checked_add(event.seq.to_string().len() - state.seq.to_string().len()))
+            .and_then(|size| size.checked_add(
+                event.evaluation_time_ms.to_string().len() - state.time_watermark_ms.to_string().len(),
+            ))
+            .ok_or_else(|| storage("expiration wire size overflow"))?;
+        for target in &event.targets {
+            let record = state.records.find(&target.record_id)?
+                .ok_or_else(|| storage("expired identity absent"))?;
+            if !seen.insert(&target.record_id)
+                || record.version() != target.previous_version
+                || !record.live()
+                || record.expired_at_ms().is_some()
+                || record.temporal().expire_at_ms.is_none_or(|end| end > event.evaluation_time_ms)
+            {
+                return Err(storage("inconsistent expiration target"));
+            }
+            let previous = record.account(&target.record_id)?;
+            let tombstone = state_memory::Shared::admit(Record {
+                record_id: target.record_id.clone(),
+                version: record.version().checked_add(1).ok_or_else(|| storage("version exhausted"))?,
+                document: None,
+                temporal: record.temporal().clone(),
+                ingested_at_ms: record.ingested_at_ms(),
+                expired_at_ms: Some(event.evaluation_time_ms),
+            })?;
+            snapshot_bytes = snapshot_bytes.checked_sub(previous.bytes)
+                .and_then(|size| size.checked_add(tombstone.wire_bytes()))
+                .ok_or_else(|| storage("expiration record size overflow"))?;
+            replacements.push((previous, tombstone));
+        }
+        let reserve_bytes = state.records.live_ttl_count().checked_sub(replacements.len())
+            .and_then(|count| count.checked_mul(8192))
+            .ok_or_else(|| storage("expiration TTL budget overflow"))?;
+        Ok(Self { replacements, snapshot_bytes, reserve_bytes, _temporary: temporary })
     }
-    state.seq = event.seq;
-    state.time_watermark_ms = event.evaluation_time_ms;
-    state.expirations.push(event.clone());
-    Ok(())
+
+    pub(super) fn admit(&self, state: &mut State) -> Result<(), RecordError> {
+        let values = self.replacements.iter().try_fold(state.value_bytes()?, |bytes, (old, row)| {
+            bytes.checked_sub(old.bytes).and_then(|bytes| bytes.checked_add(row.wire_bytes()))
+                .ok_or_else(|| storage("expiration value size overflow"))
+        })?;
+        let metadata = self.snapshot_bytes.checked_sub(values)
+            .and_then(|bytes| bytes.checked_sub(state.records.sealed_keys_bytes()))
+            .and_then(|bytes| bytes.checked_add(state.lookup_bytes))
+            .ok_or_else(|| storage("expiration container size overflow"))?;
+        state.admit_containers(metadata)?;
+        state.expirations.try_reserve(1).map_err(|_| RecordError::Busy)?;
+        Ok(())
+    }
+
+    pub(super) fn install(self, state: &mut State, event: Expiration) -> Result<(), RecordError> {
+        for (previous, record) in self.replacements {
+            state.records.replace_prepared(record.record_id.clone(), record, Some(previous))?;
+        }
+        state.seq = event.seq;
+        state.time_watermark_ms = event.evaluation_time_ms;
+        state.expirations.push(event);
+        Ok(())
+    }
+}
+
+pub(super) fn apply(state: &mut State, event: &Expiration) -> Result<(), RecordError> {
+    let prepared = PreparedExpiration::prepare(state, event, state_proof::length(state)?)?;
+    prepared.admit(state)?;
+    prepared.install(state, event.clone())
+}
+
+impl replay::Context<'_> {
+    pub(super) async fn retire_expired(&mut self, event: &Expiration) -> Result<(), RecordError> {
+        for target in &event.targets {
+            if let Some(ordinal) = self.locations.remove(&target.record_id) {
+                self.index.retire(ordinal).await?;
+            }
+        }
+        Ok(())
+    }
 }
 pub(super) fn checked_time(clock: &dyn Clock, floor: u64) -> Result<u64, RecordError> {
     let now = clock.now_ms()?;
@@ -199,10 +272,10 @@ impl Inner {
     pub(super) async fn expire_due(&mut self) -> Result<(), RecordError> {
         let evaluation=self.observe_time()?;
         let mut targets = Vec::new();
-        self.state.records.visit_due_ttl(evaluation, |r| targets.push(ExpiredTarget {
-            record_id: r.record_id.clone(),
-            previous_version: r.version,
-        }));
+        self.state.records.visit_due_ttl(evaluation, |id, version| targets.push(ExpiredTarget {
+            record_id: id.to_owned(),
+            previous_version: version,
+        }))?;
         if targets.is_empty() {
             self.evaluation_time_ms = evaluation;
             return Ok(());
@@ -216,16 +289,16 @@ impl Inner {
             evaluation_time_ms: evaluation,
             targets,
         };
-        let mut candidate = self.state.try_clone_with_growth(checkpoint_codec::json_length(&event)?)?;
-        apply(&mut candidate, &event)?;
-        let snapshot_bytes = checkpoint_codec::length(&self.config, &candidate)?;
-        let reserve = mutation::reserve_bytes(&candidate);
+        let prepared = PreparedExpiration::prepare(&self.state, &event, self.snapshot_bytes)?;
+        let snapshot_bytes = prepared.snapshot_bytes;
+        let reserve = prepared.reserve_bytes;
         checkpoint_codec::validate_size(snapshot_bytes, reserve, self.config.max_journal_bytes)
             .map_err(storage)?;
         let bytes = encode_entry(&Entry::Expired(event.clone()))?;
         self.ensure_journal_room(bytes.len(),reserve).await?;
         self.ensure_remote_tail_room(event.seq,&format!("system:expired:{}",event.seq),&bytes).await?;
         self.validate_journal_room(bytes.len(),reserve)?;
+        prepared.admit(&mut self.state)?;
         self.healthy = false;
         self.output
             .write()
@@ -251,24 +324,18 @@ impl Inner {
         if self.fail_after_durable {
             return Err(RecordError::DurablePending(event.seq));
         }
-        let visible = visibility::visible_records(&candidate.records)
+        self.replay_context().retire_expired(&event).await
             .map_err(|_| RecordError::DurablePending(event.seq))?;
-        let retired: Vec<_> = self
-            .locations
-            .keys()
-            .filter(|id| visible.get(*id) != Some(&true))
-            .cloned()
-            .collect();
-        for id in retired {
-            let ordinal = self.locations.remove(&id).unwrap();
-            self.index.retire(ordinal).await.map_err(|_|RecordError::DurablePending(event.seq))?;
-        }
-        self.state = candidate;
+        let seq = event.seq;
+        prepared.install(&mut self.state, event)
+            .map_err(|_| RecordError::DurablePending(seq))?;
+        #[cfg(test)]
+        checkpoint_codec::assert_full_length(&self.config, &self.state, snapshot_bytes).await?;
         self.snapshot_bytes = snapshot_bytes;
         self.evaluation_time_ms = evaluation;
         self.output
             .write()
-            .map_err(|_| RecordError::DurablePending(event.seq))?
+            .map_err(|_| RecordError::DurablePending(seq))?
             .fenced = false;
         self.healthy = true;
         #[cfg(feature = "fault-injection")]
@@ -472,40 +539,35 @@ pub(super) fn validate_state(state: &State) -> Result<(), RecordError> {
         for target in &event.targets {
             let record = state
                 .records
-                .get(&target.record_id)
+                .find(&target.record_id)?
                 .ok_or_else(|| storage("orphan expiration history"))?;
             let version=target.previous_version.checked_add(1).ok_or_else(||storage("expiration version overflow"))?;
-            if record.version < version || expired.get(&target.record_id).is_some_and(|previous| *previous>=version) {
+            if record.version() < version || expired.get(target.record_id.as_str()).is_some_and(|previous| *previous>=version) {
                 return Err(storage("expiration history version regression"));
             }
-            expired.insert(&target.record_id,version);
-            if record.version==version && (record.document.is_some()
-                || record.expired_at_ms!=Some(event.evaluation_time_ms)
-                || record.temporal.expire_at_ms.is_none_or(|t| t>event.evaluation_time_ms)) {
+            expired.insert(target.record_id.as_str(),version);
+            if record.version()==version && (record.live()
+                || record.expired_at_ms()!=Some(event.evaluation_time_ms)
+                || record.temporal().expire_at_ms.is_none_or(|t| t>event.evaluation_time_ms)) {
                 return Err(storage("expiration tombstone differs from its current revision"));
             }
         }
     }
-    for record in state.records.values() {
-        validate(&record.temporal, 0).map_err(storage)?;
-        if record.ingested_at_ms > state.time_watermark_ms
-            || record
-                .expired_at_ms
-                .is_some_and(|t| t > state.time_watermark_ms)
+    state.records.scan(None, |id, row| {
+        validate(row.temporal(), 0).map_err(storage)?;
+        if row.ingested_at_ms() > state.time_watermark_ms
+            || row.expired_at_ms().is_some_and(|time| time > state.time_watermark_ms)
         {
             return Err(storage("record time exceeds committed watermark"));
         }
-    }
-    for record in state.records.values() {
-        if record.expired_at_ms.is_some() != expired.get(&record.record_id).is_some_and(|version|*version==record.version) {
+        if row.expired_at_ms().is_some() != expired.get(id).is_some_and(|version| *version == row.version()) {
             return Err(storage("missing current expiration history"));
         }
-        if record.temporal.expire_at_ms.is_some()
-            && record.record_id.len() > 256
-        {
+        if row.temporal().expire_at_ms.is_some() && id.len() > 256 {
             return Err(storage("TTL identity exceeds reservation"));
         }
-    }
+        Ok(true)
+    })?;
     if state
         .operations
         .iter()

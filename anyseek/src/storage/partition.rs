@@ -15,6 +15,7 @@ use std::{
 // stages the certificate and complete concurrent suffix before publishing the
 // generation directory. The three-witness WAL authenticates all of these frames.
 const PUBLISHED: &[u8] = b"SPPARTITION-PUBLISHED-1";
+pub(crate) const ARCHIVE_POLICY: &str = ".wal-archive";
 #[derive(Debug)]
 struct UncertifiedPartition;
 impl std::fmt::Display for UncertifiedPartition {
@@ -109,6 +110,7 @@ impl PartitionJournal {
     pub(crate) fn owner_guard(&self) -> std::sync::Arc<File> { self._owner.clone() }
 
     pub(crate) fn root(&self)->&Path {&self.path}
+    pub(crate) fn generation(&self) -> u64 { self.generation }
     pub(crate) fn validate_checkpoint_budget(length: usize, max_bytes: u64) -> io::Result<()> {
         let payload_budget=max_bytes.checked_sub(24+PUBLISHED.len() as u64).ok_or_else(||io::Error::other("checkpoint certificate budget exceeded"))?;
         Journal::validate_checkpoint_budget(length,payload_budget)
@@ -485,6 +487,13 @@ impl PartitionJournal {
     /// The new certificate and the complete concurrent suffix are staged together.
     /// No generation containing a certificate but missing suffix can be selected.
     pub(crate) fn checkpoint_with_tail(&mut self, payload: &[u8], tail: &[Vec<u8>]) -> Result<(), CreateError> {
+        self.checkpoint_with_archive(payload, tail, None)
+    }
+
+    pub(crate) fn checkpoint_with_archive(
+        &mut self, payload: &[u8], tail: &[Vec<u8>], archived_generation: Option<u64>,
+    ) -> Result<(), CreateError> {
+        self.require_archived_generation(archived_generation)?;
         Self::validate_initial(payload.len(), self.max_bytes)?;
         #[cfg(test)]
         if self.path.join(".test-checkpoint-before-certificate").exists() {
@@ -513,6 +522,7 @@ impl PartitionJournal {
     }
 
     pub(crate) fn checkpoint(&mut self, payload: &[u8]) -> Result<(), CreateError> {
+        self.require_archived_generation(None)?;
         Self::validate_initial(payload.len(), self.max_bytes)?;
         // Before allocating another generation, reclaim leftovers from the
         // last publication. At most current + one prepared/old generation.
@@ -554,6 +564,14 @@ impl PartitionJournal {
         }
         #[cfg(test)]
         crash_boundary("reclaimed");
+        Ok(())
+    }
+
+    fn require_archived_generation(&self, archived: Option<u64>) -> io::Result<()> {
+        let required = self.path.join(ARCHIVE_POLICY).try_exists()?;
+        if (required && archived != Some(self.generation)) || (!required && archived.is_some()) {
+            return Err(io::Error::other("checkpoint lacks its durable archive generation"));
+        }
         Ok(())
     }
 }

@@ -114,7 +114,7 @@ mod tests {
                 let at=now+settings.history.retention_ms+1000;clock.0.store(at,std::sync::atomic::Ordering::SeqCst);
                 let _writer=p.writer.lock().await;let mut inner=p.inner.lock().await;
                 inner.expire_due().await.unwrap();inner.trim_history(at).await.unwrap();
-                assert_eq!(inner.state.seq,3);assert!(inner.state.records["a"].expired_at_ms.is_some());assert!(inner.state.history.floor>0);
+                assert_eq!(inner.state.seq,3);assert!(inner.state.records.load("a").unwrap().unwrap().expired_at_ms.is_some());assert!(inner.state.history.floor>0);
             }
             let (mut proof,expected)={let mut inner=p.inner.lock().await;
                 // Settle acknowledged background owners before asserting exact
@@ -154,7 +154,7 @@ mod tests {
             p.finish_service_shutdown().await.unwrap();drop(p);
             let reopened=RecordPartition::open(&path,settings.max_journal_bytes).await.unwrap();
             {let inner=reopened.inner.lock().await;assert_eq!(inner.state.seq,expected.seq);assert_eq!(inner.state.history.floor,expected.history.floor);
-                if events {assert!(inner.state.records["a"].expired_at_ms.is_some());assert!(inner.state.records["a"].document.is_none());}}
+                if events {assert!(inner.state.records.load("a").unwrap().unwrap().expired_at_ms.is_some());assert!(inner.state.records.load("a").unwrap().unwrap().document.is_none());}}
             reopened.finish_service_shutdown().await.unwrap();
         }
     }
@@ -405,7 +405,7 @@ mod tests {
         assert_eq!(state_proof::length(&state).unwrap(),state_proof::length(&changed).unwrap());
         assert!(state_proof::verify(&settings,&state,&changed).is_err());
         let mut unordered=state.try_clone().unwrap();
-        let mut reversed=state_values::Values::default();
+        let mut reversed=state_values::Operations::default();
         for operation in state.operations.iter().rev(){reversed.push(operation.clone()).unwrap();}
         unordered.operations=reversed;
         assert!(temporal::validate_state(&unordered).is_err());
@@ -699,6 +699,12 @@ impl Intent {
         if let Some(operations)=&self.operations {operations.apply(state)?;}
         Ok(())
     }
+    pub(super) fn archive_gc_epoch(&self) -> Result<Option<u64>, RecordError> {
+        if self.trim.is_some() {
+            return Err(storage("remote checkpoint trim cannot enter a local archive"));
+        }
+        Ok(self.operations.as_ref().filter(|gc| gc.prefix.is_some()).map(|gc| gc.epoch))
+    }
     #[cfg(feature="fault-injection")]
     pub(super) fn trims_history(&self)->bool {self.trim.is_some()}
 }
@@ -750,7 +756,6 @@ impl OperationGc {
     restore_operation_lookup(state)
     }
 }
-#[cfg(test)]
 pub(super) fn collect_operations(state:&mut State,epoch:u64)->Result<(),RecordError> {
     OperationGc::capture(state,epoch,state.history.floor)?.apply(state)
 }

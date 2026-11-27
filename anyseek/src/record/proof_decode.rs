@@ -26,7 +26,7 @@ impl WireState {
             retired_operation_prefix,groups,expirations,records,operations}=self;
         let mut admitted_records=state_values::Records::default();
         for (id,record) in records {admitted_records.insert(id,record)?;}
-        let mut admitted_operations=state_values::Values::default();
+        let mut admitted_operations=state_values::Operations::default();
         for operation in operations {admitted_operations.push(operation)?;}
         // Exhaustive initializer: a new State field must be considered here.
         Ok(State{residency:None,lineage,history,independent_snapshot,seq,

@@ -230,6 +230,23 @@ impl Scope {
     pub(crate) fn native_io_wait(&self, cancelled: &AtomicBool) -> Result<Lease, Busy> {
         self.governor.native_io_wait(&self.subject, self.lane, cancelled)
     }
+    /// Lend a native worker's permit to synchronous budgeted file operations.
+    pub(crate) fn native_file_io<T>(
+        &self,
+        cancelled: &AtomicBool,
+        work: impl FnOnce() -> std::io::Result<T>,
+    ) -> std::io::Result<T> {
+        self.clone().run_sync(|| {
+            if self.has_file_io_loan() {
+                return work();
+            }
+            let loan = JournalIo {
+                scope: self.clone(),
+                _lease: self.native_io_wait(cancelled).map_err(std::io::Error::other)?,
+            };
+            loan.run(work)
+        })
+    }
     /// Wake this owner's native waiters before synchronously joining its workers.
     /// Taking the predicate mutex prevents a cancellation/wait lost wakeup.
     pub(crate) fn cancel_native_io(&self, cancelled: &AtomicBool) {

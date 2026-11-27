@@ -34,7 +34,16 @@ impl replay::Context<'_> {
                 log::error!("Record input admission failed at sequence {}: {:?}", receipt.seq, error);
                 RecordError::DurablePending(receipt.seq)
             })?;
-            let id=self.index.append(receipt.record_id.clone(),receipt.version,receipt.seq,temporal::indexed(document, &temporal::retained(self.state.records.get(&receipt.record_id), &applied.request, applied.observed_time_ms).map_err(|_| RecordError::DurablePending(receipt.seq))?, if applied.request.vector_patch.is_some() { self.state.records[&receipt.record_id].ingested_at_ms } else { applied.observed_time_ms }),prepared.lexical.take(),prepared.component.take(),publish_native).await.map_err(|error| { log::error!("Record component publication failed at sequence {}: {:?}", receipt.seq, error); RecordError::DurablePending(receipt.seq) })?;
+            let indexed = temporal::indexed(
+                document, &prepared.record.temporal, prepared.record.ingested_at_ms,
+            );
+            let id = self.index.append(
+                receipt.record_id.clone(), receipt.version, receipt.seq, indexed,
+                prepared.lexical.take(), prepared.component.take(), publish_native,
+            ).await.map_err(|error| {
+                log::error!("Record component publication failed at sequence {}: {:?}", receipt.seq, error);
+                RecordError::DurablePending(receipt.seq)
+            })?;
             #[cfg(test)]
             if self.fail_publication_stage == 1 {
                 return Err(RecordError::DurablePending(receipt.seq));
@@ -52,10 +61,8 @@ impl replay::Context<'_> {
         }
         apply_prepared(&mut *self.state, applied, Some(prepared)).map_err(|_| RecordError::DurablePending(receipt.seq))?;
         *self.snapshot_bytes = snapshot_bytes;
-        // Still serialize every Record/operation independently of incremental
-        // snapshot_after arithmetic. Counting needs neither a clone nor decode.
         #[cfg(test)]
-        assert_eq!(*self.snapshot_bytes,checkpoint_codec::full_length(self.config,self.state)?);
+        checkpoint_codec::assert_full_length(self.config, self.state, *self.snapshot_bytes).await?;
         Ok(())
     }
 
@@ -68,6 +75,7 @@ impl replay::Context<'_> {
         *slot = record_id.to_owned();
         self.locations.insert(record_id.to_owned(), ordinal);
     }
+
 }
 
 impl Inner {

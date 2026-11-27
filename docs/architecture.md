@@ -56,9 +56,9 @@ S3 模式都保留这些元数据。S3 另用同库保存 Record 提交与回收
 
 ### 查询视图与锁范围
 
-查询在短持 Record guard 时捕获派生拓扑与 evaluation_time，在 guard 外评分，再重验当前 Record 的版本、fingerprint、删除及 TTL。组件 ordinal 仅是地址。消费者进度可不同，普通查询不提供跨通道、回表和统计的全局不可变业务快照；更新或到期可能缩短页。
+查询在短持 Record guard 时捕获派生拓扑与 evaluation_time，在 guard 外评分，再短持 guard 固定有界的候选来源。来源持有封存文件或不可变近期记录，正文和输出投影在 guard 外读取。交付前重新核对发布状态、组修订号、当前身份和 TTL。组件 ordinal 仅是地址。消费者进度可不同，普通查询不提供跨通道、回表和统计的全局不可变业务快照；更新或到期可能缩短页。
 
-纯全文 Count、默认排序及只按 `_id`/`_score` 排序的路径在捕获身份与全文快照后释放向量/元数据组件读锁；Hybrid 和字段排序仍保留相应组件锁。正文在评分与身份重验后按输出字段复制。每次查询将搜索执行交给一个阻塞 worker，最终身份与 TTL 检查仍面对当前权威状态。
+纯全文 Count、默认排序及只按 `_id`/`_score` 排序的路径在捕获身份与全文快照后释放向量/元数据组件读锁；Hybrid 和字段排序仍保留相应组件锁。评分与候选回表分别在阻塞 worker 中执行。仅计数的请求没有候选正文要读取。
 
 Lexical、Vector、Hybrid 共用稳定 Record 身份。Hybrid 在各路跨组件形成全局排名后执行一次 RRF；候选窗口计数与 ANN/Hybrid 候选内字段排序不保证全库精确结果。纯向量 collection 也支持 metadata 浏览。配置、评分和排序细节见[检索契约](search.md)。
 
@@ -70,7 +70,7 @@ Lexical、Vector、Hybrid 共用稳定 Record 身份。Hybrid 在各路跨组件
 | --- | --- | --- |
 | RecordPartition | 规范数据、版本/TTL、回执、ordinal 到稳定身份映射 | 权威提交与恢复 |
 | VectorIndex / RetrievalView | 拓扑、全局 Top-K/候选预算、读取 pin | 捕获视图，旋转/合并时替换拓扑 |
-| VectorSegment | 文件/mmap、ANN 聚类与量化、物理行身份、活动 mask、组件 admission | 单组件构建、冻结、合并及最终释放 |
+| VectorSegment | 显式范围文件读取和写入、ANN 聚类与量化、物理行身份、活动 mask、组件 admission | 单组件构建、冻结、合并及最终释放 |
 | Tantivy runtime | 原生 Searcher、可查增量、原生文件、writer 和目录 owner | 全文发布、物化与固定读者 |
 
 VectorIndex 的 schema、距离和量化配置是逻辑查询配置；组件中的配置用于解释本地文件。`indexed_*`、`committed_doc_count`、`uncommitted`、`failed` 描述组件进度，`active`、`delete_hashset` 与退休 token 表达派生活动状态。组件 admission 汇总已持有和待转移的租约；切段关闭旧代次的新准入，已获额度的工作可按原绑定完成。
@@ -83,7 +83,9 @@ VectorIndex 的 schema、距离和量化配置是逻辑查询配置；组件中�
 
 `record/lexical/directory_gate.rs` 按同一物理索引目录共享 I/O mutex，不再让不同目录共用进程级文件操作锁。Unix 以 canonical 路径对应的 device/inode 为键；其他平台使用 canonical 路径。全局 registry 只存弱引用，在打开目录时短持锁，不在该锁内做文件 I/O 或等待容量。
 
-Directory/Writer 克隆与固定读者通过原有 owner 保留目录锁。内存、服务级/集合级 I/O 额度、OS writer/owner lock、取消和包 pin 继续生效；不允许外部替换仍在使用的目录。该改动消除了无关目录间的 mutex 等待，端到端吞吐与 Windows 别名行为仍需独立验收，见[原生 I/O 证据](../benchmarks/native-io/README.zh-CN.md)。
+全文目录用 `storage::build_budget::File` 访问已经打开的普通文件。打开、元数据更换和顺序写入经过各自目录的 I/O gate。已打开的不可变段按偏移读取，不占用目录 gate。读缓冲分配前申请额度，Tantivy 的 `OwnedBytes` 及其切片持有额度直到最后一个引用释放。记录写入在 WAL 前为原生构建读取和快照重载预留额度，重载将预留额度转给实际读缓冲。原生元数据的读入和 JSON 解码使用目录或 writer 持有的预算。固定 Searcher、文件句柄和 writer 持有包 pin，封存与回收继续遵循现有发布协议。Reader 由 Record 发布流程手动重载。
+
+Unix 按偏移读取不改变文件游标。Windows 在同一文件句柄上串行执行范围读和游标操作。进程与集合 I/O 额度、OS writer/owner lock 和取消依旧约束原生 writer。端到端吞吐与 Windows 别名行为见[原生 I/O 证据](../benchmarks/native-io/README.zh-CN.md)。
 
 独立快照按文件阶段借用一份 I/O 额度，内部文件操作共享该额度；与后台物化竞争时等待既有容量，不重复申请或放宽上限。原生构建和网络操作在该文件事务之外进行。独立输出完整认证后不缓存供 live 增量证明使用的 State 容器。
 
@@ -108,7 +110,7 @@ S3 权威备份在单写者保护下先等待已接受的索引 I/O 结束，再
 | 权威发布未知或不健康 | 读写失败封锁，响应缺席不证明未提交 | 恢复权威后再重建缓存 |
 | 进程 panic | API 断连，仅持久权威可恢复 | 重启、重开、原身份查账或重试 |
 
-独立消费不等于独立故障隔离。不得手工推进 cursor、清空共享错误槽以开放部分结果、删除在用缓存或复用失败 writer；恢复失败的 partition 必须保持不可用。回归覆盖消费者错误、metadata mmap 增长失败、部分向量提交、权威部分帧及重开，执行结果以对应源码的验收记录为准。
+独立消费不等于独立故障隔离。不得手工推进 cursor、清空共享错误槽以开放部分结果、删除在用缓存或复用失败 writer；恢复失败的 partition 必须保持不可用。回归覆盖消费者错误、元数据文件写入失败、部分向量提交、权威部分帧及重开，执行结果以对应源码的验收记录为准。
 
 阻塞 worker 持有查询 admission、资源 scope、句柄和 package pin，直到工作 join，客户端取消不撤回这些资源。checkpoint 的 journal 安装也把 partition/writer guard 与 I/O 租约移交给阻塞 worker，仍持发布锁；移出异步 executor 不代表消除发布暂停或已证明吞吐提升。
 
@@ -120,7 +122,7 @@ SIGINT/SIGTERM 先建立停止准入边界，再启动 HTTP graceful shutdown。
 
 1. join 周期维护协调器，停止新的自动 checkpoint/cache 维护与未获准入的重试；已接受消费者完成原有有界 flush/merge。
 2. 排空 HTTP、索引和阻塞 executor 中的 owned activity，包括取消后的任务、body 丢弃后仍持有的 frame，以及尚未交付的任务结果。仅保存状态的已完成 handle 不算在途工作。
-3. join 索引消费者、全文物化和原生 writer，释放 partition、读者、package pin、mmap 与 Catalog。
+3. join 索引消费者、全文物化和原生 writer，释放 partition、读者、package pin、索引文件句柄与 Catalog。
 4. 最后释放服务根锁，仅完整成功后报告 `Shutdown complete`，此时才可立即重开或回收目录。
 
 关闭不强制 checkpoint、TTL sweep 或 GC，也不增加持久性承诺。传输 owner 未释放会让关闭继续等待；重复调用共用同一完成状态。消费者健康错误可通过重开恢复；worker join、原生 writer 终止失败或遗留 partition owner 会报告关闭未完成并保留根锁至进程退出，可执行程序返回非零。

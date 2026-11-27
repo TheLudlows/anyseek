@@ -54,6 +54,9 @@ struct WirePackage<'a> {
     #[serde(borrow)] files:&'a serde_json::value::RawValue,
 }
 impl Reference {
+    pub(super) fn checkpoint_state(&self) -> Result<&State, RecordError> {
+        self.captured.get().ok_or_else(|| storage("missing certified State proof owner"))
+    }
     pub(super) fn decode_proof(raw:&serde_json::value::RawValue)->Result<Self,RecordError>{
         let charge=metadata_charge(raw.get().len())?.checked_add(65536).ok_or_else(||storage("reference scratch overflow"))?;
         let mut lease=crate::storage::build_budget::reserve_memory(charge).map_err(memory_error)?;
@@ -154,7 +157,7 @@ pub(super) struct Loaded {
     pub config:RecordConfig,pub state:State,pub index:VectorIndexArc,
     pub ordinals:Vec<String>,pub locations:BTreeMap<String,usize>,pub payloads:Closure,
 }
-struct VerifiedView { index:VectorIndexArc, ordinals:Vec<String>, locations:BTreeMap<String,usize>, payloads:Closure }
+struct VerifiedView { index:VectorIndexArc, ordinals:Vec<String>, locations:BTreeMap<String,usize>, payloads:Closure, rebased: Option<State> }
 fn valid(id:&str)->bool{id.len()==32&&id.bytes().all(|b|b.is_ascii_digit()||(b'a'..=b'f').contains(&b))}
 fn directory(root:&Path,id:&str)->Result<PathBuf,RecordError>{
     if !valid(id){return Err(storage("invalid anchor identity"));}
@@ -199,22 +202,23 @@ impl Frozen {
     async fn prepare_chunks(root:&Path,config:&RecordConfig,state:&State,selected:Option<&std::collections::BTreeSet<String>>,segments:&mut Vec<Self>,statistics:&mut Vec<crate::active::ActiveStatistics>)->Result<(),RecordError>{
         // At most one bounded identity batch is materialized; the full State is
         // borrowed. Each package releases its writer before the next is built.
-        let max_id=state.records.keys().map(String::len).max().unwrap_or(0);
+        let mut max_id = 0;
+        crate::resources::file_transaction(|| state.records.scan(None, |id, _| { max_id = max_id.max(id.len()); Ok(true) })).await.map_err(|_| RecordError::Busy)??;
         let bytes=(capacity::PACKAGE_RECORDS as u64).checked_mul(max_id as u64+256)
             .ok_or_else(||storage("package identity estimate overflow"))?;
         let _keys=crate::storage::build_budget::reserve_memory(bytes).map_err(storage)?;
-        let mut keys=std::collections::BTreeSet::new();
-        for (key, _) in state.records.iter().filter(|(key, record)|
-            record.document.is_some() && selected.is_none_or(|s|s.contains(*key))) {
-            keys.insert(key.clone());
-            if keys.len()==capacity::PACKAGE_RECORDS {
-                let (segment,active)=Self::prepare(root,config,state,Some(&keys)).await?;
-                segments.push(segment);statistics.push(active);keys.clear();
-            }
-        }
-        if !keys.is_empty() {
-            let (segment,active)=Self::prepare(root,config,state,Some(&keys)).await?;
-            segments.push(segment);statistics.push(active);
+        let mut after: Option<String> = None;
+        loop {
+            let mut keys = std::collections::BTreeSet::new();
+            crate::resources::file_transaction(|| state.records.scan(after.as_deref(), |id, row| {
+                if row.live() && selected.is_none_or(|set| set.contains(id)) { keys.insert(id.to_owned()); }
+                Ok(keys.len() < capacity::PACKAGE_RECORDS)
+            })).await.map_err(|_| RecordError::Busy)??;
+            if keys.is_empty() { break; }
+            let (segment, active) = Self::prepare(root, config, state, Some(&keys)).await?;
+            segments.push(segment);
+            statistics.push(active);
+            after = keys.pop_last();
         }
         Ok(())
     }
@@ -259,12 +263,12 @@ impl Reference {
         Ok(result)
     }
     pub(super) async fn prepare(root:&Path,config:&RecordConfig,state:&State,prior:Closure,previous:Option<&Reference>,view:Option<&view::RetrievalView>,compact:bool,journal:Option<&mut PartitionJournal>)->Result<Self,RecordError>{
-        let encoded={let _phase=maintenance::Phase::new("state_measure_and_digest",state.seq);checkpoint_codec::StateEncoding::new(state)?};
+        let encoded={let _phase=maintenance::Phase::new("state_measure_and_digest",state.seq);checkpoint_codec::StateEncoding::capture(state).await?};
         Self::prepare_encoded(root,config,&encoded,prior,previous,view,compact,journal,None,None).await
     }
     pub(super) async fn prepare_captured(root:&Path,config:&RecordConfig,state:&State,prior:Closure,
         previous:Option<&Reference>,frames:&[Vec<u8>],native:Option<&NativeReuse>)->Result<Self,RecordError> {
-        let encoded=checkpoint_codec::StateEncoding::new(state)?;
+        let encoded=checkpoint_codec::StateEncoding::capture(state).await?;
         Self::prepare_encoded(root,config,&encoded,prior,previous,None,false,None,Some(frames),native).await
     }
     async fn prepare_encoded(root:&Path,config:&RecordConfig,encoded:&checkpoint_codec::StateEncoding<'_>,prior:Closure,previous:Option<&Reference>,view:Option<&view::RetrievalView>,compact:bool,journal:Option<&mut PartitionJournal>,captured:Option<&[Vec<u8>]>,native:Option<&NativeReuse>)->Result<Self,RecordError>{
@@ -540,9 +544,20 @@ impl Reference {
         Ok((config,state,config_owner))
     }
     pub(super) async fn load(&self,root:&Path,authority_budget:u64)->Result<Loaded,RecordError>{
+        self.load_inner(root, authority_budget, false).await
+    }
+    pub(super) async fn load_local(&self, root: &Path, authority_budget: u64) -> Result<Loaded, RecordError> {
+        self.load_inner(root, authority_budget, true).await
+    }
+    async fn load_inner(&self,root:&Path,authority_budget:u64, local:bool)->Result<Loaded,RecordError>{
         let (path,manifest,pool,_manifest_lease)=self.authenticated_manifest(root,authority_budget)?;
         let config=manifest.state.config().clone();
-        let state=manifest.state.read(&pool,authority_budget,|id|directory(root,id))?;
+        let state=if local {
+            let pool = Arc::new(state_values::OperationPool::new(pool)?);
+            manifest.state.read_local(&pool,authority_budget,|id|directory(root,id))?
+        } else {
+            manifest.state.read(&pool,authority_budget,|id|directory(root,id))?
+        };
         if state.seq!=manifest.seq{return Err(storage("anchor sequence mismatch"));}
         let view=self.load_components(root,&path,authority_budget,&config,&state,manifest.payloads).await?;
         if self.captured.get().is_none() { let _=self.captured.set(state.try_clone()?); }
@@ -551,27 +566,28 @@ impl Reference {
     // Authenticate the sealed package against the owned captured cut. Its State
     // stays alive throughout verification and becomes the candidate; do not
     // deserialize a second complete history from the same package.
-    pub(super) async fn load_captured(&self, root: &Path, config: RecordConfig, state: State) -> Result<Loaded, RecordError> {
-        let view = self.load_verified(root, &config, &state).await?;
-        Ok(Loaded { config, state, index: view.index, ordinals: view.ordinals,
+    pub(super) async fn load_captured(&self, root: &Path, config: RecordConfig, state: State, local: bool) -> Result<Loaded, RecordError> {
+        let encoded = checkpoint_codec::StateEncoding::capture(&state).await?;
+        let view = self.load_verified_encoded(root, &config, &encoded, local).await?;
+        Ok(Loaded { config, state: view.rebased.unwrap_or(state), index: view.index, ordinals: view.ordinals,
             locations: view.locations, payloads: view.payloads })
     }
-    async fn load_verified(&self,root:&Path,config:&RecordConfig,state:&State)->Result<VerifiedView,RecordError>{
-        self.load_verified_encoded(root,config,&checkpoint_codec::StateEncoding::new(state)?).await
-    }
-    async fn load_verified_encoded(&self,root:&Path,config:&RecordConfig,encoded:&checkpoint_codec::StateEncoding<'_>)->Result<VerifiedView,RecordError>{
-        let view=self.load_verified_view(root,config,encoded).await?;
-        // Live predecessors retain a comparison cut for later delta proofs.
-        if self.captured.get().is_none() { let _=self.captured.set(encoded.state().try_clone()?); }
+    async fn load_verified_encoded(&self,root:&Path,config:&RecordConfig,encoded:&checkpoint_codec::StateEncoding<'_>,local:bool)->Result<VerifiedView,RecordError>{
+        let view=self.load_verified_view(root,config,encoded,local).await?;
+        // A local proof owner shares the selected sealed roots and only the
+        // authenticated suffix. Remote owners retain their existing state.
+        if self.captured.get().is_none() {
+            let _=self.captured.set(view.rebased.as_ref().unwrap_or_else(|| encoded.state()).try_clone()?);
+        }
         Ok(view)
     }
-    async fn load_verified_view(&self,root:&Path,config:&RecordConfig,encoded:&checkpoint_codec::StateEncoding<'_>)->Result<VerifiedView,RecordError>{
+    async fn load_verified_view(&self,root:&Path,config:&RecordConfig,encoded:&checkpoint_codec::StateEncoding<'_>,local:bool)->Result<VerifiedView,RecordError>{
         let state=encoded.state();
         let _phase=maintenance::Phase::new("candidate_authentication_and_load",state.seq);
         #[cfg(test)]
         pause_file_io_for_test(root,"load").await?;
         let manifest_io=crate::resources::io_scope(crate::resources::Lane::Background).journal_io().await.map_err(|_|RecordError::Busy)?;
-        let (path,payloads)=manifest_io.run_async(async {
+        let (path,payloads,rebased)=manifest_io.run_async(async {
         let (path,manifest,pool,_manifest_lease)=self.authenticated_manifest(root,config.max_journal_bytes)?;
         if manifest.seq!=state.seq || serde_json::to_vec(manifest.state.config()).map_err(storage)?!=serde_json::to_vec(config).map_err(storage)? {
             return Err(storage("expected anchor identity mismatch"));
@@ -589,10 +605,20 @@ impl Reference {
             state_proof::verify(config,state,&replayed)?;
         }
         manifest.state.validate_encoded(encoded,config.max_journal_bytes)?;
-        Ok::<_,RecordError>((path,manifest.payloads))
+        let rebased = if local {
+            let pool = Arc::new(state_values::OperationPool::new(pool)?);
+            let rooted = manifest.state.read_local(&pool, config.max_journal_bytes, |id| directory(root, id))?;
+            if rooted.seq != state.seq || rooted.lineage != state.lineage
+                || state_proof::length(&rooted)? != encoded.length() {
+                return Err(storage("prepared local root differs from certified cut"));
+            }
+            Some(rooted)
+        } else { None };
+        Ok::<_,RecordError>((path,manifest.payloads,rebased))
         }).await?;
         // Native reader admission below has its own I/O permit.
-        let view=self.load_components(root,&path,config.max_journal_bytes,config,state,payloads).await?;
+        let mut view=self.load_components(root,&path,config.max_journal_bytes,config,rebased.as_ref().unwrap_or(state),payloads).await?;
+        view.rebased = rebased;
         Ok(view)
     }
     async fn load_components(&self,root:&Path,path:&Path,authority_budget:u64,config:&RecordConfig,state:&State,payloads:Closure)->Result<VerifiedView,RecordError>{
@@ -607,16 +633,18 @@ impl Reference {
     async fn load_parts(root:&Path,config:&RecordConfig,state:&State,payloads:Closure,
         segments:&[segment::Package],statistics:Vec<crate::active::ActiveStatistics>)->Result<VerifiedView,RecordError>{
         if statistics.len()!=segments.len(){return Err(storage("segment statistics closure mismatch"));}
-        let expected=state.records.values().filter(|record|record.document.is_some()).count();
+        let mut expected = 0;
+        crate::resources::file_transaction(|| state.records.scan(None, |_, row| { expected += usize::from(row.live()); Ok(true) })).await.map_err(|_| RecordError::Busy)??;
         let n=segments.len();let mut locations=BTreeMap::new();let mut ordinals=Vec::new();let mut indexes=Vec::new();
         let address_budget=capacity::address_slots()?;
         for (slot,(segment,active)) in segments.iter().zip(statistics).enumerate(){
+            crate::resources::file_transaction(|| -> Result<(), RecordError> {
             for (id,key) in active.keys.iter().enumerate(){
                 let address=id.checked_mul(n).and_then(|v|v.checked_add(slot)).filter(|v|*v<address_budget).ok_or_else(||storage("segment address budget exceeded"))?;
                 if ordinals.len()<=address{ordinals.try_reserve(address+1-ordinals.len()).map_err(storage)?;ordinals.resize(address+1,String::new());}
                 ordinals[address]=key.clone();
                 if active.is_live(id) {
-                    if state.records.get(key).is_none_or(|record|record.document.is_none()) {
+                    if state.records.find(key)?.is_none_or(|row| !row.live()) {
                         return Err(storage("anchor visible identity mismatch"));
                     }
                     if locations.insert(key.clone(),address).is_some() {
@@ -624,13 +652,15 @@ impl Reference {
                     }
                 }
             }
+                Ok(())
+            }).await.map_err(|_| RecordError::Busy)??;
             indexes.push(segment.load(root,&config,active).await?);
         }
         if locations.len()!=expected{return Err(storage("anchor visible identity mismatch"));}
         let index=indexes[0].clone();
         let mut shards=Vec::new();for component in &indexes{shards.push(component.read().await.segments[0].clone());}
         {let mut root=index.write().await;root.segments=shards;}
-        Ok(VerifiedView{index,ordinals,locations,payloads})
+        Ok(VerifiedView{index,ordinals,locations,payloads,rebased:None})
     }
 }
 
@@ -640,11 +670,11 @@ impl Reference {
 pub(super) async fn snapshot_payload(root:&Path,config:&RecordConfig,state:&State)
     ->Result<(Vec<u8>,crate::storage::build_budget::MemoryLease,crate::storage::build_budget::DiskScope),RecordError>{
     let disk=crate::storage::build_budget::DiskScope::begin(root,closure_limit(config.max_journal_bytes)?).map_err(storage)?;
-    let encoded=checkpoint_codec::StateEncoding::new(state)?;
+    let encoded=checkpoint_codec::StateEncoding::capture(state).await?;
     let reference=Reference::prepare_encoded(root,config,&encoded,Closure::default(),None,None,true,None,None,None).await?;
     // An independent snapshot never becomes a live delta-proof predecessor.
     // Authenticate the same bytes without retaining another State's containers.
-    let verified=reference.load_verified_view(root,config,&encoded).await?;
+    let verified=reference.load_verified_view(root,config,&encoded,false).await?;
     drop(verified); // Close all mappings before later Windows root publication.
     let estimate=checkpoint_codec::json_length(&reference)?.checked_add(64).ok_or_else(||storage("snapshot authority overflow"))?;
     let lease=crate::storage::build_budget::reserve_memory(metadata_charge(estimate)?).map_err(storage)?;
@@ -750,6 +780,9 @@ impl Inner {
         })
     }
     async fn prepare_and_publish_anchor(&mut self,candidate:Option<State>,reuse:bool)->Result<u64,RecordError>{
+        if self.archive.is_some() {
+            return Err(RecordError::Rejected("archive-enrolled partitions require an owned background checkpoint".into()));
+        }
         self.index.drain_batch_prefix(self.state.seq).await?;
         self.index.join_materializers().await?;
         let _phase=maintenance::Phase::new("full_checkpoint",self.state.seq);
@@ -789,7 +822,7 @@ impl Inner {
         // candidates (snapshot/restore) still own their independent State.
         let next=candidate.as_ref().unwrap_or(&self.state);
         let next_seq=next.seq;
-        let encoded={let _phase=maintenance::Phase::new("state_measure_and_digest",next.seq);checkpoint_codec::StateEncoding::new(next)?};
+        let encoded={let _phase=maintenance::Phase::new("state_measure_and_digest",next.seq);checkpoint_codec::StateEncoding::capture(next).await?};
         let snapshot_bytes=encoded.checkpoint_length(&self.config)?;
         let prior=if reuse{self.payloads.clone()}else{Closure::default()};
         let mut reference=Reference::prepare_encoded(&root,&self.config,&encoded,prior,self.anchor.as_ref(),Some(&self.index),!reuse,if candidate.is_none() && reuse {Some(&mut self.journal)}else{None},None,None).await?;
@@ -799,7 +832,7 @@ impl Inner {
         }
         // Verify every persisted frame against the pinned State without a
         // second full-history allocation; no authority changes before this succeeds.
-        let loaded=reference.load_verified_encoded(&root,&self.config,&encoded).await?;
+        let loaded=reference.load_verified_encoded(&root,&self.config,&encoded,self.remote.is_none()).await?;
         // The newly verified shared cut replaces the predecessor proof owner;
         // do not retain an extra old State through subsequent publications.
         reference.previous_capture=None;
@@ -865,7 +898,7 @@ impl Inner {
         // All fallible preparation precedes the authority certificate. The
         // partition guard excludes readers until the complete view is installed.
         self.index=index;self.ordinals=ordinals;self.locations=locations;
-        self.anchor=Some(reference);self.payloads=loaded.payloads;if let Some(candidate)=candidate {self.state=candidate;}self.snapshot_bytes=snapshot_bytes;
+        self.anchor=Some(reference);self.payloads=loaded.payloads;if let Some(candidate)=loaded.rebased.or(candidate) {self.state=candidate;}self.snapshot_bytes=snapshot_bytes;
         self.healthy=true;self.output.write().map_err(|_|RecordError::RecoveryRequired)?.fenced=fenced;
         #[cfg(test)]
         if root.join(".test-anchor-post-certificate-gc").exists() {
@@ -1109,8 +1142,8 @@ mod tests {
         assert!(inner.anchor.as_ref().unwrap().state_blocks.is_empty(),"independent backup must materialize its own full base");
         assert_eq!(inner.state.seq,sequence);
         assert_eq!(inner.state.operations.len(),2);
-        assert_eq!(inner.state.records["a"].document.as_ref().unwrap()["body"],serde_json::json!("base-body"));
-        assert_eq!(inner.state.records["b"].document.as_ref().unwrap()["body"],serde_json::json!("delta-body"));
+        assert_eq!(inner.state.records.load("a").unwrap().unwrap().document.as_ref().unwrap()["body"],serde_json::json!("base-body"));
+        assert_eq!(inner.state.records.load("b").unwrap().unwrap().document.as_ref().unwrap()["body"],serde_json::json!("delta-body"));
     }
     #[tokio::test]
     async fn anchor_component_metadata_pressure_stays_busy_and_retries_without_fencing() {
@@ -1202,15 +1235,22 @@ mod tests {
             let inner = p.inner.lock().await;
             (inner.anchor.clone().unwrap(), inner.config.clone(), inner.state.try_clone().unwrap())
         };
-        let owner = Arc::as_ptr(snapshot.residency.as_ref().unwrap());
         let original = checkpoint_codec::json_digest(&snapshot).unwrap();
-        let loaded = reference.load_captured(&root, settings.clone(), snapshot).await.unwrap();
-        assert_eq!(owner, Arc::as_ptr(loaded.state.residency.as_ref().unwrap()));
+        let remote_cut = snapshot.try_clone().unwrap();
+        let owner = Arc::as_ptr(remote_cut.residency.as_ref().unwrap());
+        let remote = reference.load_captured(&root, settings.clone(), remote_cut, false).await.unwrap();
+        assert_eq!(owner, Arc::as_ptr(remote.state.residency.as_ref().unwrap()));
+        let old_owner = Arc::downgrade(snapshot.residency.as_ref().unwrap());
+        let loaded = reference.load_captured(&root, settings.clone(), snapshot, true).await.unwrap();
+        assert!(old_owner.upgrade().is_none(), "the rooted candidate releases the captured containers");
+        assert!(loaded.state.records.has_sealed_base());
+        assert_eq!(loaded.state.records.recent_count(), 0);
+        assert_eq!(loaded.state.operations.recent_count(), 0);
         assert_eq!(original, checkpoint_codec::json_digest(&loaded.state).unwrap());
         let mut invalid = loaded.state.try_clone().unwrap();
         invalid.time_watermark_ms += 1;
         let released = Arc::downgrade(invalid.residency.as_ref().unwrap());
-        assert!(reference.load_captured(&root, settings, invalid).await.is_err());
+        assert!(reference.load_captured(&root, settings, invalid, true).await.is_err());
         assert!(released.upgrade().is_none(), "failed candidate releases its State owner");
         assert_eq!(original, checkpoint_codec::json_digest(&p.inner.lock().await.state).unwrap());
         assert_eq!(p.statistics().await.unwrap().visible_seq, 1);
@@ -1244,9 +1284,9 @@ mod tests {
                 let inner=p.inner.lock().await;
                 assert_eq!(inner.state.seq,3);assert_eq!(inner.state.operations.len(),3);
                 assert_eq!(inner.snapshot_bytes,checkpoint_codec::length(&inner.config,&inner.state).unwrap());
-                assert_eq!(inner.state.records["timed"].temporal,metadata);
-                assert_eq!(inner.state.records["source"].document.as_ref().unwrap()["body"],"alpha original");
-                assert_eq!(inner.state.records["source"].document.as_ref().unwrap()["vector"],serde_json::json!([2.0,0.0]));
+                assert_eq!(inner.state.records.load("timed").unwrap().unwrap().temporal,metadata);
+                assert_eq!(inner.state.records.load("source").unwrap().unwrap().document.as_ref().unwrap()["body"],"alpha original");
+                assert_eq!(inner.state.records.load("source").unwrap().unwrap().document.as_ref().unwrap()["vector"],serde_json::json!([2.0,0.0]));
             }
             assert_eq!(p.write(patch).await.unwrap(),patch_receipt);
             assert_eq!(p.write(timed).await.unwrap(),timed_receipt);
@@ -1693,8 +1733,12 @@ mod tests {
         let root=path();let mut config=config();
         config.index.inference=serde_json::from_value(serde_json::json!({"External":{"dimensions":2,"precision":"F32","quantization":"ScalarQuantizationI8","similarity":"Euclidean"}})).unwrap();
         let partition=RecordPartition::create(&root,config.clone()).await.unwrap();
+        let mut sealed_operation = None;
         for (id,vector) in [("a",vec![1.0,2.0]),("b",vec![0.123,-9.0])]{
-            let mut request=write(id,id,"alpha",ExpectedVersion::Absent);request.document.as_mut().unwrap().insert("vector".into(),serde_json::json!(vector));partition.write(request).await.unwrap();
+            let mut request=write(id,id,"alpha",ExpectedVersion::Absent);
+            request.document.as_mut().unwrap().insert("vector".into(),serde_json::json!(vector));
+            let receipt = partition.write(request.clone()).await.unwrap();
+            sealed_operation = Some((request, receipt));
         }
         let mode=SearchMode::Vector{similarity_threshold:None,ann_mode:crate::vector_similarity::AnnMode::All};
         let before=query(&partition,mode.clone()).await;
@@ -1702,7 +1746,13 @@ mod tests {
         let after=query(&partition,mode.clone()).await;
         let scores=|r:RecordSearch|r.hits.into_iter().map(|h|(h.record.record_id.clone(),h.score)).collect::<Vec<_>>();
         assert_eq!(scores(before),scores(after));
-        let reference={let inner=partition.inner.lock().await;inner.anchor.clone().unwrap()};
+        let reference={
+            let inner=partition.inner.lock().await;
+            assert!(inner.state.records.has_sealed_base());
+            assert_eq!(inner.state.records.recent_count(), 0);
+            assert_eq!(inner.state.operations.recent_count(), 0);
+            inner.anchor.clone().unwrap()
+        };
         let selected=directory(&root,&reference.id).unwrap();
         let files_before=serde_json::to_vec(&files(&selected,closure_limit(config.max_journal_bytes).unwrap()).unwrap()).unwrap();
         let update=write("a2","a","alpha revised",ExpectedVersion::Match(1));let receipt=partition.write(update.clone()).await.unwrap();
@@ -1714,11 +1764,43 @@ mod tests {
             let index=inner.index.test_index().read().await;
             assert_eq!(PathBuf::from(&index.index_path_string),reference.segments[0].path(&root).unwrap());
             assert_eq!(index.segments.len(),2);
+            assert!(inner.state.records.has_sealed_base());
+            assert_eq!(inner.state.records.recent_count(), 1);
+            assert_eq!(inner.state.operations.recent_count(), 1);
         }
+        assert_eq!(restored.get("b").await.unwrap().unwrap().document.as_ref().unwrap()["body"], "alpha");
+        let (request, sealed_receipt) = sealed_operation.unwrap();
+        assert_eq!(restored.write(request).await.unwrap(), sealed_receipt);
         assert_eq!(scores(query(&restored,mode).await),expected);
         assert_eq!(restored.write(update).await.unwrap(),receipt);
         assert_eq!(serde_json::to_vec(&files(&selected,closure_limit(config.max_journal_bytes).unwrap()).unwrap()).unwrap(),files_before);
-        drop(restored);std::fs::remove_dir_all(root).unwrap();
+        // Corrupt the selected synthetic body after startup validation.
+        // Production GET must report the read failure instead of yielding a
+        // record from an eagerly materialized fallback.
+        let address = {
+            let inner = restored.inner.lock().await;
+            let Some(state_values::CurrentRow::Sealed(row)) = inner.state.records.find("b").unwrap() else {
+                panic!("expected untouched row to remain sealed");
+            };
+            row.sealed_payload().unwrap().clone()
+        };
+        {
+            use std::io::{Seek, SeekFrom, Write};
+            let object = format!("{:032x}", u128::from_be_bytes(address.object));
+            let mut file = std::fs::OpenOptions::new().write(true).open(root.join(format!("payload-{object}"))).unwrap();
+            file.seek(SeekFrom::Start(address.range.offset)).unwrap();
+            file.write_all(b"!").unwrap();
+            file.sync_all().unwrap();
+        }
+        assert!(matches!(restored.get("b").await, Err(RecordError::Storage(_))));
+        assert!(matches!(
+            restored.search("alpha".into(), None, SearchMode::Lexical, vec![], 10).await,
+            Err(RecordError::Storage(_))
+        ));
+        restored.finish_service_shutdown().await.unwrap();
+        drop(restored);
+        drop(reference);
+        std::fs::remove_dir_all(root).unwrap();
     }
 }
 

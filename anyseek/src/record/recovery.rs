@@ -3,6 +3,11 @@
 //! must own the service root and authorize recovery through its live catalog.
 use super::*;
 
+pub(crate) struct RecoveryCut {
+    pub(crate) seq: u64,
+    pub(crate) checkpoint_bytes: usize,
+}
+
 /// Trusted recovery inspection, not a public document-reading bypass.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RecoveryIdentity {
@@ -21,6 +26,18 @@ fn digest(config: &RecordConfig, state: &State) -> Result<String, RecordError> {
     Ok(checkpoint_codec::digest(config, state)?.iter().map(|b| format!("{b:02x}")).collect())
 }
 impl RecordPartition {
+    /// The published cut and its admitted checkpoint size require no payload reads.
+    pub(crate) async fn recovery_cut(&self) -> Result<RecoveryCut, RecordError> {
+        let inner = self.inner.lock().await;
+        if !inner.healthy {
+            return Err(RecordError::RecoveryRequired);
+        }
+        Ok(RecoveryCut {
+            seq: inner.state.seq,
+            checkpoint_bytes: inner.snapshot_bytes,
+        })
+    }
+
     /// Inspect a healthy owner's identity without clearing any restore gate.
     /// The service must authenticate its trusted management caller separately.
     pub async fn recovery_identity(&self) -> Result<RecoveryIdentity, RecordError> {

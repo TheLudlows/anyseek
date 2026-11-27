@@ -260,16 +260,18 @@ fn fixed_searcher_does_not_adopt_an_unselected_internal_commit() {
     )
     .unwrap();
     let snapshot = package.open(&root.0, CUT, LIMIT).unwrap();
-    let index = NativeIndex::open_in_dir(root.0.join("lexical")).unwrap();
-    let mut writer = index
-        .writer_with_num_threads::<TantivyDocument>(1, WRITER_BYTES)
-        .unwrap();
-    writer.set_merge_policy(Box::new(NoMergePolicy));
-    let mut doc = TantivyDocument::default();
-    doc.add_text(snapshot.fields[0], "alpha");
-    writer.add_document(doc).unwrap();
-    writer.commit().unwrap();
-    writer.wait_merging_threads().unwrap();
+    let other = Temp::new();
+    Candidate::build(
+        &other.0,
+        CUT,
+        vec!["body".into()],
+        vec![input("a", 1, &["alpha"]), input("b", 1, &["alpha"])],
+        LIMIT,
+    ).unwrap();
+    for entry in std::fs::read_dir(other.0.join("lexical")).unwrap() {
+        let entry = entry.unwrap();
+        std::fs::copy(entry.path(), root.0.join("lexical").join(entry.file_name())).unwrap();
+    }
     let active = snapshot.active(CUT, &all(&snapshot)).unwrap();
     assert_eq!(active.bm25_probe(&AllQuery, 10, |_| true).unwrap().0, 1);
     assert!(package.open(&root.0, CUT, LIMIT).is_err());

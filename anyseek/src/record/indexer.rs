@@ -38,6 +38,7 @@ struct Plan {
     native:Option<anchor::NativeReuse>,
     intent:maintenance::Intent,
     remote:Option<remote_checkpoint::RemoteBuild>,
+    archive: Option<(local_archive::Policy, u64)>,
 }
 struct Candidate {
     state: State,
@@ -182,7 +183,8 @@ impl RecordPartition {
                         Some(anchor::NativeReuse::capture(&inner,admission).await?)
                     }else{None}
                 }else{None};
-                let source=if mode!=JobMode::VectorIndex {Some(maintenance::SourceCapture::capture(&inner)?)}else{None};
+                let archive = inner.archive.clone().map(|policy| (policy, inner.journal.generation()));
+                let source=if mode!=JobMode::VectorIndex || archive.is_some() {Some(maintenance::SourceCapture::capture(&inner)?)}else{None};
                 // Complete fallible local capture before acquiring the remote pin.
                 let snapshot={let _phase=maintenance::Phase::new("snapshot_clone_locked",inner.state.seq);
                     inner.state.try_clone().map_err(|e|storage(format!("stage=index_snapshot_clone {e}")))?};
@@ -204,12 +206,12 @@ impl RecordPartition {
                 }
                 let result = Plan {source,native,intent,root,config:inner.config.clone(),snapshot,prior:inner.payloads.clone(),
                     base,disk,memory,resources,
-                    remote};
+                    remote,archive};
                 inner.background = Some(Tail{id,entries:Vec::new(),bytes:0,max_bytes:tail_bytes,overflowed:false,revision:0});
                 result
             };
             let Plan{source,native,intent,root,config,mut snapshot,prior,base,disk,memory,resources:_resources,
-                remote} = plan;
+                remote,archive} = plan;
             let cut = snapshot.seq;
             #[cfg(any(test,feature="fault-injection"))]
             pause(&root,timeout).await;
@@ -224,7 +226,7 @@ impl RecordPartition {
                     anchor::pause_file_io_for_test(&root,"proof").await?;
                     let proof_io=crate::resources::io_scope(crate::resources::Lane::Background).journal_io().await.map_err(|_|RecordError::Busy)?;
                     proof_io.run_async(async {source.verify(&root,&config,&snapshot)}).await.map_err(|error| {
-                        if mode==JobMode::Compact && !matches!(error,RecordError::Busy) {
+                        if (mode==JobMode::Compact || archive.is_some()) && !matches!(error,RecordError::Busy) {
                             log::warn!("compact source authentication failed: {error}");
                             RecordError::RecoveryRequired
                         }else{error}
@@ -239,8 +241,29 @@ impl RecordPartition {
                     }
                     Some(source)
                 }else{None};
-                let source=if mode==JobMode::Compact {source}else{None};
+                let archive_generation = archive.as_ref().map(|(_, generation)| *generation);
+                let gc_epoch = if archive.is_some() { intent.archive_gc_epoch()? } else { None };
                 intent.apply(&mut snapshot,&config)?;
+                let (source, snapshot) = if let Some((archive, generation)) = archive {
+                    let source = source.ok_or(RecordError::RecoveryRequired)?;
+                    let archive_config = config.clone();
+                    let scope = crate::resources::io_scope(crate::resources::Lane::Background);
+                    let permit = scope.journal_io().await.map_err(|_| RecordError::Busy)?;
+                    let (source, snapshot) = crate::resources::spawn_blocking(move || {
+                        scope.run_sync(|| permit.run(|| {
+                            if let Err(error) = archive.archive_prefix(generation, &archive_config, &mut snapshot, &source, gc_epoch) {
+                                log::warn!("local_archive blocked checkpoint generation={generation} error={error}");
+                                return Err(error);
+                            }
+                            Ok::<_, RecordError>((Some(source), snapshot))
+                        }))
+                    }).await.map_err(storage)??;
+                    crash_boundary("archive_durable");
+                    (source, snapshot)
+                } else {
+                    (source, snapshot)
+                };
+                let source=if mode==JobMode::Compact {source}else{None};
                 let reference = if mode==JobMode::Compact {
                     let source=source.as_ref().ok_or(RecordError::RecoveryRequired)?;
                     anchor::Reference::prepare_captured(&root,&config,&snapshot,prior,source.anchor(),source.frames(),native.as_ref()).await?
@@ -254,7 +277,7 @@ impl RecordPartition {
                 // The pinned cut already owns complete history. Verify the
                 // authenticated package against it and transfer that same owner
                 // into the candidate instead of decoding a duplicate State.
-                let loaded = reference.load_captured(&root, config.clone(), snapshot).await?;
+                let loaded = reference.load_captured(&root, config.clone(), snapshot, remote.is_none()).await?;
                 #[cfg(test)]
                 if mode==JobMode::Compact && root.join(".test-anchor-reject-loaded").exists() {
                     return Err(storage("injected loaded candidate rejection before certificate"));
@@ -332,6 +355,9 @@ impl RecordPartition {
                     break (writer_guard,inner);
                 };
                 let _install_phase=maintenance::Phase::new("candidate_install_locked",inner.state.seq);
+                if archive_generation.is_some_and(|generation| generation != inner.journal.generation()) {
+                    return Err(RecordError::Busy);
+                }
                 let certificate = encode_entry(&Entry::Anchor(reference.clone()))?;
                 let suffix = &inner.background.as_ref().unwrap().entries;
                 // Bound the entire certificate+suffix before any authority publication.
@@ -376,7 +402,7 @@ impl RecordPartition {
                         let Inner { journal, background, .. } = &mut *inner;
                         let mut install = || {
                             #[cfg(test)] blocking_journal_pause(&journal_root);
-                            journal.checkpoint_with_tail(&certificate, &background.as_ref().unwrap().entries)
+                            journal.checkpoint_with_archive(&certificate, &background.as_ref().unwrap().entries, archive_generation)
                         };
                         match permit {
                             Ok(Some(permit)) => permit.run(install),
@@ -705,7 +731,8 @@ mod tests {
         let mut delete=write("delete","b","",ExpectedVersion::Match(1));delete.document=None;p.write(delete).await.unwrap();
         std::fs::remove_file(root.join(".test-indexer-pause")).unwrap();job.finish().await.unwrap();
         assert!(p.inner.lock().await.anchor.as_ref().unwrap().retained_packages().iter().any(|package|package.id==selected));
-        for mode in [SearchMode::Lexical,SearchMode::Vector{similarity_threshold:None,ann_mode:crate::vector_similarity::AnnMode::All}] {
+        for mode in [SearchMode::Lexical,SearchMode::Vector{similarity_threshold:None,ann_mode:crate::vector_similarity::AnnMode::All},
+            SearchMode::Hybrid{similarity_threshold:None,ann_mode:crate::vector_similarity::AnnMode::All,rrf:Default::default()}] {
             let result=query(&p,mode).await;assert_eq!(result.count_total,2);assert!(result.hits.iter().all(|hit|hit.record.record_id!="b"));
         }
         drop(p);let p=RecordPartition::open(&root,config().max_journal_bytes).await.unwrap();

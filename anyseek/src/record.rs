@@ -39,6 +39,8 @@ pub use committed::{CommittedBatch, CommittedItem, CommittedProgress, Independen
 mod index_consumers;
 mod publication;
 mod query;
+#[cfg(test)]
+mod disk_read_fixture;
 mod query_output;
 pub use query_output::QueryRecord;
 mod replay;
@@ -49,11 +51,14 @@ mod cache_merge;
 pub use indexer::IndexJob;
 mod segment_state;
 mod state_chunks;
+mod state_rows;
 mod state_memory;
 mod state_values;
 mod state_proof;
 mod capacity;
 mod snapshot;
+mod local_archive;
+pub use local_archive::{LocalArchivePart, LocalArchiveWindow};
 mod checkpoint_codec;
 mod segment;
 mod anchor;
@@ -284,7 +289,7 @@ struct State {
     expirations: Vec<temporal::Expiration>,
     records: state_values::Records,
     // Vec avoids JSON's restriction on structured map keys. Bounded by config.
-    operations: state_values::Values<Applied>,
+    operations: state_values::Operations,
     #[serde(skip)]
     operation_lookup: BTreeMap<OperationId, usize>,
     #[serde(skip)]
@@ -328,10 +333,13 @@ struct Inner {
     evaluation_time_ms: u64,
     output: Arc<std::sync::RwLock<output::OutputState>>,
     remote: Option<RemotePersistence>,
+    archive: Option<local_archive::Policy>,
     #[cfg(test)]
     fail_after_durable: bool,
     #[cfg(test)]
     fail_publication_stage: u8,
+    #[cfg(test)]
+    disk_read_fixture: Option<Arc<crate::storage::disk_records::View>>,
     // Fields drop in declaration order: release owned index/mmap handles before
     // this journal reference. Background native writers and their fixed readers
     // retain the same owner lock independently until their handles are gone.
@@ -733,23 +741,23 @@ impl Inner {
         }
         Ok(())
     }
-    fn statistics(&self) -> RecordStatistics {
-        RecordStatistics {
+    fn statistics(&self) -> Result<RecordStatistics, RecordError> {
+        let mut active_records = self.locations.len();
+        if self.state.records.may_have_due_ttl(self.evaluation_time_ms) {
+            active_records = 0;
+            self.state.records.scan(None, |id, row| {
+                active_records += usize::from(row.visible(self.evaluation_time_ms) && self.locations.contains_key(id));
+                Ok(true)
+            })?;
+        }
+        Ok(RecordStatistics {
             evaluation_time_ms: self.evaluation_time_ms,            visible_seq: self.state.seq,
-            // The conservative deadline bound can be early after an extension
-            // or deletion, never late. Only a definitely future bound skips the
-            // scan; due/uncertain TTL still uses the current visibility oracle.
-            active_records: if self.state.records.live_ttl_count() == 0
-                || !self.state.records.may_have_due_ttl(self.evaluation_time_ms)
-            { self.locations.len() } else {
-                self.locations.keys().filter(|id| self.state.records.get(id)
-                    .is_some_and(|r| temporal::visible(r, self.evaluation_time_ms))).count()
-            },
+            active_records,
             retained_identities: self.state.records.len(),
             retained_operations: self.state.operations.len().saturating_add(self.state.groups.as_ref().map_or(0, |g| g.receipts.len())),
             physical_versions: self.index.physical_versions,
             checkpoint_bytes: self.snapshot_bytes,
-        }
+        })
     }
 }
 
@@ -849,12 +857,24 @@ async fn build_at(path:&Path,cache:&Path,config:&RecordConfig,state:&State)->Res
     build_at_selected(path,cache,config,state,None).await
 }
 async fn build_at_selected(path:&Path,cache:&Path,config:&RecordConfig,state:&State,selected:Option<&std::collections::BTreeSet<String>>)->Result<(VectorIndexArc,Vec<String>),RecordError>{
-    let records = match selected {
-        Some(keys) => keys.iter().filter_map(|key| state.records.get(key))
-            .filter(|record| record.document.is_some()).collect(),
-        None => state.records.values().filter(|record| record.document.is_some()).collect(),
-    };
-    build_records_at(path,cache,config,state.seq,records).await
+    let records = crate::resources::file_transaction(|| -> Result<_, RecordError> {
+    let mut records = Vec::new();
+    match selected {
+        Some(keys) => {
+            for id in keys {
+                if let Some(row) = state.records.find(id)?.filter(state_values::CurrentRow::live) {
+                    records.push(row.load(id)?);
+                }
+            }
+        }
+        None => state.records.scan(None, |id, row| {
+            if row.live() { records.push(row.load(id)?); }
+            Ok(true)
+        })?,
+    }
+        Ok(records)
+    }).await.map_err(|_| RecordError::Busy)??;
+    build_records_at(path,cache,config,state.seq,records.iter().map(|record| &**record).collect()).await
 }
 async fn build_records_at(path:&Path,cache:&Path,config:&RecordConfig,sequence:u64,records:Vec<&Record>)->Result<(VectorIndexArc,Vec<String>),RecordError>{
     let disk_limit=config.max_journal_bytes.checked_mul(64).and_then(|n|n.checked_add(32*1024*1024)).ok_or_else(||storage("build disk limit overflow"))?;
@@ -924,18 +944,28 @@ fn validate_restored_state(config:&RecordConfig,state:&State)->Result<(),RecordE
     validate_config(config)?;
     // Older committed input must meet the same numerical contract before the
     // recovered partition becomes available or a cache rebuild is scheduled.
-    if matches!(config.index.inference, crate::vector::Inference::External { precision: crate::vector::Precision::F32,
+    if !state.records.has_sealed_base() && matches!(config.index.inference, crate::vector::Inference::External { precision: crate::vector::Precision::F32,
         similarity: crate::vector_similarity::VectorSimilarity::Euclidean, .. }) {
-        for record in state.records.values() {
-            if let Some(document) = &record.document {
+        state.records.scan(None, |id, row| {
+            if let Some(document) = &row.load(id)?.document {
                 crate::vector::validate_vectors_in_schema(&config.index.inference, config.schema.iter(), document)
                     .map_err(RecordError::Rejected)?;
             }
-        }
+            Ok(true)
+        })?;
     }
     temporal::validate_state(state)?;
     group_plan::validate(state)?;
     Ok(())
+}
+
+// An open owns its private cut. Validate file-backed rows under one loan after
+// native operations have returned, while no serving partition guard is held.
+async fn validate_open_authority(config: &RecordConfig, state: &State) -> Result<(), RecordError> {
+    crate::resources::file_transaction(|| {
+        validate_restored_state(config, state)?;
+        history::validate_state(state)
+    }).await.map_err(|_| RecordError::Busy)?
 }
 /// Retain only prefix minima of operation epoch in commit order. A receipt
 /// whose epoch is at least an earlier receipt's epoch can never change whether
@@ -1001,13 +1031,12 @@ fn apply_prepared(state: &mut State, applied: &Applied, prepared: Option<state_m
         || state.groups.as_ref().is_some_and(|groups| groups.receipt(&r.operation_id).is_some()) {
         return Err(storage("inconsistent committed operation identity"));
     }
-    let previous = state.records.get(&r.record_id);
-    if applied.receipt.version != previous.map_or(1, |r| if applied.request.vector_patch.is_some() { r.version } else { r.version.saturating_add(1) })
+    let prepared=prepared.ok_or_else(||storage("missing prepared value ownership"))?;
+    if applied.receipt.version != prepared.previous.map_or(1, |r| if applied.request.vector_patch.is_some() { r.version } else { r.version.saturating_add(1) })
     {
         return Err(storage("inconsistent committed record operation"));
     }
-    let prepared=prepared.ok_or_else(||storage("missing prepared value ownership"))?;
-    state.records.insert_shared(r.record_id.clone(),prepared.record)?;
+    state.records.replace_prepared(r.record_id.clone(),prepared.record,prepared.previous)?;
     state.operations.push_shared(prepared.operation)?;
     state.seq = applied.receipt.seq;
     state.epoch_watermark = state.epoch_watermark.max(applied.observed_epoch);
@@ -1062,7 +1091,7 @@ impl RecordPartition {
                 // Recover an interrupted create: the authority row may exist even if
                 // publishing its first bootstrap object previously failed.
                 let partition = if path.exists() {
-                    Self::open(path, config.max_journal_bytes).await?
+                    Self::open_remote_cache(path, config.max_journal_bytes).await?
                 } else {
                     Self::create(path, config).await?
                 };
@@ -1169,14 +1198,14 @@ impl RecordPartition {
                 journal.checkpoint(&anchor).map_err(creation_error)?;
             }
         }
-        let partition = Self::open(path,max_journal_bytes).await?;
+        let partition = Self::open_remote_cache(path,max_journal_bytes).await?;
         {
             let mut inner = partition.inner.lock().await;
             remote.reconcile_journal(&mut inner).await?;
             partition.indexes.immediate(inner.state.seq);
         }
         drop(partition);
-        let partition = Self::open(path, max_journal_bytes).await?;
+        let partition = Self::open_remote_cache(path, max_journal_bytes).await?;
         {
             let mut inner = partition.inner.lock().await;
             let head = remote.authority.lock().await.read_head(&remote.partition_id).map_err(storage)?
@@ -1356,10 +1385,13 @@ impl RecordPartition {
                 evaluation_time_ms: 0,
                 output,
                 remote: None,
+                archive: None,
                 #[cfg(test)]
                 fail_after_durable: false,
                 #[cfg(test)]
                 fail_publication_stage: 0,
+                #[cfg(test)]
+                disk_read_fixture: None,
             })),
             writer: Arc::new(Mutex::new(())),
             committed_queue: Arc::default(),
@@ -1369,31 +1401,44 @@ impl RecordPartition {
     /// Recover complete authoritative state before serving any query. The budget
     /// is supplied before reading files, not trusted from a potentially bad file.
     pub async fn open(path: &Path, max_journal_bytes: u64) -> Result<Self, RecordError> {
+        Self::open_partition(path, max_journal_bytes, true).await
+    }
+    async fn open_remote_cache(path: &Path, max_journal_bytes: u64) -> Result<Self, RecordError> {
+        Self::open_partition(path, max_journal_bytes, false).await
+    }
+    async fn open_partition(path: &Path, max_journal_bytes: u64, local: bool) -> Result<Self, RecordError> {
         let path = path.to_owned();
         // The owned task retains the journal lock until every indexing task has
         // drained, even if the caller cancels recovery.
-        crate::resources::spawn(async move { Self::open_owned(&path, max_journal_bytes).await })
+        crate::resources::spawn(async move { Self::open_owned(&path, max_journal_bytes, local).await })
             .await
             .map_err(storage)?
     }
 
-    async fn open_owned(path: &Path, max_journal_bytes: u64) -> Result<Self, RecordError> {
+    async fn open_owned(path: &Path, max_journal_bytes: u64, local: bool) -> Result<Self, RecordError> {
         #[cfg(test)] let _phase=maintenance::Phase::new("record_open_owned",0);
         let _frames = crate::storage::build_budget::reserve_memory(max_journal_bytes).map_err(storage)?;
         let (mut journal, entries) =
             PartitionJournal::open(path, max_journal_bytes).map_err(storage)?;
+        let archive = local_archive::Policy::load(path)?;
+        if !local && archive.is_some() {
+            return Err(RecordError::Rejected("an archive-enrolled Record root cannot be an S3 cache".into()));
+        }
         clean_recovery_caches(path)?;
         let mut entries = entries.into_iter();
         let first = entries
             .next()
             .ok_or_else(|| storage("missing initial checkpoint"))?;
         let mut pending=Vec::new();
-        let mut pending_decode=Vec::new();
         let first_decode = crate::storage::build_budget::reserve_memory((first.len() as u64).checked_mul(32).ok_or_else(||storage("initial frame estimate overflow"))?).map_err(storage)?;
         let (config,mut state,prepared,selected,payloads)=match serde_json::from_slice(&first).map_err(storage)? {
             Entry::Checkpoint{config,state}=>(config,state,None,None,Default::default()),
             Entry::Anchor(reference)=>{
-                let loaded=reference.load(path,max_journal_bytes).await?;
+                let loaded = if local {
+                    reference.load_local(path, max_journal_bytes).await?
+                } else {
+                    reference.load(path, max_journal_bytes).await?
+                };
                 (loaded.config,loaded.state,Some((loaded.index,loaded.ordinals,loaded.locations)),Some(reference),loaded.payloads)
             },
             _=>return Err(storage("missing initial checkpoint")),
@@ -1401,20 +1446,19 @@ impl RecordPartition {
         journal
             .restrict_budget(config.max_journal_bytes)
             .map_err(storage)?;
-        state.admit_bytes(checkpoint_codec::json_length(&state)?)?;
+        state.admit_bytes(state_proof::length(&state)?)?;
         drop(first_decode);
         restore_operation_lookup(&mut state)?;
-        state.admit_bytes(checkpoint_codec::json_length(&state)?)?;
+        state.admit_bytes(state_proof::length(&state)?)?;
         let recovery_started=Instant::now();
         let mut recovery_measure_us=0u128;
         let mut recovery_apply_us=0u128;
         for bytes in entries {
-            let _entry_decode = crate::storage::build_budget::reserve_memory((bytes.len() as u64).checked_mul(32).ok_or_else(||storage("tail decode estimate overflow"))?).map_err(storage)?;
             if selected.is_some() {
-                pending.push(serde_json::from_slice(&bytes).map_err(storage)?);
-                pending_decode.push(_entry_decode);
+                pending.push(bytes);
                 continue;
             }
+            let _entry_decode = crate::storage::build_budget::reserve_memory((bytes.len() as u64).checked_mul(32).ok_or_else(||storage("tail decode estimate overflow"))?).map_err(storage)?;
             let measure = Instant::now();
             let state_bytes = state.admit_replay_frame(bytes.len())?;
             recovery_measure_us += measure.elapsed().as_micros();
@@ -1435,9 +1479,8 @@ impl RecordPartition {
             }
         }
         log::info!("record_recovery stage=decoded seq={} elapsed_ms={} measure_us={recovery_measure_us} apply_us={recovery_apply_us}",state.seq,recovery_started.elapsed().as_millis());
-        validate_restored_state(&config,&state)?;
+        validate_open_authority(&config, &state).await?;
         let snapshot_bytes = checkpoint_codec::length(&config, &state)?;
-        history::validate_state(&state)?;
         log::info!("record_recovery stage=validated seq={} elapsed_ms={}",state.seq,recovery_started.elapsed().as_millis());
         let rebuild_in_packages = prepared.is_none() && state.records.len() > capacity::PACKAGE_RECORDS;
         let (mut index,mut ordinals,mut locations)=match prepared {
@@ -1477,14 +1520,20 @@ impl RecordPartition {
                 evaluation_time_ms: 0,
                 output:output.clone(),
                 remote: None,
+                archive,
                 #[cfg(test)]
                 fail_after_durable: false,
                 #[cfg(test)]
                 fail_publication_stage: 0,
+                #[cfg(test)]
+                disk_read_fixture: None,
             };
         let replayed_tail=!pending.is_empty();
-        for entry in pending {
-            inner.replay_anchor_tail(entry).await?;
+        for bytes in pending {
+            let size = (bytes.len() as u64).checked_mul(32)
+                .ok_or_else(|| storage("tail decode estimate overflow"))?;
+            let _decode = crate::storage::build_budget::reserve_memory(size).map_err(memory_error)?;
+            inner.replay_anchor_tail(serde_json::from_slice(&bytes).map_err(storage)?).await?;
             #[cfg(feature="fault-injection")]
             if std::env::var("ANYSEEK_RECOVERY_CRASH_SEQ").ok().and_then(|s|s.parse::<u64>().ok())==Some(inner.state.seq){std::process::abort();}
             #[cfg(test)]
@@ -1499,8 +1548,9 @@ impl RecordPartition {
             #[cfg(feature="fault-injection")]
             if std::env::var("ANYSEEK_RECOVERY_CRASH_STAGE").as_deref()==Ok("after_native_flush"){std::process::abort();}
         }
-        validate_restored_state(&inner.config,&inner.state)?;
-        history::validate_state(&inner.state)?;
+        #[cfg(test)]
+        query::pause(path, ".test-open-final-validation-pause").await?;
+        validate_open_authority(&inner.config, &inner.state).await?;
         inner.reclaim_anchor_objects().await?;
         let indexes = index_consumers::Cursors::recovered(inner.state.seq);
         Ok(Self {output,indexes,committed_queue:Arc::default(),writer:Arc::new(Mutex::new(())),inner:Arc::new(Mutex::new(inner)),admission:Arc::new(Semaphore::new(16))})
@@ -1555,12 +1605,47 @@ impl RecordPartition {
         if !inner.healthy {
             return Err(RecordError::RecoveryRequired);
         }
-        Ok(inner
-            .state
-            .records
-            .get(id)
-            .filter(|r| inner.locations.contains_key(&r.record_id) && temporal::visible(r,inner.evaluation_time_ms))
-            .cloned())
+        #[cfg(test)]
+        if let Some(pin) = disk_read_fixture::Pinned::capture(&inner)? {
+            let barrier = self.output_permit()?;
+            drop(inner);
+            let id = id.to_owned();
+            let (pin, row) = crate::resources::spawn_blocking(move || {
+                let row = pin.read(&id)?;
+                Ok::<_, RecordError>((pin, row))
+            }).await.map_err(storage)??;
+            let mut inner = self.inner.lock().await;
+            pin.validate(&mut inner)?;
+            return barrier.deliver(|| row.filter(|row| temporal::visible(row, inner.evaluation_time_ms)));
+        }
+        if !inner.locations.contains_key(id) {
+            return Ok(None);
+        }
+        if let Some(base) = inner.state.records.sealed_source(id) {
+            let barrier = self.output_permit()?;
+            let cut = inner.state.seq;
+            let evaluation = inner.evaluation_time_ms;
+            let read_id = id.to_owned();
+            let pinned = base.clone();
+            drop(inner);
+            let record = crate::resources::spawn_blocking(move || {
+                let row = pinned.checkpoint.find_sealed(&read_id).map_err(state_rows::read_error)?
+                    .ok_or_else(|| storage("published record missing from sealed directory"))?;
+                if !row.metadata.visible(evaluation) { return Ok(None); }
+                state_rows::decode(&read_id, row, |record| Ok(Some(record)))
+            }).await.map_err(storage)??;
+            let mut inner = self.inner.lock().await;
+            inner.observe_time()?;
+            // An unrelated write cannot change this key in a still selected
+            // base. A changed key or newer base requires a fresh observation.
+            if inner.state.seq != cut && !inner.state.records.sealed_source(id)
+                .is_some_and(|selected| Arc::ptr_eq(&base, &selected)) {
+                return Err(RecordError::Busy);
+            }
+            return barrier.deliver(|| record.filter(|row| temporal::visible(row, inner.evaluation_time_ms)));
+        }
+        Ok(inner.state.records.load(id)?.as_deref()
+            .filter(|row| temporal::visible(row, inner.evaluation_time_ms)).cloned())
     }
     /// Inspect visibility without returning stale/deleted original content.
     pub async fn record_status(&self, id: &str) -> Result<Option<RecordStatus>, RecordError> {
@@ -1568,10 +1653,10 @@ impl RecordPartition {
         let mut inner = self.inner.lock().await;
         inner.observe_time()?;
         if !inner.healthy { return Err(RecordError::RecoveryRequired); }
-        let Some(record) = inner.state.records.get(id) else { return Ok(None); };
-        let visibility = visibility::status(record,inner.evaluation_time_ms);
+        let Some(record) = inner.state.records.load(id)? else { return Ok(None); };
+        let visibility = visibility::status(&record,inner.evaluation_time_ms);
         let pending_vector_fields = inner.config.schema.iter().filter(|f| f.index_vector
-            && temporal::visible(record,inner.evaluation_time_ms) && record.document.as_ref().is_some_and(|d| !d.contains_key(&f.field))).map(|f| f.field.clone()).collect();
+            && temporal::visible(&record,inner.evaluation_time_ms) && record.document.as_ref().is_some_and(|d| !d.contains_key(&f.field))).map(|f| f.field.clone()).collect();
         Ok(Some(RecordStatus { evaluation_time_ms: inner.evaluation_time_ms, record_id: id.into(), version: record.version, visibility, pending_vector_fields, visible_seq: inner.state.seq }))
     }
     /// Search published caches outside the Record guard and reconcile bounded
@@ -1643,36 +1728,39 @@ impl RecordPartition {
                 "iterator view changed; restart traversal".into(),
             ));
         }
-        let expires_at_ms=if inner.state.records.live_ttl_count()==0 {None} else {
-            inner.state.records.values().filter(|r|temporal::visible(r,inner.evaluation_time_ms))
-                .filter_map(|r|r.temporal.expire_at_ms).min()
-        };
-        let start = cursor.map_or(std::ops::Bound::Unbounded, |c| {
-            std::ops::Bound::Excluded(c.after)
-        });
-        let mut rows = inner
-            .state
-            .records
-            .range((start, std::ops::Bound::Unbounded))
-            .filter(|(_, record)| inner.locations.contains_key(&record.record_id) && temporal::visible(record,inner.evaluation_time_ms));
-        let records: Vec<_> = rows
-            .by_ref()
-            .take(limit)
-            .map(|(_, record)| record.clone())
-            .collect();
-        let next = rows.next().and_then(|_| {
-            records.last().map(|record| RecordCursor {
-                visible_seq: inner.state.seq,
-                after: record.record_id.clone(),
-                expires_at_ms,
-            })
+        let mut expires_at_ms = None;
+        if inner.state.records.live_ttl_count() != 0 {
+            inner.state.records.scan(None, |_, row| {
+                if let Some(deadline) = row.temporal().expire_at_ms.filter(|_| row.visible(inner.evaluation_time_ms)) {
+                    expires_at_ms = Some(expires_at_ms.map_or(deadline, |old: u64| old.min(deadline)));
+                }
+                Ok(true)
+            })?;
+        }
+        let mut records = Vec::new();
+        let mut has_more = false;
+        inner.state.records.scan(cursor.as_ref().map(|c| c.after.as_str()), |id, row| {
+            if !row.visible(inner.evaluation_time_ms) || !inner.locations.contains_key(id) {
+                return Ok(true);
+            }
+            if records.len() == limit {
+                has_more = true;
+                return Ok(false);
+            }
+            records.push((*row.load(id)?).clone());
+            Ok(true)
+        })?;
+        let next = has_more.then(|| RecordCursor {
+            visible_seq: inner.state.seq,
+            after: records.last().unwrap().record_id.clone(),
+            expires_at_ms,
         });
         Ok(RecordPage {
             evaluation_time_ms: inner.evaluation_time_ms,
             visible_seq: inner.state.seq,
             records,
             next,
-            statistics: inner.statistics(),
+            statistics: inner.statistics()?,
         })
     }
 
@@ -1723,7 +1811,7 @@ impl RecordPartition {
         if !inner.healthy {
             return Err(RecordError::RecoveryRequired);
         }
-        Ok(inner.statistics())
+        inner.statistics()
     }
 
     /// Publish an authenticated state/index anchor, retaining canonical payload
@@ -2128,7 +2216,7 @@ mod tests {
         }
         clock.set(now+7*86_400_000);settle_maintenance(&p).await;
         let inner=p.inner.lock().await;assert!(inner.healthy);assert_eq!(inner.state.history.floor,0);
-        assert!(inner.state.records["t"].expired_at_ms.is_some());drop(inner);
+        assert!(inner.state.records.load("t").unwrap().unwrap().expired_at_ms.is_some());drop(inner);
         p.finish_service_shutdown().await.unwrap();drop(p);std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -2149,7 +2237,7 @@ mod tests {
         p.finish_service_shutdown().await.unwrap();drop(p); let p=RecordPartition::open(&root,config().max_journal_bytes).await.unwrap();
         let (clock,_)=test_clock(&p).await;
         assert!(p.get("plain").await.unwrap().is_none());
-        assert_eq!(p.inner.lock().await.state.records["plain"].version,2);
+        assert_eq!(p.inner.lock().await.state.records.load("plain").unwrap().unwrap().version,2);
         clock.set(now-300001); assert!(matches!(p.get("plain").await,Err(RecordError::ClockUncertain)));
         clock.set(now+101); assert!(p.get("plain").await.unwrap().is_none());
         let reuse=write("reuse","plain","beta",ExpectedVersion::Absent);
@@ -2209,10 +2297,10 @@ mod tests {
         }
         let browse=p.search(String::new(),None,SearchMode::Lexical,vec![],1).await.unwrap();assert_eq!(browse.hits[0].record.record_id,"b");
         assert_eq!(p.recovery_identity().await.unwrap(),before);
-        assert_eq!(p.inner.lock().await.state.records["a"].version,1);
+        assert_eq!(p.inner.lock().await.state.records.load("a").unwrap().unwrap().version,1);
         let receipt=p.write(write("unrelated","b","beta",ExpectedVersion::Match(1))).await.unwrap();
         assert_eq!(receipt.version,2,"unrelated expiry must not block ordinary writes");
-        assert_eq!(p.inner.lock().await.state.records["a"].version,1);
+        assert_eq!(p.inner.lock().await.state.records.load("a").unwrap().unwrap().version,1);
         p.finish_service_shutdown().await.unwrap();drop(p);std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -2367,8 +2455,8 @@ mod tests {
             request, epoch, epoch,
         ).unwrap() else { panic!("new operation") };
         apply(&mut state, &applied).unwrap();
-        strict(&state.records["s"]);
-        assert_eq!(state.records["s"].version, 1);
+        strict(&*state.records.load("s").unwrap().unwrap());
+        assert_eq!(state.records.load("s").unwrap().unwrap().version, 1);
     }
 
     #[tokio::test]
@@ -2408,7 +2496,7 @@ mod tests {
         let Entry::Applied(recovered) = serde_json::from_slice(&bytes).unwrap()
         else { panic!("expected applied decision"); };
         apply(&mut state, &recovered).unwrap();
-        assert_eq!(state.records["r"].version, 1);
+        assert_eq!(state.records.load("r").unwrap().unwrap().version, 1);
         assert_eq!(snapshot_bytes, encode_entry(&Entry::Checkpoint {
             config: config.clone(), state: state.clone(),
         }).unwrap().len());
@@ -2439,7 +2527,7 @@ mod tests {
             mutation::prepare(&state, &config, checkpoint_bytes, request.clone(), current_epoch()).unwrap()
         else { panic!("new operation"); };
         apply(&mut state, &applied).unwrap();
-        assert_eq!(state.records["r"].document, request.document);
+        assert_eq!(state.records.load("r").unwrap().unwrap().document, request.document);
         assert!(matches!(mutation::prepare(&state, &config, snapshot_bytes,
             request.clone(), current_epoch()), Ok(mutation::PreparedWrite::Replay(_))));
         let mut changed = request;
@@ -4175,7 +4263,7 @@ impl Inner {
                     let channels=if let Some(channel)=channel {vec![crate::search::ChannelExplanation{channel:channel.into(),rank:offset+rank,rank_basis:rank_basis.into(),raw_score:if channel=="browse"{None}else{Some(hit.score)},rrf_contribution:None}]}else{result.explanations.remove(&hit.doc_id).ok_or_else(||storage("hybrid candidate explanation missing"))?};
                     hits.push(RecordHit {
                         channels,
-                        record: QueryRecord::copy(&self.state.records[id], None)?,
+                        record: QueryRecord::copy(&self.state.records.load(id).unwrap().unwrap(), None)?,
                         score: hit.score,
                     });
                 }
@@ -4185,7 +4273,7 @@ impl Inner {
                     query_terms: result.query_terms,
                     visible_seq: self.state.seq,
                     hits,
-                    statistics: self.statistics(),
+                    statistics: self.statistics()?,
                 })
     }
 }

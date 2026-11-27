@@ -98,7 +98,43 @@ async fn local_sdk_owns_publishes_isolates_and_recovers() {
     engine.shutdown().await.unwrap();
     assert!(engine.version().is_err());
 
+    // Exercise the production checkpoint of this isolated SDK collection.
+    // The catalog must then cold-open the new root instead of rebuilding
+    // from the initial journal alone.
+    let collection_root = root.join("collections").join("1-tenant").join("policy");
+    let generations: Vec<_> = std::fs::read_dir(collection_root)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    let [generation] = generations.as_slice() else {
+        panic!("expected one isolated collection generation");
+    };
+    let partition = anyseek::record::RecordPartition::open(generation, 256 * 1024 * 1024)
+        .await
+        .unwrap();
+    assert_eq!(partition.compact_journal().await.unwrap(), 2);
+    partition.finish_service_shutdown().await.unwrap();
+    drop(partition);
+    assert!(std::fs::read_dir(generation).unwrap().any(|entry| {
+        let path = entry.unwrap().path();
+        path.join("primary-pages").is_file() && path.join("records-0000000000000000").is_file()
+    }));
+
     let reopened = LocalEngine::open(&root, false).await.unwrap();
+    let record = reopened
+        .get("1-tenant", "policy", "p1")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(record.version, 2);
+    assert_eq!(record.document.unwrap()["terms"], "subscription timeout");
+    assert!(
+        reopened
+            .get("1-tenant", "policy", "p2")
+            .await
+            .unwrap()
+            .is_none()
+    );
     let second = reopened
         .replace_group("1-tenant", "policy", replacement.clone())
         .await
@@ -144,6 +180,13 @@ async fn local_sdk_owns_publishes_isolates_and_recovers() {
     group_view(&reopened, "subscription", &[], 3).await;
     reopened.shutdown().await.unwrap();
     let reopened = LocalEngine::open(&root, false).await.unwrap();
+    assert!(
+        reopened
+            .get("1-tenant", "policy", "p1")
+            .await
+            .unwrap()
+            .is_none()
+    );
     assert_eq!(
         reopened
             .replace_group("1-tenant", "policy", withdrawal)

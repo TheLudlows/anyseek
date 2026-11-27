@@ -31,6 +31,21 @@ pub(super) fn full_length(config:&RecordConfig,state:&State)->Result<usize,Recor
     json_length(&BorrowedEntry::Checkpoint {config,state})
 }
 
+#[cfg(test)]
+pub(super) async fn assert_full_length(config: &RecordConfig, state: &State, expected: usize) -> Result<(), RecordError> {
+    // Sealed state gives the test oracle file reads that ordinary publication
+    // does not perform. Give them one independent file transaction.
+    let actual = if state.records.has_sealed_base() {
+        crate::resources::file_transaction(|| full_length(config, state))
+            .await
+            .map_err(|_| RecordError::Busy)??
+    } else {
+        full_length(config, state)?
+    };
+    assert_eq!(expected, actual);
+    Ok(())
+}
+
 /// Attempt-local encoding evidence. The borrow prevents changing this State
 /// while the evidence is reused; no seq-keyed or cross-publication cache exists.
 pub(super) struct StateEncoding<'a> {
@@ -42,6 +57,12 @@ impl<'a> StateEncoding<'a> {
     pub(super) fn new(state: &'a State) -> Result<Self, RecordError> {
         let (length, digest) = json_measure(state)?;
         Ok(Self { state, length, digest })
+    }
+    pub(super) async fn capture(state: &'a State) -> Result<Self, RecordError> {
+        if !state.records.has_sealed_base() {
+            return Self::new(state);
+        }
+        crate::resources::file_transaction(|| Self::new(state)).await.map_err(|_| RecordError::Busy)?
     }
     pub(super) fn state(&self) -> &'a State { self.state }
     pub(super) fn length(&self) -> usize { self.length }

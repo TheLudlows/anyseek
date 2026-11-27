@@ -1,6 +1,6 @@
 //! Immutable payload objects shared by successive authenticated state anchors.
 //! Authenticated partition publication selects a complete reference closure.
-use super::segment::{Descriptor, Reader, Writer};
+use super::segment::{Descriptor, PayloadRef, Reader, Writer};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -18,7 +18,7 @@ fn valid_id(id: &str) -> bool {
             .bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
-fn path(root: &Path, id: &str) -> io::Result<PathBuf> {
+pub(super) fn path(root: &Path, id: &str) -> io::Result<PathBuf> {
     if !valid_id(id) {
         return Err(invalid("invalid payload object identity"));
     }
@@ -46,6 +46,7 @@ pub(crate) struct Budget {
 }
 
 pub(crate) struct PoolReader {
+    root: PathBuf,
     closure: Closure,
     readers: BTreeMap<String, Reader>,
     budget: Budget,
@@ -86,10 +87,37 @@ impl PoolReader {
             );
         }
         Ok(Self {
+            root: root.into(),
             closure,
             readers,
             budget,
         })
+    }
+    pub(crate) fn root(&self) -> &Path {
+        &self.root
+    }
+    pub(crate) fn extent(&self, id: &str) -> io::Result<u64> {
+        self.closure.objects.get(id).map(|d| d.bytes)
+            .ok_or_else(|| invalid("payload object outside authenticated closure"))
+    }
+    pub(crate) fn object_paths(&self) -> impl Iterator<Item = io::Result<PathBuf>> + '_ {
+        self.closure.objects.keys().map(|id| path(&self.root, id))
+    }
+    pub(crate) fn metadata_bytes(&self) -> io::Result<u64> {
+        self.closure.objects.values().try_fold(0u64, |total, object| {
+            (object.payloads.len() as u64)
+                .checked_mul(256)
+                .and_then(|bytes| bytes.checked_add(1024))
+                .and_then(|bytes| total.checked_add(bytes))
+                .ok_or_else(|| invalid("payload reader metadata overflow"))
+        })
+    }
+    pub(crate) fn reference_len(&self, reference: &Reference) -> io::Result<usize> {
+        let payload = self.closure.objects.get(&reference.object)
+            .and_then(|object| object.payloads.get(reference.position))
+            .ok_or_else(|| invalid("payload reference outside authenticated closure"))?;
+        usize::try_from(payload.length).ok().filter(|len| *len <= self.budget.body_bytes)
+            .ok_or_else(|| invalid("payload reference length exceeds budget"))
     }
     pub fn read(&self, reference: &Reference) -> io::Result<Vec<u8>> {
         self.read_limited(reference, self.budget.body_bytes)
@@ -219,6 +247,17 @@ impl PoolBuilder {
             }
         }
     }
+    pub(crate) fn payload_ref(&self, reference: &Reference) -> io::Result<PayloadRef> {
+        if reference.object == self.id {
+            self.writer.as_ref().ok_or_else(|| invalid("missing prepared payload object"))?
+                .payload_ref(reference.position)
+        } else {
+            self.prior.closure.objects.get(&reference.object)
+                .and_then(|object| object.payloads.get(reference.position)).cloned()
+                .ok_or_else(|| invalid("payload reference outside authenticated closure"))
+        }
+    }
+
     pub fn finish(self) -> io::Result<Closure> {
         if self.poisoned {
             return Err(invalid("payload pool requires discard"));

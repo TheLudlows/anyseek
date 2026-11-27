@@ -244,6 +244,14 @@ fn protected_data<T: Serialize>(
     let data = response.extensions().get::<DataOutputPermit>().cloned();
     deliver(data.as_ref(), || response)
 }
+async fn protected_after_publication<T: Serialize>(
+    result: Result<T, Error>,
+    data: DataOutputPermit,
+) -> Result<Response, Error> {
+    let response = encode_data_response(result, Some(data))?;
+    let data = response.extensions().get::<DataOutputPermit>().cloned();
+    deliver_after_publication(data.as_ref(), || response).await
+}
 fn encode_data_response<T: Serialize>(
     result: Result<T, Error>, data: Option<DataOutputPermit>,
 ) -> Result<Response, Error> {
@@ -974,15 +982,8 @@ async fn read(
     Query(params): Query<GetDocumentRequest>,
 ) -> Result<Response, Error> {
     let key = s.authenticate(&headers).await?;
-    let p = s.record(&key, &id).await?;
-    let data = p.output_permit()?;
-    let result = s
-        .catalog
-        .authorized_generation(key, id, p.generation, move |_| async move { p.get(&record_id).await })
-        .await?;
-    let value = result
-        .map_err(Error::from)
-        .and_then(|record| record.ok_or_else(not_found))
+    let (result, data) = read_collection(&s, key, id, record_id).await?;
+    let value = result.ok_or_else(not_found)
         .map(|mut record| {
             if !params.fields.is_empty() {
                 let fields: Vec<_> = params.fields.split(',').collect();
@@ -992,7 +993,17 @@ async fn read(
             }
             record
         });
-    protected_data(value, Some(data))
+    protected_after_publication(value, data).await
+}
+async fn read_collection(
+    service: &Service, tenant: String, collection: String, record: String,
+) -> Result<(Option<anyseek::record::Record>, DataOutputPermit), Error> {
+    let partition = service.record(&tenant, &collection).await?;
+    let data = partition.output_permit_after_publication().await?;
+    let value = service.catalog.authorized_generation(
+        tenant, collection, partition.generation, move |_| async move { partition.get(&record).await },
+    ).await??;
+    Ok((value, data))
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1694,8 +1705,7 @@ async fn query(
     let request: SearchRequestObject = parse(&bytes)?;
     let key = s.authenticate(&headers).await?;
     let (result, data) = query_collection(&s, key, id, request, request_id).await?;
-    let response = encode_data_response(result, Some(data.clone()))?;
-    deliver_after_publication(Some(&data), || response).await
+    protected_after_publication(result, data).await
 }
 
 async fn query_collection(
@@ -2634,6 +2644,7 @@ mod tests {
     #[tokio::test]
     async fn service_data_fence_preserves_persistence_errors() {
         use http_body::Body as _;
+        use tower::ServiceExt;
         // Isolate the existing fault environment from parallel service tests.
         if std::env::var_os("ANYSEEK_SERVICE_FENCE_CHILD").is_none() {
             for count in [1,2] {
@@ -2651,6 +2662,7 @@ mod tests {
         assert!(matches!(count,1|2));
         let (service,path,headers)=setup().await;
         let record=service.record("tenant","c").await.unwrap();
+        seed_existing_point(&record).await;
         let data=record.output_permit_after_publication().await.unwrap();
         assert!(data.deliver(||()).is_ok());
         let prepared_bodies=[
@@ -2662,7 +2674,7 @@ mod tests {
             {"operation_id":OperationId::new("service-fence-tail".into()),"record_id":"s","expected":"Absent","document":{"body":"beta"}}
         ]});
         request["writes"].as_array_mut().unwrap().truncate(count);
-        let response=batch(State(service.clone()),headers,Path("c".into()),serde_json::to_vec(&request).unwrap().into()).await.unwrap();
+        let response=batch(State(service.clone()),headers.clone(),Path("c".into()),serde_json::to_vec(&request).unwrap().into()).await.unwrap();
         let value:Value=serde_json::from_slice(&axum::body::to_bytes(response.into_body(),4096).await.unwrap()).unwrap();
         assert_eq!(value["results"].as_array().unwrap().len(),count);
         assert!(value["results"].as_array().unwrap().iter().all(|r|r["code"]=="durable_pending"));
@@ -2670,12 +2682,17 @@ mod tests {
         assert!(matches!(record.output_permit_after_publication().await,Err(RecordError::RecoveryRequired)));
         assert_eq!(data.deliver_after_publication(||()).await,Err(RecordError::RecoveryRequired));
         assert!(matches!(record.output_permit(),Err(RecordError::RecoveryRequired)));
+        let response = router(service.clone()).oneshot(existing_point_request(&headers)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let value: Value = serde_json::from_slice(&axum::body::to_bytes(response.into_body(), MAX_RESPONSE).await.unwrap()).unwrap();
+        assert_eq!(value["code"], "recovery_required");
+        assert!(value.get("document").is_none());
         assert!(protected_data(Ok(json!({"body":"must not escape"})),Some(data.clone())).is_err());
         assert!(protected_data::<Value>(Err(bad("ordinary error")),Some(data.clone())).is_err());
         for mut body in prepared_bodies {
             assert!(matches!(std::future::poll_fn(|cx|Pin::new(&mut body).poll_frame(cx)).await,Some(Err(_))));
         }
-        for error in [RecordError::DurablePending(count as u64),RecordError::OutcomeUnknown("injected".into())] {
+        for error in [RecordError::DurablePending(1 + count as u64),RecordError::OutcomeUnknown("injected".into())] {
             let response=protected_data::<Value>(Err(error.clone().into()),Some(data.clone())).unwrap();
             assert_eq!(response.status(),StatusCode::SERVICE_UNAVAILABLE);
             let value:Value=serde_json::from_slice(&axum::body::to_bytes(response.into_body(),4096).await.unwrap()).unwrap();
@@ -2687,14 +2704,36 @@ mod tests {
     }
 
     #[cfg(feature = "fault-injection")]
+    async fn seed_existing_point(record: &RecordPartition) {
+        let write = serde_json::from_value(json!({
+            "operation_id": OperationId::new("seed-get".into()),
+            "record_id": "existing",
+            "expected": "Absent",
+            "document": {"body": "existing"}
+        })).unwrap();
+        record.write(write).await.unwrap();
+    }
+
+    #[cfg(feature = "fault-injection")]
+    fn existing_point_request(headers: &HeaderMap) -> axum::http::Request<Body> {
+        axum::http::Request::builder()
+            .uri("/api/v1/index/c/doc/existing?fields=body")
+            .header("apikey", headers["apikey"].clone())
+            .header(TENANT_HEADER, "tenant")
+            .body(Body::empty())
+            .unwrap()
+    }
+
+    #[cfg(feature = "fault-injection")]
     #[tokio::test]
-    async fn service_query_headers_and_body_wait_for_publication() {
+    async fn service_query_and_point_headers_and_body_wait_for_publication() {
         use tower::ServiceExt;
         use http_body::Body as _;
         let (service, path, headers) = setup().await;
         let entry = service.catalog.collection_entry("tenant", "c").await.unwrap();
         let root = path.join(entry.directory());
         let record = service.record("tenant", "c").await.unwrap();
+        seed_existing_point(&record).await;
         let app = router(service.clone());
         let make_query = || axum::http::Request::builder().method("POST").uri("/api/v1/index/c/query")
             .header("apikey", headers["apikey"].clone()).header(TENANT_HEADER,"tenant").header("content-type", "application/json")
@@ -2702,6 +2741,9 @@ mod tests {
         let prepared = app.clone().oneshot(make_query()).await.unwrap();
         let mut body = prepared.into_body();
         let mut abandoned = app.clone().oneshot(make_query()).await.unwrap().into_body();
+        let prepared_point = app.clone().oneshot(existing_point_request(&headers)).await.unwrap();
+        assert_eq!(prepared_point.status(), StatusCode::OK);
+        let mut point_body = prepared_point.into_body();
         let pause = root.join(".test-lexical-consumer-pause");
         std::fs::write(&pause, b"pause").unwrap();
         let owner = record.clone();
@@ -2718,10 +2760,14 @@ mod tests {
             std::future::poll_fn(|cx|Pin::new(&mut body).poll_frame(cx))).await.is_err());
         assert!(tokio::time::timeout(std::time::Duration::from_millis(20),
             std::future::poll_fn(|cx|Pin::new(&mut abandoned).poll_frame(cx))).await.is_err());
+        assert!(tokio::time::timeout(std::time::Duration::from_millis(20),
+            std::future::poll_fn(|cx|Pin::new(&mut point_body).poll_frame(cx))).await.is_err());
         drop(abandoned);
         assert!(!writer.is_finished());
-        let mut reader = tokio::spawn(app.oneshot(make_query()));
+        let mut reader = tokio::spawn(app.clone().oneshot(make_query()));
+        let mut point = tokio::spawn(app.oneshot(existing_point_request(&headers)));
         assert!(tokio::time::timeout(std::time::Duration::from_millis(20), &mut reader).await.is_err());
+        assert!(tokio::time::timeout(std::time::Duration::from_millis(20), &mut point).await.is_err());
         std::fs::remove_file(pause).unwrap();
         assert!(tokio::time::timeout(std::time::Duration::from_secs(5), writer).await.unwrap().unwrap().unwrap().stop.is_none(),
             "an unpolled body must not retain the publication mutex");
@@ -2733,6 +2779,14 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let value: Value = serde_json::from_slice(&axum::body::to_bytes(response.into_body(), MAX_RESPONSE).await.unwrap()).unwrap();
         assert_eq!(value["count"], 2);
+        let response = point.await.unwrap().unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        for body in [point_body, response.into_body()] {
+            let value: Value = serde_json::from_slice(&axum::body::to_bytes(body, MAX_RESPONSE).await.unwrap()).unwrap();
+            assert_eq!(value["record_id"], "existing");
+            assert_eq!(value["version"], 1);
+            assert_eq!(value["document"], json!({"body":"existing"}));
+        }
         drop(body); drop(record);
         service.shutdown().wait().await.unwrap();
         std::fs::remove_dir_all(path).unwrap();
@@ -2744,12 +2798,15 @@ mod tests {
         use tower::ServiceExt;
         use http_body::Body as _;
         use std::time::Duration;
-        for stage in ["header", "body", "late-body"] {
+        for stage in ["header", "body", "late-body", "point"] {
             let (mut service, path, headers) = setup().await;
             Arc::get_mut(&mut service).unwrap().request_timeout = Duration::from_millis(50);
             let entry = service.catalog.collection_entry("tenant", "c").await.unwrap();
             let root = path.join(entry.directory());
             let record = service.record("tenant", "c").await.unwrap();
+            if stage == "point" {
+                seed_existing_point(&record).await;
+            }
             let data = record.output_permit_after_publication().await.unwrap();
             let entered = Arc::new(std::sync::atomic::AtomicBool::new(false));
             let app = if stage == "header" {
@@ -2769,7 +2826,7 @@ mod tests {
             let make_query = || axum::http::Request::builder().method("POST").uri("/api/v1/index/c/query")
                 .header("apikey", headers["apikey"].clone()).header(TENANT_HEADER,"tenant").header("content-type", "application/json")
                 .body(Body::from(r#"{"query":"alpha"}"#)).unwrap();
-            let mut body = if stage != "header" {
+            let mut body = if matches!(stage, "body" | "late-body") {
                 Some(app.clone().oneshot(make_query()).await.unwrap().into_body())
             } else { None };
             let pause = root.join(".test-lexical-consumer-pause");
@@ -2784,9 +2841,10 @@ mod tests {
             tokio::time::timeout(Duration::from_secs(5), async {
                 while !root.join(".test-lexical-consumer-started").exists() { tokio::task::yield_now().await; }
             }).await.unwrap();
-            if stage == "header" {
-                let response = tokio::time::timeout(Duration::from_millis(500), app.clone().oneshot(make_query())).await.unwrap().unwrap();
-                assert!(entered.load(std::sync::atomic::Ordering::Acquire));
+            if matches!(stage, "header" | "point") {
+                let request = if stage == "point" { existing_point_request(&headers) } else { make_query() };
+                let response = tokio::time::timeout(Duration::from_millis(500), app.clone().oneshot(request)).await.unwrap().unwrap();
+                if stage == "header" { assert!(entered.load(std::sync::atomic::Ordering::Acquire)); }
                 assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
                 let value: Value = serde_json::from_slice(&axum::body::to_bytes(response.into_body(), MAX_RESPONSE).await.unwrap()).unwrap();
                 assert_eq!(value["code"], "outcome_unknown");
@@ -2816,7 +2874,7 @@ mod tests {
             std::fs::remove_file(pause).unwrap();
             assert!(tokio::time::timeout(Duration::from_secs(5), writer).await.unwrap().unwrap().unwrap().stop.is_none());
             let progress = record.committed_progress().await;
-            assert_eq!(progress.committed_seq, Some(2));
+            assert_eq!(progress.committed_seq, Some(if stage == "point" { 3 } else { 2 }));
             assert!(!progress.recovery_required && progress.index_error.is_none());
             drop(record); drop(app);
             tokio::time::timeout(Duration::from_secs(5), service.shutdown().wait()).await.unwrap().unwrap();

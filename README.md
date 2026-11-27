@@ -32,7 +32,7 @@ npm run dev
 
 ## 嵌入式 Rust SDK
 
-依赖 `anyseek` 库，使用 `anyseek::sdk::LocalEngine` 打开本地 Catalog。调用方为每次操作提供已授权的租户和集合。可以创建集合、用稳定的操作 ID 原子替换一组 Record，并按文本或向量查询。重新打开目录之前，等待 `shutdown()` 完成。SDK 使用本地磁盘，并对根目录加独占锁。
+依赖 `anyseek` 库，使用 `anyseek::sdk::LocalEngine` 打开本地 Catalog。调用方为每次操作提供已授权的租户和集合。可以创建集合、用稳定的操作 ID 原子替换一组 Record、用 `get` 按 ID 读回 Record，并按文本或向量查询。重新打开目录之前，等待 `shutdown()` 完成。SDK 使用本地磁盘，并对根目录加独占锁。
 
 如果宿主需要标准的 `serde_json` 对象字段顺序，请使用 `default-features = false`。快照编解码器独立保留已存储的字段顺序，不受宿主 JSON map 的影响。独立服务默认构建启用 `ordered-json`。禁用默认 feature 的独立服务仍可加上 `--features ordered-json`，保留相同的 JSON 字段顺序。重新打开或恢复 Catalog 时，请保持所用的构建 feature 与 Catalog 版本相匹配。
 
