@@ -55,10 +55,16 @@ def run_child(case, binary, folder, cpus):
     if case == "startup_exception":
         identify = evidence.server_pids
 
+        fail = True
+
         def fail_after_ready(*args):
-            _, pid = identify(*args)
-            checkpoint(server.p.pid, pid)
-            raise RuntimeError("startup regression sentinel")
+            nonlocal fail
+            result = identify(*args)
+            if fail:
+                fail = False
+                checkpoint(server.p.pid, result[1])
+                raise RuntimeError("startup regression sentinel")
+            return result
 
         with patch.object(evidence, "server_pids", fail_after_ready), server:
             raise AssertionError("unexpected startup success")
@@ -67,6 +73,8 @@ def run_child(case, binary, folder, cpus):
     with server:
         pid = service_pid(server)
         signal.pidfd_send_signal(server.server_fd, signal.SIGSTOP)
+        # Keep the tracer from reaping before the forced-wait checkpoint.
+        server.p.send_signal(signal.SIGSTOP)
         graceful_signal = signal.pidfd_send_signal
         wait = server.p.wait
 
@@ -111,6 +119,7 @@ def verify(case, binary, folder, cpus, sibling):
                 if child_checkpoint(child) != [tracer, service]:
                     raise AssertionError("shutdown switched process identity")
                 child.send_signal(signal.SIGINT)
+                signal.pidfd_send_signal(handles[0], signal.SIGCONT)
                 child.stdin.write(b"continue\n")
                 child.stdin.flush()
             expected = 1 if case == "startup_exception" else -signal.SIGINT
@@ -120,8 +129,14 @@ def verify(case, binary, folder, cpus, sibling):
                 raise AssertionError(f"{case}: expected exit {expected}, got {status}")
             if len(select.select(handles, [], [], 0)[0]) != len(handles):
                 raise AssertionError(f"{case}: tracer or service still running after runner exit")
+            for pid in (tracer, service):
+                try:
+                    os.kill(pid, 0)
+                except ProcessLookupError:
+                    continue
+                raise AssertionError(f"{case}: exited PID {pid} was not reaped")
             sibling.call("GET", "/api/v1/live")
-            print(f"{case}: exit {status}, owned tracer and service exited, sibling HTTP live", flush=True)
+            print(f"{case}: exit {status}, owned tracer and service reaped, sibling HTTP live", flush=True)
         finally:
             if child.poll() is None:
                 child.kill()

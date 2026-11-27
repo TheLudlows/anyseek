@@ -108,21 +108,24 @@ class TracedServer(LocalServer):
                 except (OSError, http.client.HTTPException):
                     time.sleep(.05)
                 else:
-                    self.proc_pid, pid = server_pids(binary, folder / "live")
                     with defer_sigint():
-                        fd = os.pidfd_open(pid)
-                        try:
-                            if os.getpgid(pid) != self.p.pid or select.select([fd], [], [], 0)[0]:
-                                raise RuntimeError("live server is outside the owned trace process group")
-                        except BaseException:
-                            os.close(fd)
-                            raise
-                        self.server_fd = fd
+                        self.open_server_fd()
                     return self
             raise RuntimeError(f"traced server did not start; see {folder / 'server.log'}")
         except BaseException:
             self.close(abort=True)
             raise
+
+    def open_server_fd(self):
+        proc_pid, pid = server_pids(self.binary, self.folder / "live")
+        fd = os.pidfd_open(pid)
+        try:
+            if os.getpgid(pid) != self.p.pid or select.select([fd], [], [], 0)[0]:
+                raise RuntimeError("live server is outside the owned trace process group")
+        except BaseException:
+            os.close(fd)
+            raise
+        self.proc_pid, self.server_fd = proc_pid, fd
 
     def __exit__(self, exc_type, _exception, _traceback):
         self.close(abort=exc_type is not None)
@@ -132,14 +135,10 @@ class TracedServer(LocalServer):
             return
         with defer_sigint() as interrupted:
             tracer = self.p
-            fd = self.server_fd
             timed_out = False
             try:
-                if not abort and fd is not None and tracer.poll() is None:
-                    try:
-                        signal.pidfd_send_signal(fd, signal.SIGKILL if crash else signal.SIGTERM)
-                    except ProcessLookupError:
-                        pass
+                if not abort and self.server_fd is not None and tracer.poll() is None:
+                    self.signal_server(signal.SIGKILL if crash else signal.SIGTERM)
                     deadline = time.monotonic() + 20
                     while tracer.poll() is None and not interrupted():
                         remaining = deadline - time.monotonic()
@@ -148,33 +147,52 @@ class TracedServer(LocalServer):
                             break
                         time.sleep(min(.05, remaining))
             finally:
-                # Popen still owns the unreaped session leader here. Use its
-                # private group even when startup failed before finding the server.
-                if tracer.poll() is None:
-                    try:
-                        os.killpg(tracer.pid, signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass
-                if fd is not None and not select.select([fd], [], [], 0)[0]:
-                    try:
-                        signal.pidfd_send_signal(fd, signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass
-                deadline = time.monotonic() + 5
-                try:
-                    tracer.wait(timeout=5)
-                    if fd is not None and not select.select([fd], [], [], max(0, deadline - time.monotonic()))[0]:
-                        raise TimeoutError("owned traced server remained alive after shutdown")
-                finally:
-                    self.p = None
-                    if fd is not None:
-                        os.close(fd)
-                        self.server_fd = None
+                self.reap(tracer)
             if timed_out:
                 raise TimeoutError("owned tracer exceeded its 20-second shutdown deadline")
             expected = -signal.SIGKILL if crash else 0
             if not abort and not interrupted() and tracer.returncode != expected:
                 raise RuntimeError(f"traced server exited {tracer.returncode}, expected {expected}")
+
+    def signal_server(self, signum):
+        try:
+            signal.pidfd_send_signal(self.server_fd, signum)
+        except ProcessLookupError:
+            pass
+
+    def reap(self, tracer):
+        deadline = time.monotonic() + 5
+        try:
+            if tracer.poll() is None and self.server_fd is None:
+                # Startup may have failed after exec but before recording the
+                # server. Only acquire a handle after checking the private group.
+                try:
+                    self.open_server_fd()
+                except (OSError, RuntimeError):
+                    pass
+            if self.server_fd is not None and not select.select([self.server_fd], [], [], 0)[0]:
+                self.signal_server(signal.SIGKILL)
+            if self.server_fd is not None and tracer.poll() is None:
+                # Let strace reap the killed service before terminating strace.
+                try:
+                    tracer.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    pass
+            if tracer.poll() is None:
+                # Popen still owns this unreaped private session leader.
+                try:
+                    os.killpg(tracer.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                tracer.wait(timeout=max(0, deadline - time.monotonic()))
+            if self.server_fd is not None and not select.select(
+                    [self.server_fd], [], [], max(0, deadline - time.monotonic()))[0]:
+                raise TimeoutError("owned traced server remained alive after shutdown")
+        finally:
+            self.p = None
+            if self.server_fd is not None:
+                os.close(self.server_fd)
+                self.server_fd = None
 
 
 @contextmanager
