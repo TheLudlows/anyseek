@@ -56,7 +56,11 @@ impl Service {
         &self,
         deadline: Instant,
     ) -> Result<Arc<OwnedRwLockReadGuard<()>>, Error> {
-        tokio::time::timeout_at(deadline, self.cold.disk.clone().read_owned())
+        let open = self.cold.disk.clone().read_owned();
+        if self.master_verifier.is_none() {
+            return Ok(Arc::new(open.await));
+        }
+        tokio::time::timeout_at(deadline, open)
             .await
             .map(Arc::new)
             .map_err(|_| RecordError::Busy.into())
@@ -106,10 +110,14 @@ impl Service {
             return;
         };
         let disk = disk.clone();
+        #[cfg(test)]
+        let service = self.clone();
         tokio::spawn(activity.run(async move {
             // Hold the physical open/backup gate across native shutdown and
             // destruction. No Catalog or service write lock is taken here.
             let _disk = disk;
+            #[cfg(test)]
+            service.cold.test.before_retire.wait().await;
             match retirement.value().finish_service_shutdown().await {
                 Ok(()) => {
                     if let Err(error) =

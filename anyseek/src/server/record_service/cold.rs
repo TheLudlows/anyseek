@@ -81,13 +81,9 @@ impl Service {
         let key = entry.scope();
         let generation = entry.generation;
         let queued = Instant::now();
-        let deadline = self.residency_deadline();
-        let retirement_deadline = residency::pressure_deadline(deadline);
+        let retirement_deadline = residency::pressure_deadline(self.residency_deadline());
         let mut changes = self.records.changes();
         loop {
-            if Instant::now() >= deadline {
-                return Err(RecordError::Busy.into());
-            }
             let next = self
                 .records
                 .with_lookup(&key, |lookup| -> Result<Next, Error> {
@@ -132,6 +128,8 @@ impl Service {
             match next {
                 Next::Ready(record) => return Ok(record),
                 Next::Retiring => {
+                    #[cfg(test)]
+                    self.cold.test.retirement_waiters.increment();
                     if !Residency::<RecordPartition>::wait_for_change(
                         &mut changes,
                         retirement_deadline,
@@ -144,14 +142,13 @@ impl Service {
                 Next::Opening(mut completion) => {
                     #[cfg(test)]
                     self.cold.test.waiters.increment();
-                    let result =
-                        tokio::time::timeout_at(deadline, completion.wait_for(Option::is_some))
-                            .await
-                            .map_err(|_| RecordError::Busy)?
-                            .map_err(|_| storage("collection opener exited without a result"))?
-                            .as_ref()
-                            .unwrap()
-                            .clone();
+                    let result = completion
+                        .wait_for(Option::is_some)
+                        .await
+                        .map_err(|_| storage("collection opener exited without a result"))?
+                        .as_ref()
+                        .unwrap()
+                        .clone();
                     log::debug!(
                         "cold collection wait generation={generation} elapsed_ms={}",
                         queued.elapsed().as_millis()

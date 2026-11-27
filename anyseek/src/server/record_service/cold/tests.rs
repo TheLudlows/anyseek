@@ -60,10 +60,12 @@ pub(in crate::server::record_service) struct Hooks {
     pub(in crate::server::record_service) preflight: PauseNext,
     pub(in crate::server::record_service) before_install: PauseNext,
     pub(in crate::server::record_service) backup_snapshot: PauseNext,
+    pub(in crate::server::record_service) before_retire: PauseNext,
     pub(in crate::server::record_service) backup_waiters: Counter,
     pub(in crate::server::record_service) attempts: Counter,
     pub(in crate::server::record_service) installs: Counter,
     pub(in crate::server::record_service) waiters: Counter,
+    pub(in crate::server::record_service) retirement_waiters: Counter,
 }
 
 async fn reached(milestone: oneshot::Receiver<()>) {
@@ -305,6 +307,52 @@ async fn residency_pressure_preserves_whole_service_backup_capture() {
     let (status, body) = tokio::time::timeout(WAIT, backup).await.unwrap().unwrap();
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["snapshot"]["record_seqs"][&scope], 1);
+    drop(app);
+    service.shutdown().wait().await.unwrap();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn concurrent_cold_reads_wait_for_retirement_then_share_the_reopen() {
+    use crate::storage::build_budget::{reserve_memory, shared_memory_usage};
+
+    let (service, root, headers) = super::super::tests::setup().await;
+    let app = router(service.clone());
+    write_fixture(&app, &headers).await;
+    let scope = service
+        .catalog
+        .collection_entry("tenant", "c")
+        .await
+        .unwrap()
+        .scope();
+    let (entered, release) = service.cold.test.before_retire.pause_next();
+    let (used, shared) = shared_memory_usage().unwrap();
+    service.records.set_budget_for_test(used);
+    let pressure = reserve_memory(1024).unwrap();
+    service.evict_over_budget();
+    reached(entered).await;
+    assert!(matches!(service.records.lookup(&scope), Lookup::Retiring));
+
+    let path = "/api/v1/index/c/doc/fixture";
+    let first = tokio::spawn(call(app.clone(), headers.clone(), "GET", path, None));
+    let second = tokio::spawn(call(app.clone(), headers, "GET", path, None));
+    service.cold.test.retirement_waiters.until(2).await;
+    assert_eq!(service.cold.test.attempts.get(), 0);
+    service.records.set_budget_for_test(shared);
+    drop(pressure);
+    release.send(()).unwrap();
+
+    for task in [first, second] {
+        let (status, body) = tokio::time::timeout(WAIT, task).await.unwrap().unwrap();
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["document"]["body"], "cold text");
+    }
+    assert_eq!(service.cold.test.attempts.get(), 1);
+    assert_eq!(service.cold.test.installs.get(), 1);
+    assert!(matches!(
+        service.records.lookup(&scope),
+        Lookup::Open { .. }
+    ));
     drop(app);
     service.shutdown().wait().await.unwrap();
     std::fs::remove_dir_all(root).unwrap();
