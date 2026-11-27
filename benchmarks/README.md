@@ -14,8 +14,8 @@ results. Common execution code lives here:
 - `shared_record_http.py`: disposable Record server lifecycle, transport, bounded
   explicit Busy retries, receipt consistency and file hashes. Query alignment and
   write-cost share it; workload generation, public-cursor checks and sampling
-  remain in their experiment entry points. Allocation preload paths remain local
-  to the caller's experiment. Query alignment retains thread-local HTTP status.
+  remain in their experiment entry points. HTTP status is stored per thread.
+  See [single-node acceptance](single-node/README.md) for #229.
 - `shared_http_engine.py`: the existing capacity/tokenizer engine abstraction,
   including cross-engine configuration. It has a different API and workload
   contract; it is not folded into the Record transport.
