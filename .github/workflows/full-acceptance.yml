@@ -111,60 +111,28 @@ jobs:
         run: |
           uname -a
           findmnt -T "$GITHUB_WORKSPACE" -o SOURCE,FSTYPE,TARGET
-      - name: Native journal and child-process crash tests
-        run: cargo test -p anyseek --lib journal_
-      - name: Native partition publication and owner-lock tests
-        run: cargo test -p anyseek --lib partition_
-      - name: Native Tantivy admission, fixed readers, cancellation and package pins
-        run: |
-          cargo test -p anyseek --lib record::lexical::
-      - name: Native vector and metadata component format
-        run: |
-          cargo test -p anyseek --lib component::
+      - name: Native default-feature unit contracts (Windows)
+        if: runner.os == 'Windows'
+        # Linux default-feature unit tests run in build-and-smoke. Libtest runs
+        # each Windows case once even if several filters match its name.
+        run: >-
+          cargo test -p anyseek --lib --
+          journal_ partition_ record::lexical:: component:: record::tests
+          record::indexer::tests sqlite_authority::index_build::tests
+          background_index expired_remote_index catalog_ verified_cache
+          cache_corruption record_service::tests resources::tests resource_
       - name: Native fault-feature module and service contracts
         if: runner.os != 'Windows'
-        # Linux integration targets run once in build-and-smoke (server, no faults).
-        # Keep fault-feature lib/bin coverage here; Windows still runs integration.
+        # Linux default-feature integration targets run in build-and-smoke.
         run: cargo test -p anyseek --lib --bins --features fault-injection
-      - name: Verify Windows lexical partition
-        if: runner.os == 'Windows'
-        run: python scripts/check_lexical_partition.py
-      - name: Native retained public Record integration contracts (Windows remainder)
-        if: runner.os == 'Windows'
-        # The four exact large cases run below on independent Windows runners.
-        run: cargo test -p anyseek --tests --features fault-injection -- --skip five_term_union_scores_and_topk_prefix_ --skip mixed_term_membership_scores_and_query_order_
-      - name: Native service without optional features
-        run: cargo test -p anyseek --no-default-features --lib --bins
+      - name: Native SDK, service and feature contracts without optional features
+        run: |
+          cargo test -p anyseek --no-default-features --bins --test local_sdk --test tokenizer_profiles --test text_normalization
+          cargo test -p anyseek --no-default-features --lib -- record::state_chunks::tests::chunks_preserve_records_receipts_opaque_json_and_owned_residency server::record_service::diagnostic_tests::
       - name: Native documentation without optional features
         run: cargo test -p anyseek --no-default-features --doc
       - name: Native default documentation
         run: cargo test -p anyseek --doc
-      - name: Native record replay, snapshot and response-loss tests
-        run: cargo test -p anyseek --lib record::tests
-      - name: Native bounded background index and fenced cut publication
-        shell: bash
-        run: |
-          cargo test -p anyseek --lib record::indexer::tests
-          cargo test -p anyseek --lib sqlite_authority::index_build::tests
-          # indexer::tests already ran with these same features above.
-          cargo test -p anyseek --lib background_index -- --skip record::indexer::tests
-          cargo test -p anyseek --lib expired_remote_index
-      - name: Native catalog authorization and revocation recovery tests
-        run: cargo test -p anyseek --lib catalog_
-      - name: Native verified object cache corruption, eviction and cold recovery
-        shell: bash
-        run: |
-          cargo test -p anyseek --lib verified_cache
-          cargo test -p anyseek --lib cache_corruption
-      - name: Native service output and admission barriers
-        # Linux server coverage belongs to build-and-smoke workspace all-targets.
-        if: runner.os == 'Windows'
-        run: cargo test -p anyseek record_service::tests
-      - name: Native collection budgets and cancellation ownership (Windows)
-        if: runner.os == 'Windows'
-        run: cargo test -p anyseek --lib resources::tests
-      - name: Native object buffer leases
-        run: cargo test -p anyseek --lib resource_
       - name: Build native service
         if: runner.os == 'Windows'
         run: cargo build -p anyseek
@@ -206,6 +174,33 @@ jobs:
           else
             python3 scripts/record_service_smoke.py --server target/debug/anyseek_server --faults --section authorization
           fi
+
+  windows-fault-tests:
+    name: Windows fault-injection (${{ matrix.suite }})
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [unit, integration]
+    runs-on: windows-latest
+    timeout-minutes: 120
+    env:
+      ANYSEEK_TEST_ROOT: ${{ github.workspace }}/target/p1-native-data
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Native fault-feature module and service contracts
+        if: matrix.suite == 'unit'
+        run: cargo test -p anyseek --lib --bins --features fault-injection
+      - name: Verify Windows lexical partition
+        if: matrix.suite == 'integration'
+        run: python scripts/check_lexical_partition.py
+      - name: Native retained public Record integration contracts (Windows remainder)
+        if: matrix.suite == 'integration'
+        # The four exact large cases run below on independent Windows runners.
+        run: >-
+          cargo test -p anyseek --test '*' --features fault-injection --
+          --skip five_term_union_scores_and_topk_prefix_
+          --skip mixed_term_membership_scores_and_query_order_
 
   windows-lexical:
     name: Windows lexical (${{ matrix.test }})
@@ -249,8 +244,8 @@ jobs:
         run: mkdir -p target/s3-native-data
       - name: Build explicit fault-injection service
         run: cargo build -p anyseek --features fault-injection
-      # Same-feature remote_checkpoint library tests belong to persistence-native:
-      # Linux --lib --bins and Windows --tests (which includes library unit tests).
+      # Same-feature remote_checkpoint library tests run in persistence-native
+      # on Linux and windows-fault-tests on Windows.
       - name: Immutable object and joint-backup contract (HTTP fixture)
         shell: bash
         run: |
