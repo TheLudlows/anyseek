@@ -250,6 +250,11 @@ impl VectorBlock {
                 return Err(invalid_vector("vector record exceeds read window"));
             }
             file.read_exact_at(start, &mut bytes[..count])?;
+            #[cfg(test)]
+            if let Some(work) = QueryWork::current() {
+                work.vector_visits.vector_ranges.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                work.vector_visits.vector_bytes.fetch_add(count, std::sync::atomic::Ordering::Relaxed);
+            }
             self.start = start;
             self.loaded = count;
         }
@@ -281,6 +286,11 @@ impl VectorBlock {
             .filter(|end| *end <= self.file_len && count <= bound.saturating_add(1))
             .ok_or_else(|| vector_io(invalid_vector("invalid vector cluster count")))?;
         if let Some(work) = work { work.charge(count)?; }
+        #[cfg(test)]
+        if let Some(work) = work {
+            work.vector_visits.levels.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            work.vector_visits.header_clusters.fetch_add(count, std::sync::atomic::Ordering::Relaxed);
+        }
         // Includes the query's downstream probe heap and selected cluster list.
         let _memory = admit_memory((count as u64) * 128, Scope::current().as_ref())?;
         let mut clusters = Vec::with_capacity(count);
@@ -531,6 +541,14 @@ pub(crate) struct TopK<'a> {
 }
 
 impl TopK<'_> {
+    fn charge_selection(&self, work: Option<&QueryWork>) -> Result<(), RecordError> {
+        if let Some(work) = work {
+            // push can scan every retained item, plus two rank comparisons.
+            work.charge(self.len + 2)?;
+        }
+        Ok(())
+    }
+
     fn new(
         k: usize,
         similarity_threshold_option: Option<f32>,
@@ -1341,6 +1359,7 @@ impl VectorSegment {
         facets: &mut FacetReader<'_>,
         top_k: &mut TopK<'_>,
         work: Option<(&QueryWork, usize)>,
+        ann_work: Option<&QueryWork>,
     ) -> Result<(), RecordError> {
         let level_id = if self.is_last_level_incomplete {
             self.vector_levels - 1
@@ -1352,11 +1371,17 @@ impl VectorSegment {
 
         for record in self.block_vector_buffer.iter() {
             if let Some((work, row_cost)) = work { work.charge(row_cost)?; }
+            #[cfg(test)]
+            if let Some((work, _)) = work {
+                work.vector_visits.tail_members.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
             let doc_id = (level_id << 16) | (record.doc_id as usize);
             if self.is_deleted(doc_id) || is_facet_filter(facets, facet_filter, doc_id)? {
                 continue;
             }
             if field_filter_set.is_empty() || field_filter_set.contains(&(record.field_id as u16)) {
+                if let Some(work) = ann_work { work.charge(self.vector_dimensions.div_ceil(64))?; }
+                top_k.charge_selection(ann_work)?;
                 let scale_norm = if enable_scale {
                     Some((
                         scale,
@@ -1424,6 +1449,7 @@ impl SearchVectorSegment for VectorSegmentArc {
         let shard_ref = self.read().await;
         if shard_ref.failed { return Err(RecordError::RecoveryRequired); }
         if let Some(work) = work { work.charge(1)?; }
+        let ann_work = work.filter(|_| ann_mode != AnnMode::All);
         let _strict_workspace = if let Some(work) = work {
             let bytes = crate::metadata_filter::metered_workspace_bytes(&shard_ref, &facet_filter, work)?;
             let bytes = bytes.checked_add((length as u64).saturating_mul(256))
@@ -1462,6 +1488,9 @@ impl SearchVectorSegment for VectorSegmentArc {
         let vector_similarity = shard_ref.vector_similarity;
         let vector_dimensions = shard_ref.vector_dimensions;
         let (vector_type, vector_size) = shard_ref.vector_layout();
+        if let Some(work) = ann_work {
+            work.charge(length.saturating_add(vector_dimensions.div_ceil(64)))?;
+        }
 
         let query_embedding = query_vector.unwrap();
 
@@ -1497,6 +1526,7 @@ impl SearchVectorSegment for VectorSegmentArc {
                     &mut facets,
                     &mut top_k,
                     work.map(|work| (work, row_cost)),
+                    ann_work,
                 )?;
         }
 
@@ -1519,11 +1549,17 @@ impl SearchVectorSegment for VectorSegmentArc {
                 && (shard_ref.vector_similarity != VectorSimilarity::Cosine || shard_ref.quantization == Quantization::TurboQuantI8);
             let selected_clusters: Vec<(u32, u32, f32, ClusterHeader)> = if ann_mode != AnnMode::All
             {
+                if let Some(work) = ann_work { work.charge(n_probe)?; }
                 let mut top_k_medoid =
                     TopK::new(n_probe, cluster_similarity_threshold, vector_similarity, similarity_normalization);
                 for (cluster_id, cluster) in clusters.iter().enumerate() {
                     if cluster.child_count == 0 { continue; }
-                    if let Some(work) = work { work.charge(1)?; }
+                    if let Some(work) = ann_work { work.charge(1 + vector_dimensions.div_ceil(64))?; }
+                    top_k_medoid.charge_selection(ann_work)?;
+                    #[cfg(test)]
+                    if let Some(work) = work {
+                        work.vector_visits.medoids.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
                     let medoid_offset = level.rows_start + u64::from(cluster.start_index) * vector_size as u64;
                     let medoid_record = read_record(
                         buffer.read(&shard_ref.vector_file, medoid_offset, vector_size).map_err(vector_io)?,
@@ -1578,8 +1614,16 @@ impl SearchVectorSegment for VectorSegmentArc {
                     );
                 }
 
-                top_k_medoid.items[..top_k_medoid.len]
-                    .sort_by(|a, b| min_heap::rank_ordering(b.score, b.doc_id, a.score, a.doc_id));
+                let medoids = &mut top_k_medoid.items[..top_k_medoid.len];
+                let compare = |a: &Item, b: &Item| min_heap::rank_ordering(b.score, b.doc_id, a.score, a.doc_id);
+                if let Some(work) = ann_work {
+                    #[cfg(test)]
+                    work.vector_visits.remaining_after_medoids.store(work.remaining(), std::sync::atomic::Ordering::Relaxed);
+                    crate::search::sort_with_work(medoids, work, compare)?;
+                    work.charge(medoids.len())?;
+                } else {
+                    medoids.sort_by(compare);
+                }
 
                 let num_cluster = top_k_medoid.len;
 
@@ -1602,6 +1646,10 @@ impl SearchVectorSegment for VectorSegmentArc {
             };
 
             observed_cluster_count += selected_clusters.len();
+            #[cfg(test)]
+            if let Some(work) = work {
+                work.vector_visits.clusters.fetch_add(selected_clusters.len(), std::sync::atomic::Ordering::Relaxed);
+            }
 
             let _zero_hit_count = 0;
             for (cluster_id, _level_id2, cluster_score, cluster) in selected_clusters.iter() {
@@ -1612,6 +1660,10 @@ impl SearchVectorSegment for VectorSegmentArc {
                 unsafe {
                     for i in 0..cluster_vectors_count {
                         if let Some(work) = work { work.charge(row_cost)?; }
+                        #[cfg(test)]
+                        if let Some(work) = work {
+                            work.vector_visits.sealed_members.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        }
                         let record = read_record(
                             buffer.read(&shard_ref.vector_file, cluster_offset + i as u64 * vector_size as u64, vector_size).map_err(vector_io)?,
                             vector_dimensions,
@@ -1628,6 +1680,8 @@ impl SearchVectorSegment for VectorSegmentArc {
                         if field_filter_set.is_empty()
                             || field_filter_set.contains(&(record.header.field_id as u16))
                         {
+                            if let Some(work) = ann_work { work.charge(vector_dimensions.div_ceil(64))?; }
+                            top_k.charge_selection(ann_work)?;
                             let scale_norm = if enable_scale {
                                 Some((
                                     query_embedding.1,
@@ -1685,7 +1739,14 @@ impl SearchVectorSegment for VectorSegmentArc {
         }
 
         if let Some(work) = work { work.charge(0)?; }
-        top_k.items[..top_k.len].sort_by(|a, b| shard_ref.rank(b.score, b.doc_id, a.score, a.doc_id));
+        let compare = |a: &Item, b: &Item| shard_ref.rank(b.score, b.doc_id, a.score, a.doc_id);
+        let items = &mut top_k.items[..top_k.len];
+        if let Some(work) = ann_work {
+            crate::search::sort_with_work(items, work, compare)?;
+            work.charge(items.len())?;
+        } else {
+            items.sort_by(compare);
+        }
 
         for item in top_k.items[..top_k.len].iter() {
             let result = min_heap::Result {

@@ -23,6 +23,22 @@ pub(crate) struct QueryWork {
     statistics_postings: AtomicUsize,
     #[cfg(test)]
     statistics_usage: std::sync::Mutex<Option<LexicalStatisticsUsage>>,
+    #[cfg(test)]
+    pub(crate) vector_visits: VectorVisits,
+}
+
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct VectorVisits {
+    pub(crate) levels: AtomicUsize,
+    pub(crate) header_clusters: AtomicUsize,
+    pub(crate) medoids: AtomicUsize,
+    pub(crate) clusters: AtomicUsize,
+    pub(crate) sealed_members: AtomicUsize,
+    pub(crate) tail_members: AtomicUsize,
+    pub(crate) vector_ranges: AtomicUsize,
+    pub(crate) vector_bytes: AtomicUsize,
+    pub(crate) remaining_after_medoids: AtomicUsize,
 }
 
 #[cfg(test)]
@@ -50,6 +66,8 @@ impl QueryWork {
             statistics_postings: AtomicUsize::new(0),
             #[cfg(test)]
             statistics_usage: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            vector_visits: Default::default(),
         }
     }
 
@@ -161,6 +179,25 @@ impl QueryWork {
             self.bytes.load(Ordering::Relaxed),
         )
     }
+}
+
+/// Stable insertion sort with one shared work unit per comparison/swap.
+/// A refusal leaves an intermediate order that the caller must discard.
+pub(crate) fn sort_with_work<T>(
+    items: &mut [T],
+    work: &QueryWork,
+    mut compare: impl FnMut(&T, &T) -> std::cmp::Ordering,
+) -> std::result::Result<(), RecordError> {
+    for end in 1..items.len() {
+        for slot in (1..=end).rev() {
+            work.charge(1)?;
+            if !compare(&items[slot - 1], &items[slot]).is_gt() {
+                break;
+            }
+            items.swap(slot - 1, slot);
+        }
+    }
+    Ok(())
 }
 
 /// Specifies the default QueryType: The following query types are supported:
@@ -546,6 +583,25 @@ pub(crate) async fn search_with_counts(
         {
             return Err(RecordError::Rejected("vector search requires a positive, bounded result window".into()));
         }
+        let ann_work = work.as_deref().filter(|_| matches!(&search_mode,
+            SearchMode::Vector { ann_mode, .. } if *ann_mode != AnnMode::All));
+        if let Some(work) = ann_work {
+            if !field_filter.is_empty() || !result_sort.is_empty() {
+                return Err(RecordError::Rejected("metered ANN requires score-ordered Top-K over the configured vector fields".into()));
+            }
+            let SearchMode::Vector { ann_mode: AnnMode::Nprobe(probes), .. } = &search_mode else {
+                return Err(RecordError::Rejected("metered ANN requires a positive nprobe".into()));
+            };
+            let Some(Embedding::F32(values)) = &query_vector else {
+                return Err(RecordError::Rejected("metered ANN requires an unquantized F32 embedding".into()));
+            };
+            if *probes == 0 || index_ref.quantization != Quantization::None {
+                return Err(RecordError::Rejected("metered ANN requires a positive nprobe and unquantized F32 vectors".into()));
+            }
+            // Charge normalization and per-shard copies before doing either.
+            let units = values.len().div_ceil(64);
+            work.charge(2 * units + index_ref.segments.len().saturating_mul(1 + units))?;
+        }
         let query_vector = if index_ref.is_vector_indexing
         {
             Some(if let Some(mut qv) = query_vector {
@@ -763,7 +819,12 @@ pub(crate) async fn search_with_counts(
         }
         let shards = futures::future::join_all(index_ref.segments.iter().map(|segment| segment.vector.read())).await;
         if let Some(work) = &work { work.charge(0)?; }
-        result.results.sort_by(|a,b| crate::min_heap::rank_with_segments(&shards,b.score,b.doc_id,a.score,a.doc_id));
+        let compare = |a: &Result, b: &Result| crate::min_heap::rank_with_segments(&shards,b.score,b.doc_id,a.score,a.doc_id);
+        if let Some(work) = ann_work {
+            sort_with_work(&mut result.results, work, compare)?;
+        } else {
+            result.results.sort_by(compare);
+        }
         result.results.truncate(offset + length);
         let sorts = result_sort.iter().filter_map(|sort| Some(ResultSortIndex {
             idx: match sort.field.as_str() { "_id" => usize::MAX, "_score" => usize::MAX-1,

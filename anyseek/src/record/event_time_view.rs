@@ -66,7 +66,7 @@ impl From<TimeVectorQuery> for TimeMixedQuery {
 
 enum RetrievalLane {
     Lexical(String),
-    Vector(Embedding),
+    Vector(Embedding, crate::vector_similarity::AnnMode),
 }
 
 /// Ranked time and retrieval hits from one authorized Record cut.
@@ -320,22 +320,9 @@ fn rank_fused(
     let mut ranked: Vec<_> = fused.into_iter().collect();
     // With at most 128 entries, insertion sort has a bound of 8,128
     // comparison/swap steps. Check the shared budget before each step.
-    for end in 1..ranked.len() {
-        for pos in (1..=end).rev() {
-            work.charge(1)?;
-            let (left_id, left) = &ranked[pos - 1];
-            let (right_id, right) = &ranked[pos];
-            if !right
-                .score
-                .total_cmp(&left.score)
-                .then_with(|| left_id.cmp(right_id))
-                .is_gt()
-            {
-                break;
-            }
-            ranked.swap(pos - 1, pos);
-        }
-    }
+    crate::search::sort_with_work(&mut ranked, work, |(a, left), (b, right)| {
+        right.score.total_cmp(&left.score).then_with(|| a.cmp(b))
+    })?;
     Ok(ranked)
 }
 
@@ -434,7 +421,7 @@ impl RecordPartition {
                 rrf.keyword_weight,
             ),
             (
-                vector.map(RetrievalLane::Vector),
+                vector.map(|vector| RetrievalLane::Vector(vector, crate::vector_similarity::AnnMode::All)),
                 "vector",
                 rrf.vector_weight,
             ),
@@ -615,6 +602,36 @@ impl RecordPartition {
             MIXED_READ_BYTES,
             deadline,
         ));
+        let (window, candidates) = self
+            .probe_metered_vector_cut(
+                window,
+                limit,
+                Embedding::F32(vec![1.0, 0.0]),
+                crate::vector_similarity::AnnMode::All,
+                facets,
+                deadline,
+                work.clone(),
+            )
+            .await?;
+        let mut ids: Vec<_> = candidates
+            .into_iter()
+            .map(|candidate| candidate.id)
+            .collect();
+        ids.sort_unstable();
+        Ok((window, ids, work_limit - work.remaining()))
+    }
+
+    #[cfg(test)]
+    pub(super) async fn probe_metered_vector_cut(
+        &self,
+        window: Range<i64>,
+        limit: usize,
+        vector: Embedding,
+        mode: crate::vector_similarity::AnnMode,
+        facets: Vec<FacetFilter>,
+        deadline: Deadline,
+        work: Arc<QueryWork>,
+    ) -> Result<(Window, Vec<query::RetrievalEvidence>), RecordError> {
         let (view, output) = self
             .capture_and_read(
                 window,
@@ -633,7 +650,7 @@ impl RecordPartition {
         let (view, candidates) = self
             .read_retrieval_candidates(
                 view,
-                RetrievalLane::Vector(Embedding::F32(vec![1.0, 0.0])),
+                RetrievalLane::Vector(vector, mode),
                 facets,
                 limit,
                 deadline,
@@ -644,16 +661,11 @@ impl RecordPartition {
             .iter()
             .filter_map(|candidate| candidate.expiry)
             .min();
-        let mut ids: Vec<_> = candidates
-            .into_iter()
-            .map(|candidate| candidate.id)
-            .collect();
-        ids.sort_unstable();
         let window = self
             .deliver_window(view, output, deadline, expiry)
             .await
             .map_err(EventTimeError::record_error)?;
-        Ok((window, ids, work_limit - work.remaining()))
+        Ok((window, candidates))
     }
 
     // Exercise real native postings at the common cut without exposing the
@@ -714,7 +726,7 @@ impl RecordPartition {
             query::blocking_pause(
                 &view.root,
                 match &lane {
-                    RetrievalLane::Vector(_) => ".test-event-time-vector-worker-pause",
+                    RetrievalLane::Vector(..) => ".test-event-time-vector-worker-pause",
                     RetrievalLane::Lexical(_) => ".test-event-time-lexical-worker-pause",
                 },
             )?;
@@ -745,14 +757,14 @@ impl RecordPartition {
                                 )
                                 .await
                             }
-                            RetrievalLane::Vector(vector) => {
+                            RetrievalLane::Vector(vector, ann_mode) => {
                                 crate::search::search_with_counts(
                                     index,
                                     String::new(),
                                     Some(vector),
                                     SearchMode::Vector {
                                         similarity_threshold: None,
-                                        ann_mode: crate::vector_similarity::AnnMode::All,
+                                        ann_mode,
                                     },
                                     0,
                                     limit,
