@@ -720,7 +720,6 @@ impl RecordPartition {
         work: Arc<QueryWork>,
     ) -> Result<(View, crate::search::ResultObject), RecordError> {
         let runtime = tokio::runtime::Handle::current();
-        let scorer_work = work.clone();
         let worker = crate::resources::spawn_blocking(move || {
             #[cfg(test)]
             query::blocking_pause(
@@ -730,59 +729,57 @@ impl RecordPartition {
                     RetrievalLane::Lexical(_) => ".test-event-time-lexical-worker-pause",
                 },
             )?;
-            let result = scorer_work.clone().with_reads(|| {
-                runtime.block_on(async {
-                    let mut filters = facets;
-                    filters.push(temporal::expiry_filter(view.evaluation));
-                    let index = &view.retrieval.as_ref().unwrap().index;
-                    timeout_at(deadline, async move {
-                        match lane {
-                            RetrievalLane::Lexical(text) => {
-                                lexical::runtime_query::search(
-                                    index,
-                                    text,
-                                    None,
-                                    SearchMode::Lexical,
-                                    QueryType::Union,
-                                    0,
-                                    limit,
-                                    ResultType::TopkCount,
-                                    vec![],
-                                    filters,
-                                    vec![],
-                                    lexical::Cut {
-                                        sequence: view.cut,
-                                        evaluation_time_ms: view.evaluation,
-                                    },
-                                )
-                                .await
-                            }
-                            RetrievalLane::Vector(vector, ann_mode) => {
-                                crate::search::search_with_counts(
-                                    index,
-                                    String::new(),
-                                    Some(vector),
-                                    SearchMode::Vector {
-                                        similarity_threshold: None,
-                                        ann_mode,
-                                    },
-                                    0,
-                                    limit,
-                                    ResultType::TopkCount,
-                                    true,
-                                    vec![],
-                                    filters,
-                                    vec![],
-                                    &mut Vec::new(),
-                                    Some(scorer_work),
-                                )
-                                .await
-                            }
+            let result = runtime.block_on(async {
+                let mut filters = facets;
+                filters.push(temporal::expiry_filter(view.evaluation));
+                let index = &view.retrieval.as_ref().unwrap().index;
+                timeout_at(deadline, async move {
+                    match lane {
+                        RetrievalLane::Lexical(text) => {
+                            work.with_async_reads(lexical::runtime_query::search(
+                                index,
+                                text,
+                                None,
+                                SearchMode::Lexical,
+                                QueryType::Union,
+                                0,
+                                limit,
+                                ResultType::TopkCount,
+                                vec![],
+                                filters,
+                                vec![],
+                                lexical::Cut {
+                                    sequence: view.cut,
+                                    evaluation_time_ms: view.evaluation,
+                                },
+                            ))
+                            .await
                         }
-                    })
-                    .await
-                    .map_err(|_| RecordError::Busy)?
+                        RetrievalLane::Vector(vector, ann_mode) => {
+                            crate::search::search_with_counts(
+                                index,
+                                String::new(),
+                                Some(vector),
+                                SearchMode::Vector {
+                                    similarity_threshold: None,
+                                    ann_mode,
+                                },
+                                0,
+                                limit,
+                                ResultType::TopkCount,
+                                true,
+                                vec![],
+                                filters,
+                                vec![],
+                                &mut Vec::new(),
+                                Some(work),
+                            )
+                            .await
+                        }
+                    }
                 })
+                .await
+                .map_err(|_| RecordError::Busy)?
             });
             result.map(|result| (view, result))
         });

@@ -76,6 +76,11 @@ impl QueryWork {
         QUERY_READS.sync_scope(self, work)
     }
 
+    /// Bind the meter for every poll of a future, including after it awaits.
+    pub(crate) async fn with_async_reads<F: std::future::Future>(self: Arc<Self>, future: F) -> F::Output {
+        QUERY_READS.scope(self, future).await
+    }
+
     pub(crate) fn current() -> Option<Arc<Self>> {
         QUERY_READS.try_with(Arc::clone).ok()
     }
@@ -562,9 +567,20 @@ pub(crate) async fn search_with_counts(
     component_counts: &mut Vec<usize>,
     work: Option<Arc<QueryWork>>,
 ) -> std::result::Result<ResultObject, RecordError> {
+    if work.as_ref().is_some_and(|supplied| {
+        QUERY_READS.try_with(|active| !Arc::ptr_eq(active, supplied)).unwrap_or(false)
+    }) {
+        return Err(RecordError::Rejected("vector search read budget does not match the supplied query budget".into()));
+    }
+    let query = async {
         if let Some(work) = &work { work.charge(0)?; }
         if !matches!(search_mode, SearchMode::Vector { .. }) {
             return Err(RecordError::Rejected("vector component cannot execute lexical queries".into()));
+        }
+        let ann_work = work.as_deref().filter(|_| matches!(&search_mode,
+            SearchMode::Vector { ann_mode, .. } if *ann_mode != AnnMode::All));
+        if ann_work.is_some() && result_type == ResultType::Count {
+            return Err(RecordError::Rejected("metered ANN does not support count-only search".into()));
         }
         let index_ref = index.read().await;
         if let Err(error) =
@@ -583,8 +599,6 @@ pub(crate) async fn search_with_counts(
         {
             return Err(RecordError::Rejected("vector search requires a positive, bounded result window".into()));
         }
-        let ann_work = work.as_deref().filter(|_| matches!(&search_mode,
-            SearchMode::Vector { ann_mode, .. } if *ann_mode != AnnMode::All));
         if let Some(work) = ann_work {
             if !field_filter.is_empty() || !result_sort.is_empty() {
                 return Err(RecordError::Rejected("metered ANN requires score-ordered Top-K over the configured vector fields".into()));
@@ -838,4 +852,11 @@ pub(crate) async fn search_with_counts(
         if let Some(work) = &work { work.charge(0)?; }
         component_counts.extend(counts);
         Ok(result)
+    };
+    // Metered shards are polled in this task, on the caller's owned worker.
+    // Bind the same budget for their file leaves without caller setup.
+    match work.as_ref() {
+        Some(work) => work.clone().with_async_reads(query).await,
+        None => query.await,
+    }
 }

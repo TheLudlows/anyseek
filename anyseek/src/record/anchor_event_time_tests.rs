@@ -387,6 +387,140 @@ async fn metered_ann_uses_canonical_versions_expiry_and_worker_admission() {
     );
 }
 
+#[tokio::test]
+async fn metered_ann_binds_read_budget_and_refuses_count_only() {
+    let temp = tempfile::tempdir().unwrap();
+    let p = ann_fixture(&temp.path().join("records"), 1, 2, 24, None).await;
+    let handle = p.inner.lock().await.index.capture_query(2).await.unwrap();
+    let runtime = tokio::runtime::Handle::current();
+    let call = |work, ambient: Option<Arc<QueryWork>>, result_type, length| {
+        let index = handle.index.clone();
+        let runtime = runtime.clone();
+        crate::resources::spawn_blocking(move || {
+            let run = || {
+                runtime.block_on(async move {
+                    let mut counts = vec![usize::MAX];
+                    let result = crate::search::search_with_counts(
+                        &index,
+                        String::new(),
+                        Some(Embedding::F32(ann_embedding(0))),
+                        SearchMode::Vector {
+                            similarity_threshold: None,
+                            ann_mode: AnnMode::Nprobe(1),
+                        },
+                        0,
+                        length,
+                        result_type,
+                        true,
+                        vec![],
+                        vec![],
+                        vec![],
+                        &mut counts,
+                        work,
+                    )
+                    .await;
+                    (result, counts)
+                })
+            };
+            match ambient {
+                Some(work) => work.with_reads(run),
+                None => run(),
+            }
+        })
+    };
+    let work = |ranges, bytes| Arc::new(QueryWork::new(ANN_WORK, ranges, bytes, native_deadline()));
+    for (ranges, bytes) in [(0, ANN_BYTES), (ANN_RANGES, 0)] {
+        let denied = work(ranges, bytes);
+        let (result, counts) = call(Some(denied.clone()), None, ResultType::TopkCount, 2)
+            .await
+            .unwrap();
+        assert!(matches!(result, Err(RecordError::Rejected(reason))
+            if reason == "shared query positioned read budget exhausted"));
+        assert_eq!(
+            denied.vector_visits.vector_ranges.load(Ordering::Relaxed),
+            0
+        );
+        assert_eq!(counts, [usize::MAX]);
+    }
+
+    let supplied = work(0, 0);
+    let conflicting = work(ANN_RANGES, ANN_BYTES);
+    let (result, counts) = call(
+        Some(supplied.clone()),
+        Some(conflicting.clone()),
+        ResultType::TopkCount,
+        2,
+    )
+    .await
+    .unwrap();
+    assert!(matches!(result, Err(RecordError::Rejected(reason))
+        if reason == "vector search read budget does not match the supplied query budget"));
+    assert_eq!(supplied.remaining_io(), (0, 0));
+    assert_eq!(conflicting.remaining_io(), (ANN_RANGES, ANN_BYTES));
+    assert_eq!(supplied.remaining(), ANN_WORK);
+    assert_eq!(counts, [usize::MAX]);
+
+    let control = work(ANN_RANGES, ANN_BYTES);
+    let (result, counts) = call(Some(control.clone()), None, ResultType::TopkCount, 2)
+        .await
+        .unwrap();
+    let result = result.unwrap();
+    assert_eq!(result.results.len(), 2);
+    assert!(counts.len() > 1);
+    let remaining = control.remaining_io();
+    let consumed = (ANN_RANGES - remaining.0, ANN_BYTES - remaining.1);
+    assert!(consumed.0 > 0 && consumed.1 > 0);
+    assert_eq!(
+        consumed,
+        (
+            control.vector_visits.vector_ranges.load(Ordering::Relaxed),
+            control.vector_visits.vector_bytes.load(Ordering::Relaxed),
+        )
+    );
+
+    let same = work(ANN_RANGES, ANN_BYTES);
+    let (already_bound, already_bound_counts) = call(
+        Some(same.clone()),
+        Some(same.clone()),
+        ResultType::TopkCount,
+        2,
+    )
+    .await
+    .unwrap();
+    let keys = |scored: &crate::search::ResultObject| {
+        scored
+            .results
+            .iter()
+            .map(|hit| (hit.doc_id, hit.score.to_bits()))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(keys(&already_bound.unwrap()), keys(&result));
+    assert_eq!(same.remaining_io(), remaining);
+    assert_eq!(already_bound_counts, counts);
+
+    let count = work(ANN_RANGES, ANN_BYTES);
+    let (denied, denied_counts) = call(Some(count.clone()), None, ResultType::Count, 0)
+        .await
+        .unwrap();
+    assert!(matches!(denied, Err(RecordError::Rejected(reason))
+        if reason == "metered ANN does not support count-only search"));
+    assert_eq!(count.remaining_io(), (ANN_RANGES, ANN_BYTES));
+    assert_eq!(count.remaining(), ANN_WORK);
+    assert_eq!(denied_counts, [usize::MAX]);
+
+    let (legacy, legacy_counts) = call(None, None, ResultType::Count, 2).await.unwrap();
+    let legacy = legacy.unwrap();
+    assert!(legacy.results.is_empty());
+    assert_eq!(legacy.result_count_total, result.result_count_total);
+    assert_eq!(legacy_counts, counts);
+    eprintln!(
+        "self-bound TopkCount on frozen ANN: {} reads, {} bytes, {} vector candidates",
+        consumed.0,
+        consumed.1,
+        result.results.len()
+    );
+}
+
 async fn build(partition: &RecordPartition) -> u64 {
     partition
         .start_event_time_checkpoint(DEADLINE)

@@ -26,6 +26,7 @@
   "record::anchor::event_time_tests::event_time_vector_meters_filter_width_and_fusion_before_delivery",
   "record::anchor::event_time_tests::metered_ann_separates_discovery_probes_members_and_positioned_io",
   "record::anchor::event_time_tests::metered_ann_uses_canonical_versions_expiry_and_worker_admission",
+  "record::anchor::event_time_tests::metered_ann_binds_read_budget_and_refuses_count_only",
   "record::anchor::event_time_tests::event_time_vector_cut_refuses_topology_handoff_and_group_publication",
   "record::entity_view::tests::entity_adjacency_reopens_shadows_and_pins_authenticated_root",
   "record::entity_view::tests::entity_adjacency_rejects_hot_fanout_without_a_partial_range",
