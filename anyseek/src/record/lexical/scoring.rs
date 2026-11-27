@@ -237,7 +237,7 @@ impl ActiveView<'_> {
         query: &dyn Query,
         groups: &[super::query::ScoreGroup],
         boosts: &[f32],
-        accepts: impl Fn(usize, &Identity) -> Result<bool, RecordError>,
+        mut accepts: impl FnMut(usize, &Identity) -> Result<bool, RecordError>,
         collect: &mut impl FnMut(usize, &Identity, f32) -> Result<(), RecordError>,
     ) -> Result<usize, RecordError> {
         if self.live.is_empty() {
@@ -431,7 +431,7 @@ impl<'a> CorpusView<'a> {
     pub(super) fn count_where(
         &self,
         query: &dyn Query,
-        accepts: impl Fn(usize, usize, &Identity) -> Result<bool, RecordError>,
+        mut accepts: impl FnMut(usize, usize, &Identity) -> Result<bool, RecordError>,
     ) -> Result<usize, RecordError> {
         let mut count = 0;
         self.visit(query, |slot, ordinal, identity| {
@@ -484,7 +484,7 @@ impl<'a> CorpusView<'a> {
         groups: &[super::query::ScoreGroup],
         boosts: &[f32],
         normalization: FieldLengthNormalization,
-        accepts: impl Fn(usize, usize, &Identity) -> Result<bool, RecordError>,
+        mut accepts: impl FnMut(usize, usize, &Identity) -> Result<bool, RecordError>,
         mut collect: impl FnMut(usize, usize, &Identity, f32) -> Result<(), RecordError>,
     ) -> Result<usize, RecordError> {
         let statistics = QueryStatistics::build(&self.views, groups, boosts.len(), normalization)?;

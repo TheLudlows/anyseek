@@ -51,3 +51,15 @@ python3 benchmarks/vector-segments/compare.py \
 ```
 
 手工测试默认 ignored，正常 CI 不执行计时；无新依赖、无易波动的通过阈值。Windows 不支持本工具的 CPU affinity/resource 采集，正确性由跨平台 CI 验证。
+
+## #227 过滤 I/O 对照
+
+使用上面的构建方式，在两侧 checkout 放入同一份探针。矩阵使用独立临时库、2,048 条合成记录和四批写入，覆盖向量和混合查询、无过滤及约 5% 和 90% 命中率，以及 1 和 4 个并发请求。每个条件重开库后记录首轮，再预热和重复查询。首轮表示进程内读取器冷启动，重开本身可能预热 OS 页。JSON 同时记录成功请求的逐请求耗时和准入耗时，以及返回 Busy 的请求数。
+
+```sh
+ANYSEEK_FOREGROUND_PER_COLLECTION_IO=8 python3 benchmarks/vector-segments/compare.py \
+  --before /tmp/segment-before --after /tmp/segment-after --cpus 1,2 \
+  --matrix --pairs 5 --trace --output /tmp/segment-filter-io
+```
+
+这个示例使用相同的每集合 I/O 上限 8，便于量出四路并发的成功查询。要观察默认准入，去掉该环境变量。可选的 `--trace` 另启进程用 `strace` 统计两类组件文件的调用、请求字节、返回字节和文件映射。同文件非连续地址是调用顺序的统计。并发时的重复范围包括跨请求重复。跟踪和无跟踪计时独立执行。
