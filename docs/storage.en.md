@@ -18,7 +18,9 @@ A certified checkpoint can reuse frozen segments. Compaction rebuilds a fully eq
 
 At the end of a private bulk build, `finish_build` reuses bounded small-Segment merging. Tantivy runs GC by active file references before sealing and collecting inventory. The 1,024-file cap remains. Never remove files still referenced by readers, builds, or backups. Insufficient budget or inability to merge further can safely reject a build. There is no unlimited build scale guarantee.
 
-A partition guard and package pin protect local readers and builds. Files used by pinned Searchers, native workers, and mmap cannot be deleted until the last holder leaves. Backup exports independent authority without borrowing mutable paths that source GC can remove. Build and reclamation have explicit budgets. Full in-memory State and conservative admission remain, with no hard whole-process RSS cap.
+A partition guard and package pin protect local readers and builds. Files used by pinned Searchers, native workers, and vector and metadata views cannot be deleted until the last holder leaves. Backup exports independent authority without borrowing mutable paths that source GC can remove. Build and reclamation have explicit budgets. Full in-memory State and conservative admission remain, with no hard whole-process RSS cap.
+
+Vector and metadata files keep their component format and publication order. A query or build owns an aligned vector window of at most 64 KiB and releases its reservation on completion. Filters read fixed-width fields. Custom sorting captures values for bounded candidates before comparison and stops the query on a read fault. Reads and sequential writes use file I/O admission, and buffers count toward the process and request limits. The operating system may cache ordinary file pages.
 
 ## Authority and data ownership
 
@@ -60,7 +62,7 @@ Synchronous maintenance checkpoints the full current cut. The background Indexer
 
 Fully write and sync private temporary files, then publish atomically in the same directory. A nonblocking cross-process file lock protects scan, delete, and publish. Its file is beside the cache, so clearing cache cannot replace the lock inode. Temps and orphans are counted. Failed deletion releases no quota. Cache persistence is not required for startup. Read back from remote to confirm PUT and uncertain PUT. Cache cannot certify real durability. SQLite separately checks owner, head, and watermarks. Cache hits grant no read or output access.
 
-Cache returns owned bytes only, never mmap. A materialized Segment has its own directory with existing certification, mapping, and protection. Eviction, corruption, or clearing cache cannot delete a Segment mmap in use. Prefetch and direct cache block mapping are unimplemented. Tiered admission and explicit buffer/I/O budgets exist, but cross-collection cache capacity and full isolation still need acceptance. Cache limits do not hard-limit service disk or RSS.
+Cache returns owned bytes only, never mmap. A materialized Segment has its own directory with existing certification and file protection. Eviction, corruption, or clearing the cache cannot delete Segment files held by a view. Prefetch and direct cache block mapping are unimplemented. Tiered admission and explicit buffer/I/O budgets exist, but cross-collection cache capacity and full isolation still need acceptance. Cache limits do not hard-limit service disk or RSS.
 
 ### Bounded background cut publication
 
@@ -72,7 +74,7 @@ SQLite has one `index_builds` row per partition for monotonic build epoch and ow
 
 Build and certify outside the partition barrier. The local owned worker protects candidates and input files, explicit GC returns Busy, and synchronous maintenance cannot replace the base. At publication, replay bounded new tails under the guard, compare full logical state, and verify local base and deadline. SQLite rechecks durable build/owner epoch, base manifest and indexed seq, and deadline. Advance manifest/indexed/log base to the fixed cut only, preserving later committed seq and WAL tip without consuming a business sequence.
 
-Sync the local certificate and full new suffix together in a private generation, then publish its directory. This keeps acknowledged later writes with the visible certificate. S3 local failures after SQLite publication remain fenced. Cold startup recovers remote manifest and full tail. Failed, expired, or panicked builds cannot serve old cuts as current. Panic closes output and requires reopening. Reclaim files after candidate mmap is released and tasks finish.
+Sync the local certificate and full new suffix together in a private generation, then publish its directory. This keeps acknowledged later writes with the visible certificate. S3 local failures after SQLite publication remain fenced. Cold startup recovers remote manifest and full tail. Failed, expired, or panicked builds cannot serve old cuts as current. Panic closes output and requires reopening. Reclaim files after candidate file handles are released and tasks finish.
 
 ### Collection lifecycle and snapshot execution barriers
 

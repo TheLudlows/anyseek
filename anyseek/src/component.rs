@@ -2,12 +2,11 @@
 //! files contain no lexical postings or original payloads.
 //! The enclosing Record certificate authenticates these files; this descriptor is
 //! never a business head and is only opened after the package closure is verified.
-use crate::{index::*, vector::{Inference, Precision, Quantization, VectorHeader},
+use crate::{index::*, vector::{Inference, Precision, Quantization},
     vector_similarity::{TurboQuant, VectorSimilarity}, clustering::ParentMedoid,
     storage::build_budget::File, utils::*};
 use ahash::{AHashMap, AHashSet};
 use indexmap::IndexMap;
-use memmap2::{Mmap, MmapMut, MmapOptions};
 use serde::{Serialize, Deserialize};
 use std::{collections::HashMap, fs, io::{Read, Seek, SeekFrom, Write}, path::{Path, PathBuf}, sync::Arc};
 use tokio::sync::RwLock;
@@ -76,12 +75,10 @@ pub(crate) struct VectorSegment {
     pub facets_map: HashMap<String, usize>,
     pub facets_size_sum: usize,
     facets_file: File,
-    pub facets_file_mmap: MmapMut,
     pub string_set_to_single_term_id_vec: Vec<AHashMap<String, AHashSet<u32>>>,
     pub is_simd: bool,
     pub is_vector_indexing: bool,
     pub vector_file: File,
-    pub vector_file_mmap: Mmap,
     pub block_vector_buffer: Vec<ParentMedoid>,
     pub vector_dimensions: usize,
     pub vector_dimensions_original: usize,
@@ -107,6 +104,19 @@ struct Descriptor {
     facets: Vec<FacetField>,
     min_vector_value: f32,
     max_vector_value: f32,
+}
+
+/// I/O admission pressure is retryable, while short reads and corruption are storage faults.
+pub(crate) fn read_error(error: std::io::Error) -> crate::record::RecordError {
+    if error
+        .get_ref()
+        .and_then(|cause| cause.downcast_ref::<crate::resources::Busy>())
+        .is_some_and(crate::resources::Busy::is_recoverable)
+    {
+        crate::record::RecordError::Busy
+    } else {
+        crate::record::RecordError::Storage(error.to_string())
+    }
 }
 
 fn open_file(path: &Path, new: bool) -> Result<File,String> {
@@ -151,26 +161,24 @@ fn assemble(path: &Path, meta: IndexMetaObject, schema: &[SchemaField], saved: O
     if new { vector_file.write_all(&[0]).map_err(|e|e.to_string())?;vector_file.seek(SeekFrom::Start(0)).map_err(|e|e.to_string())?;
         if width>0 {facets_file.set_len((width*ROARING_BLOCK_SIZE) as u64).map_err(|e|e.to_string())?;}
     }
-    let vector_map=unsafe{Mmap::map(&vector_file)}.map_err(|e|e.to_string())?;
-    let facet_map=if width==0 {MmapOptions::new().len(1).map_anon()}else{unsafe{MmapMut::map_mut(&facets_file)}}.map_err(|e|e.to_string())?;
     let mut shard=VectorSegment {failed:false,indexed_doc_count:0,indexed_vector_count:0,indexed_cluster_count:0,committed_doc_count:0,uncommitted:false,
         schema_map:schema_map.clone(),indexed_schema_vec:indexed,#[cfg(test)] stored_field_names:Vec::new(),meta:meta.clone(),is_last_level_incomplete:false,
         last_level_vector_file_start_pos:0,vector_levels:0,delete_hashset:AHashSet::new(),active:None,admission,
-        path:path.to_owned(),facets,facets_map,facets_size_sum:width,facets_file,facets_file_mmap:facet_map,string_set_to_single_term_id_vec:Vec::new(),
-        is_simd:simd,is_vector_indexing:original>0,vector_file,vector_file_mmap:vector_map,block_vector_buffer:Vec::new(),vector_dimensions:dimensions,
+        path:path.to_owned(),facets,facets_map,facets_size_sum:width,facets_file,string_set_to_single_term_id_vec:Vec::new(),
+        is_simd:simd,is_vector_indexing:original>0,vector_file,block_vector_buffer:Vec::new(),vector_dimensions:dimensions,
         vector_dimensions_original:original,vector_precision:precision,quantization,vector_similarity:similarity,min_vector_value:0.0,max_vector_value:f32::MIN,turbo_quant:turbo.clone()};
     if let Some(saved)=saved {
         if saved.vector_levels!=saved.documents.div_ceil(ROARING_BLOCK_SIZE) || saved.facets.len()!=shard.facets.len() {return Err("component cardinality mismatch".into());}
         for (actual,expected) in saved.facets.iter().zip(&shard.facets) {
             if actual.name!=expected.name {return Err("component metadata schema mismatch".into());}
         }
-        if width.checked_mul(saved.documents).is_none_or(|n| n>shard.facets_file_mmap.len()) {return Err("component metadata truncated".into());}
+        let metadata_len = shard.facets_file.metadata().map_err(|e| e.to_string())?.len();
+        if width.checked_mul(saved.documents).is_none_or(|n| n as u64 > metadata_len) {return Err("component metadata truncated".into());}
         shard.indexed_doc_count=saved.documents;shard.committed_doc_count=saved.documents;
         shard.vector_levels=saved.vector_levels;shard.last_level_vector_file_start_pos=saved.last_vector_level;
         shard.indexed_vector_count=saved.vectors;shard.indexed_cluster_count=saved.clusters;
         shard.is_last_level_incomplete=!saved.documents.is_multiple_of(ROARING_BLOCK_SIZE);
         for (actual, expected) in saved.facets.iter().zip(&mut shard.facets) { expected.values=actual.values.clone(); }shard.min_vector_value=saved.min_vector_value;shard.max_vector_value=saved.max_vector_value;
-        shard.validate_vectors()?;
     }
     shard.string_set_to_single_term_id();
     Ok((VectorIndex {index_path_string:path.to_string_lossy().into_owned(),schema_map,stored_field_names:Vec::new(),meta,
@@ -204,7 +212,7 @@ fn create_component_files(path:&Path,meta:IndexMetaObject,schema:&[SchemaField],
 }
 pub(crate) async fn open_index(path:&Path,config:&crate::record::RecordConfig)->Result<VectorIndexArc,crate::record::RecordError>{
     let (mut index, vector) = open_component_files(path)?;
-    vector.read().await.validate_euclidean_vectors().map_err(crate::record::RecordError::Rejected)?;
+    vector.read().await.validate_vectors()?;
     let lexical = crate::record::lexical::runtime::Runtime::open_owned(&path.join("native"), config)
         .await?;
     let admission=vector.read().await.admission.clone();
@@ -242,78 +250,6 @@ impl VectorSegment {
     pub(crate) fn rank(&self,a:f32,a_id:usize,b:f32,b_id:usize)->std::cmp::Ordering {
         crate::active::rank_with_keys(self.active.as_ref().map(|s|s.keys.as_slice()),a,a_id,b,b_id)
     }
-    fn validate_vectors(&self)->Result<(),String>{
-        if !self.is_vector_indexing {return Ok(());}
-        let bytes=&self.vector_file_mmap;
-        let precision=if self.quantization!=Quantization::None {Precision::I8}else{self.vector_precision};
-        let size=size_of::<VectorHeader>()+self.vector_dimensions*if precision==Precision::F32 {4}else{1};
-        let mut offset=0usize;let mut vectors=0usize;let mut clusters=0usize;let mut last=0;
-        let read=|offset:&mut usize| -> Result<usize,String> {
-            let end=offset.checked_add(4).ok_or("component vector offset overflow")?;
-            let n=u32::from_le_bytes(bytes.get(*offset..end).ok_or("truncated vector component")?.try_into().unwrap()) as usize;
-            *offset=end;Ok(n)
-        };
-        for _ in 0..self.vector_levels {
-            last=offset as u64;let count=read(&mut offset)?;
-            if count>self.indexed_vector_count.saturating_add(1) {return Err("invalid vector cluster count".into());}
-            clusters=clusters.checked_add(count).ok_or("vector count overflow")?;
-            let mut rows=0usize;
-            for _ in 0..count {rows=rows.checked_add(read(&mut offset)?).ok_or("vector count overflow")?;}
-            vectors=vectors.checked_add(rows).ok_or("vector count overflow")?;
-            offset=rows.checked_mul(size).and_then(|n|offset.checked_add(n)).filter(|n|*n<=bytes.len()).ok_or("truncated vector rows")?;
-        }
-        if vectors!=self.indexed_vector_count || clusters!=self.indexed_cluster_count || (self.vector_levels>0 && last!=self.last_level_vector_file_start_pos) {
-            return Err("vector component counters mismatch".into());
-        }
-        Ok(())
-    }
-    // Structural bounds were checked by validate_vectors before this scan. Old
-    // cached rows (including retired rows/medoids) must be safe before scoring.
-    fn validate_euclidean_vectors(&self) -> Result<(), String> {
-        if self.vector_similarity != VectorSimilarity::Euclidean || self.vector_precision != Precision::F32 {
-            return Ok(());
-        }
-        let width = self.vector_dimensions;
-        if width == 0 || width > 4096 { return Err("vector dimension budget exceeded".into()); }
-        if self.quantization == Quantization::ScalarQuantizationI8 && self.max_vector_value != f32::MIN {
-            crate::vector::validate_euclidean_f32(&[self.min_vector_value, self.max_vector_value], width)?;
-            if self.min_vector_value > self.max_vector_value { return Err("invalid euclidean quantization range".into()); }
-        }
-        let precision = if self.quantization == Quantization::None { Precision::F32 } else { Precision::I8 };
-        let size = size_of::<VectorHeader>() + width * if precision == Precision::F32 { 4 } else { 1 };
-        let mut offset = 0;
-        for _ in 0..self.vector_levels {
-            let clusters = u32::from_le_bytes(self.vector_file_mmap[offset..offset+4].try_into().unwrap()) as usize;
-            offset += 4;
-            let mut rows = 0;
-            for _ in 0..clusters {
-                rows += u32::from_le_bytes(self.vector_file_mmap[offset..offset+4].try_into().unwrap()) as usize;
-                offset += 4;
-            }
-            for _ in 0..rows {
-                let row = crate::vector::read_record(&self.vector_file_mmap[offset..offset+size], width, precision);
-                match row.embedding {
-                    crate::vector::EmbeddingView::F32(values) => crate::vector::validate_euclidean_f32(values, width)?,
-                    crate::vector::EmbeddingView::I8(_) => {
-                        let scale = f64::from(row.header.scale);
-                        let norm = f64::from(row.header.norm);
-                        let zero = i64::from(row.header.zero_point).abs();
-                        let sum = i64::from(row.header.sum_q).abs();
-                        // Bound every reconstructed coordinate, including affine
-                        // correction. This also admits zero-scale zero vectors.
-                        let bound = width as f64 * (128 + zero).pow(2) as f64 * scale * scale;
-                        if !scale.is_finite() || scale < 0.0 || !norm.is_finite() || norm < 0.0
-                            || zero > 128 || sum > 128 * width as i64
-                            || norm > f64::from(f32::MAX) / 16.0 || bound > f64::from(f32::MAX) / 16.0 {
-                            return Err("euclidean component exceeds the safe F32 arithmetic range".into());
-                        }
-                    }
-                }
-                offset += size;
-            }
-        }
-        Ok(())
-    }
     pub(crate) fn string_set_to_single_term_id(&mut self) {
         self.string_set_to_single_term_id_vec=vec![AHashMap::new();self.facets.len()];
         for (i,facet) in self.facets.iter().enumerate() {
@@ -344,7 +280,7 @@ impl VectorSegment {
             self.is_last_level_incomplete=!self.committed_doc_count.is_multiple_of(ROARING_BLOCK_SIZE);
             self.uncommitted=false;
         }
-        if self.facets_size_sum>0 {self.facets_file_mmap.flush()?;self.facets_file.sync_all()?;}
+        if self.facets_size_sum>0 {self.facets_file.sync_all()?;}
         let mut schema= self.schema_map.values().cloned().collect::<Vec<_>>();
         schema.sort_by_key(|field|field.field_id);
         let descriptor=Descriptor {format:FORMAT,meta:self.meta.clone(),schema,documents:self.indexed_doc_count,vector_levels:self.vector_levels,
@@ -358,18 +294,31 @@ impl VectorSegment {
     pub(crate) fn readonly_metadata_for_test(&mut self) {
         self.facets_file = File::open(self.path.join(FACETS)).unwrap();
     }
-    fn ensure_metadata_capacity(&mut self, documents: usize)->Result<(),String>{
-        if self.facets_size_sum==0 {return Ok(());}
-        let bytes=documents.div_ceil(ROARING_BLOCK_SIZE).checked_mul(ROARING_BLOCK_SIZE)
-            .and_then(|n|n.checked_mul(self.facets_size_sum)).ok_or("metadata capacity overflow")?;
-        if bytes>self.facets_file_mmap.len() {
-            self.facets_file_mmap.flush().map_err(|e|e.to_string())?;
-            self.facets_file_mmap=MmapOptions::new().len(1).map_anon().map_err(|e|e.to_string())?;
-            self.facets_file.set_len(bytes as u64).map_err(|e|e.to_string())?;
-            self.facets_file_mmap=unsafe{MmapMut::map_mut(&self.facets_file)}.map_err(|e|e.to_string())?;
+    /// Read one fixed-width facet value and its presence byte without allocating.
+    pub(crate) fn read_facet(
+        &self,
+        ordinal: usize,
+        field: &FacetField,
+    ) -> Result<[u8; 9], crate::record::RecordError> {
+        let offset = ordinal
+            .checked_mul(self.facets_size_sum)
+            .and_then(|row| row.checked_add(field.offset))
+            .ok_or_else(|| {
+                crate::record::RecordError::Storage("metadata offset overflow".into())
+            })?;
+        let mut bytes = [0; 9];
+        let width = field_width(&field.field_type);
+        self.facets_file
+            .read_exact_at(offset as u64, &mut bytes[..width])
+            .map_err(read_error)?;
+        if bytes[width - 1] > 1 {
+            return Err(crate::record::RecordError::Storage(
+                "invalid metadata presence byte".into(),
+            ));
         }
-        Ok(())
+        Ok(bytes)
     }
+
     pub(crate) async fn append(&mut self, document:Document)->Result<(),String>{
         self.append_with_memory(document,None).await
     }
@@ -413,7 +362,6 @@ impl VectorSegment {
             },
         };
         let mutation=self.admission.mutation();
-        self.ensure_metadata_capacity(ordinal+1)?;
         if self.is_vector_indexing {self.index_vector_segment(ordinal,&document).await;}
         self.write_metadata(ordinal,&document)?;
         self.indexed_doc_count+=1;self.uncommitted=true;
@@ -421,84 +369,116 @@ impl VectorSegment {
         mutation.complete();
         Ok(())
     }
-    fn write_metadata(&mut self, docid_local:usize, document:&Document)->Result<(),String>{
-        if !self.facets.is_empty() {
-            let facets_size_sum = self.facets_size_sum;
-            for i in 0..self.facets.len() {
-                let facet = &mut self.facets[i];
-                if let Some(field_value) = document.get(&facet.name).filter(|v| !v.is_null()) {
-                    let address = (facets_size_sum * docid_local) + facet.offset;
-                    self.facets_file_mmap[address + field_width(&facet.field_type) - 1] = 1;
-
-                    match facet.field_type {
-                        FieldType::Int => {
-                            let value = field_value.as_i64().ok_or("metadata integer exceeds signed 64-bit range")?;
-
-                            write_i64(value, &mut self.facets_file_mmap, address)
-                        }
-                        FieldType::Timestamp => {
-                            let value = field_value.as_i64().ok_or("metadata integer exceeds signed 64-bit range")?;
-
-                            write_i64(value, &mut self.facets_file_mmap, address);
-                        }
-                        FieldType::Float => {
-                            let value = field_value.as_f64().filter(|v| v.is_finite()).ok_or("invalid metadata Float")?;
-
-                            write_f64(value, &mut self.facets_file_mmap, address)
-                        }
-
-
-                        FieldType::String => {
-                            let key = field_value.as_str().ok_or("invalid metadata String")?.to_owned();
-
-                            let key_string = key.clone();
-                            let key = vec![key];
-
-                            if !facet.values.contains_key(&key_string) && facet.values.len() >= u32::MAX as usize {
-                                return Err("metadata dictionary capacity exceeded".into());
-                            }
-                            facet.values.entry(key_string.clone()).or_insert(key);
-
-                            let facet_value_id =
-                                facet.values.get_index_of(&key_string).unwrap() as u32;
-                            write_u32(facet_value_id, &mut self.facets_file_mmap, address)
-                        }
-
-                        FieldType::StringSet => {
-                            let mut key: Vec<String> =
-                                serde_json::from_value(field_value.clone()).map_err(|e| e.to_string())?;
-                            key.sort();
-                            key.dedup();
-
-                            let key_string = serde_json::to_string(&key).map_err(|e| e.to_string())?;
-                            let is_new = !facet.values.contains_key(&key_string);
-                            let terms = key.clone();
-                            if !facet.values.contains_key(&key_string) && facet.values.len() >= u32::MAX as usize {
-                                return Err("metadata dictionary capacity exceeded".into());
-                            }
-                            facet.values.entry(key_string.clone()).or_insert(key);
-
-                            let facet_value_id =
-                                facet.values.get_index_of(&key_string).unwrap() as u32;
-                            if is_new {
-                                for term in terms {
-                                    self.string_set_to_single_term_id_vec[i]
-                                        .entry(term)
-                                        .or_default()
-                                        .insert(facet_value_id);
-                                }
-                            }
-                            write_u32(facet_value_id, &mut self.facets_file_mmap, address)
-                        }
-
-                        _ => {}
-                    };
-                }
-            }
+    fn write_metadata(&mut self, docid_local: usize, document: &Document) -> Result<(), String> {
+        if self.facets.is_empty() {
+            return Ok(());
         }
+        let start = self
+            .facets_size_sum
+            .checked_mul(docid_local)
+            .ok_or("metadata offset overflow")?;
+        let end = start
+            .checked_add(self.facets_size_sum)
+            .ok_or("metadata length overflow")?;
+        if end as u64
+            > self
+                .facets_file
+                .metadata()
+                .map_err(|e| e.to_string())?
+                .len()
+        {
+            let capacity = (docid_local + 1)
+                .div_ceil(ROARING_BLOCK_SIZE)
+                .checked_mul(ROARING_BLOCK_SIZE)
+                .and_then(|n| n.checked_mul(self.facets_size_sum))
+                .ok_or("metadata capacity overflow")?;
+            self.facets_file
+                .set_len(capacity as u64)
+                .map_err(|e| e.to_string())?;
+        }
+        self.facets_file
+            .seek(SeekFrom::Start(start as u64))
+            .map_err(|e| e.to_string())?;
+        for (i, facet) in self.facets.iter_mut().enumerate() {
+            let mut bytes = [0; 9];
+            let width = field_width(&facet.field_type);
+            if let Some(field_value) = document.get(&facet.name).filter(|v| !v.is_null()) {
+                bytes[width - 1] = 1;
+                match facet.field_type {
+                    FieldType::Int | FieldType::Timestamp => {
+                        let value = field_value
+                            .as_i64()
+                            .ok_or("metadata integer exceeds signed 64-bit range")?;
+                        write_i64(value, &mut bytes, 0);
+                    }
+                    FieldType::Float => {
+                        let value = field_value
+                            .as_f64()
+                            .filter(|v| v.is_finite())
+                            .ok_or("invalid metadata Float")?;
 
+                        write_f64(value, &mut bytes, 0)
+                    }
+
+                    FieldType::String => {
+                        let key = field_value
+                            .as_str()
+                            .ok_or("invalid metadata String")?
+                            .to_owned();
+
+                        let key_string = key.clone();
+                        let key = vec![key];
+
+                        if !facet.values.contains_key(&key_string)
+                            && facet.values.len() >= u32::MAX as usize
+                        {
+                            return Err("metadata dictionary capacity exceeded".into());
+                        }
+                        facet.values.entry(key_string.clone()).or_insert(key);
+
+                        let facet_value_id = facet.values.get_index_of(&key_string).unwrap() as u32;
+                        write_u32(facet_value_id, &mut bytes, 0)
+                    }
+
+                    FieldType::StringSet => {
+                        let mut key: Vec<String> = serde_json::from_value(field_value.clone())
+                            .map_err(|e| e.to_string())?;
+                        key.sort();
+                        key.dedup();
+
+                        let key_string = serde_json::to_string(&key).map_err(|e| e.to_string())?;
+                        let is_new = !facet.values.contains_key(&key_string);
+                        let terms = key.clone();
+                        if !facet.values.contains_key(&key_string)
+                            && facet.values.len() >= u32::MAX as usize
+                        {
+                            return Err("metadata dictionary capacity exceeded".into());
+                        }
+                        facet.values.entry(key_string.clone()).or_insert(key);
+
+                        let facet_value_id = facet.values.get_index_of(&key_string).unwrap() as u32;
+                        if is_new {
+                            for term in terms {
+                                self.string_set_to_single_term_id_vec[i]
+                                    .entry(term)
+                                    .or_default()
+                                    .insert(facet_value_id);
+                            }
+                        }
+                        write_u32(facet_value_id, &mut bytes, 0)
+                    }
+
+                    _ => {}
+                };
+            }
+            self.facets_file
+                .write_all(&bytes[..width])
+                .map_err(|e| e.to_string())?;
+        }
         Ok(())
     }
+
+
 }
 
 #[allow(async_fn_in_trait)]

@@ -6,6 +6,8 @@ use serde::{Deserialize, Serialize};
 use crate::vector::ResultSource;
 use crate::{
     index::{FieldType, VectorSegment},
+    record::{build_budget::admit_memory, RecordError},
+    resources::{MemoryReservation, Scope},
     search::{ResultSortIndex, SortOrder},
     utils::{read_f64, read_i64, read_u32},
 };
@@ -78,12 +80,122 @@ pub(crate) fn rank_with_segments(
     }
 }
 
+enum FacetValue<'a> {
+    Integer(i64),
+    Float(f64),
+    String(Option<&'a str>),
+    Present,
+}
+
+#[derive(Default)]
+pub(crate) struct SortKey<'a> {
+    fields: Vec<Option<FacetValue<'a>>>,
+    _memory: Option<MemoryReservation>,
+}
+
+fn has_metadata(sorts: &[ResultSortIndex]) -> bool {
+    sorts
+        .iter()
+        .take_while(|field| field.idx != usize::MAX)
+        .any(|field| field.idx < usize::MAX - 1)
+}
+
+/// Read keys before inserting into a heap or sorting. Comparison itself is
+/// infallible so an I/O failure cannot leave a partially ordered response.
+pub(crate) fn prepare_sort_key<'a>(
+    segments: &'a [RwLockReadGuard<'_, VectorSegment>],
+    sorts: &[ResultSortIndex],
+    doc_id: usize,
+) -> std::result::Result<SortKey<'a>, RecordError> {
+    if !has_metadata(sorts) {
+        return Ok(SortKey::default());
+    }
+    let shard = &segments[doc_id % segments.len()];
+    let ordinal = doc_id / segments.len();
+    let fields_to_read = sorts.iter().take_while(|field| field.idx != usize::MAX);
+    let count = fields_to_read.clone().count();
+    let bytes = size_of::<Option<FacetValue>>()
+        .checked_mul(count)
+        .ok_or_else(|| RecordError::Rejected("sort key size overflow".into()))?;
+    let memory = admit_memory(bytes as u64, Scope::current().as_ref())?;
+    let mut fields = Vec::with_capacity(count);
+    for sort in fields_to_read {
+        let value = if sort.idx >= usize::MAX - 1 {
+            None
+        } else {
+            let facet = &shard.facets[sort.idx];
+            let bytes = shard.read_facet(ordinal, facet)?;
+            let present = bytes[crate::component::field_width(&facet.field_type) - 1] != 0;
+            if present {
+                match facet.field_type {
+                    FieldType::Int | FieldType::Timestamp => {
+                        Some(FacetValue::Integer(read_i64(&bytes, 0)))
+                    }
+                    FieldType::Float => {
+                        let value = read_f64(&bytes, 0);
+                        if !value.is_finite() {
+                            return Err(RecordError::Storage("invalid metadata float".into()));
+                        }
+                        Some(FacetValue::Float(value))
+                    }
+                    FieldType::String | FieldType::StringSet => {
+                        let (_, values) = facet
+                            .values
+                            .get_index(read_u32(&bytes, 0) as usize)
+                            .ok_or_else(|| {
+                                RecordError::Storage("invalid metadata dictionary index".into())
+                            })?;
+                        Some(FacetValue::String(values.first().map(String::as_str)))
+                    }
+                    _ => Some(FacetValue::Present),
+                }
+            } else {
+                None
+            }
+        };
+        fields.push(value);
+    }
+    Ok(SortKey {
+        fields,
+        _memory: Some(memory),
+    })
+}
+
+pub(crate) fn sort_results(
+    segments: &[RwLockReadGuard<'_, VectorSegment>],
+    empty_query: bool,
+    sorts: &[ResultSortIndex],
+    mut results: Vec<Result>,
+) -> std::result::Result<Vec<Result>, RecordError> {
+    if !has_metadata(sorts) {
+        let empty = SortKey::default();
+        results.sort_by(|a, b| {
+            result_ordering_root(segments, empty_query, sorts, *b, &empty, *a, &empty)
+        });
+        return Ok(results);
+    }
+    let bytes = size_of::<(Result, SortKey)>()
+        .checked_mul(results.len())
+        .ok_or_else(|| RecordError::Rejected("sort workspace size overflow".into()))?;
+    let _workspace = admit_memory(bytes as u64, Scope::current().as_ref())?;
+    let mut keyed = Vec::with_capacity(results.len());
+    for result in results {
+        keyed.push((result, prepare_sort_key(segments, sorts, result.doc_id)?));
+    }
+    keyed.sort_by(|(a, a_key), (b, b_key)| {
+        result_ordering_root(segments, empty_query, sorts, *b, b_key, *a, a_key)
+    });
+    Ok(keyed.into_iter().map(|(result, _)| result).collect())
+}
+
 pub(crate) fn result_ordering_root(
     segments: &[RwLockReadGuard<'_, VectorSegment>],
     empty_query: bool,
-    result_sort: &Vec<ResultSortIndex>,
+    result_sort: &[ResultSortIndex],
     result1: Result,
+    key1: &SortKey<'_>,
     result2: Result,
+    key2: &SortKey<'_>,
 ) -> core::cmp::Ordering {
     let segment_count = segments.len();
     let slot1 = result1.doc_id % segment_count;
@@ -94,7 +206,7 @@ pub(crate) fn result_ordering_root(
     let doc_id2 = result2.doc_id / segment_count;
     let shard2 = &segments[slot2];
 
-    for field in result_sort.iter() {
+    for (index, field) in result_sort.iter().enumerate() {
         if field.idx == usize::MAX {
             if segments.iter().all(|shard| shard.active.is_some()) {
                 let first = &shard1.active.as_ref().unwrap().keys[doc_id1];
@@ -127,172 +239,25 @@ pub(crate) fn result_ordering_root(
             continue;
         }
 
-        let facet1 = &shard1.facets[field.idx];
-        let facet2 = &shard2.facets[field.idx];
-        let present1 = shard1.facets_file_mmap[shard1.facets_size_sum * doc_id1
-            + facet1.offset
-            + crate::component::field_width(&facet1.field_type)
-            - 1];
-        let present2 = shard2.facets_file_mmap[shard2.facets_size_sum * doc_id2
-            + facet2.offset
-            + crate::component::field_width(&facet2.field_type)
-            - 1];
-        // Present values rank before null/missing in either direction.
-        if present1 != present2 {
-            return present1.cmp(&present2);
-        }
-        if present1 == 0 {
-            continue;
-        }
-        match shard1.facets[field.idx].field_type {
-            FieldType::Int => {
-                let offset = shard1.facets[field.idx].offset;
-
-                let facet_value_1 = read_i64(
-                    &shard1.facets_file_mmap,
-                    (shard1.facets_size_sum * doc_id1) + offset,
-                );
-                let facet_value_2 = read_i64(
-                    &shard2.facets_file_mmap,
-                    (shard2.facets_size_sum * doc_id2) + offset,
-                );
-
-                let order = if field.order == SortOrder::Descending {
-                    facet_value_1.cmp(&facet_value_2)
-                } else {
-                    facet_value_2.cmp(&facet_value_1)
-                };
-
-                if order != core::cmp::Ordering::Equal {
-                    return order;
-                };
-            }
-
-            FieldType::Timestamp => {
-                let offset = shard1.facets[field.idx].offset;
-
-                let facet_value_1 = read_i64(
-                    &shard1.facets_file_mmap,
-                    (shard1.facets_size_sum * doc_id1) + offset,
-                );
-                let facet_value_2 = read_i64(
-                    &shard2.facets_file_mmap,
-                    (shard2.facets_size_sum * doc_id2) + offset,
-                );
-
-                let order = if field.order == SortOrder::Descending {
-                    facet_value_1.cmp(&facet_value_2)
-                } else {
-                    facet_value_2.cmp(&facet_value_1)
-                };
-
-                if order != core::cmp::Ordering::Equal {
-                    return order;
-                };
-            }
-
-            FieldType::Float => {
-                let offset = shard1.facets[field.idx].offset;
-
-                let facet_value_1 = read_f64(
-                    &shard1.facets_file_mmap,
-                    (shard1.facets_size_sum * doc_id1) + offset,
-                );
-                let facet_value_2 = read_f64(
-                    &shard2.facets_file_mmap,
-                    (shard2.facets_size_sum * doc_id2) + offset,
-                );
-
-                let order = if field.order == SortOrder::Descending {
-                    facet_value_1
-                        .partial_cmp(&facet_value_2)
-                        .unwrap_or(core::cmp::Ordering::Equal)
-                } else {
-                    facet_value_2
-                        .partial_cmp(&facet_value_1)
-                        .unwrap_or(core::cmp::Ordering::Equal)
-                };
-
-                if order != core::cmp::Ordering::Equal {
-                    return order;
-                };
-            }
-
-            FieldType::String => {
-                let offset = shard1.facets[field.idx].offset;
-
-                let facet_id_1 = read_u32(
-                    &shard1.facets_file_mmap,
-                    (shard1.facets_size_sum * doc_id1) + offset,
-                );
-                let facet_id_2 = read_u32(
-                    &shard2.facets_file_mmap,
-                    (shard2.facets_size_sum * doc_id2) + offset,
-                );
-
-                let facet_value_1 = shard1.facets[field.idx]
-                    .values
-                    .get_index(facet_id_1 as usize)
-                    .unwrap()
-                    .1[0]
-                    .clone();
-
-                let facet_value_2 = shard2.facets[field.idx]
-                    .values
-                    .get_index(facet_id_2 as usize)
-                    .unwrap()
-                    .1[0]
-                    .clone();
-
-                let order = if field.order == SortOrder::Descending {
-                    facet_value_1.cmp(&facet_value_2)
-                } else {
-                    facet_value_2.cmp(&facet_value_1)
-                };
-
-                if order != core::cmp::Ordering::Equal {
-                    return order;
-                };
-            }
-
-            FieldType::StringSet => {
-                let offset = shard1.facets[field.idx].offset;
-
-                let facet_id_1 = read_u32(
-                    &shard1.facets_file_mmap,
-                    (shard1.facets_size_sum * doc_id1) + offset,
-                );
-                let facet_id_2 = read_u32(
-                    &shard2.facets_file_mmap,
-                    (shard2.facets_size_sum * doc_id2) + offset,
-                );
-
-                let facet_value_1 = shard1.facets[field.idx]
-                    .values
-                    .get_index(facet_id_1 as usize)
-                    .unwrap()
-                    .1
-                    .first();
-
-                let facet_value_2 = shard2.facets[field.idx]
-                    .values
-                    .get_index(facet_id_2 as usize)
-                    .unwrap()
-                    .1
-                    .first();
-
-                let order = if field.order == SortOrder::Descending {
-                    facet_value_1.cmp(&facet_value_2)
-                } else {
-                    facet_value_2.cmp(&facet_value_1)
-                };
-
-                if order != core::cmp::Ordering::Equal {
-                    return order;
-                };
-            }
-
-            _ => {}
+        use FacetValue::*;
+        use core::cmp::Ordering;
+        let order = match (&key1.fields[index], &key2.fields[index]) {
+            // Present values rank before null/missing in either direction.
+            (Some(_), None) => return Ordering::Greater,
+            (None, Some(_)) => return Ordering::Less,
+            (None, None) => continue,
+            (Some(Integer(a)), Some(Integer(b))) => a.cmp(b),
+            (Some(Float(a)), Some(Float(b))) => a.partial_cmp(b).unwrap_or(Ordering::Equal),
+            (Some(String(a)), Some(String(b))) => a.cmp(b),
+            (Some(Present), Some(Present)) => Ordering::Equal,
+            _ => unreachable!("facet sort keys use the shared schema"),
+        };
+        if !order.is_eq() {
+            return if field.order == SortOrder::Descending {
+                order
+            } else {
+                order.reverse()
+            };
         }
     }
 

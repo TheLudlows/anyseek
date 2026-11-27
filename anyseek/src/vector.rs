@@ -1,4 +1,10 @@
-use crate::vector_similarity::VectorSimilarity;
+use crate::{
+    component::read_error as vector_io,
+    record::{build_budget::admit_memory, RecordError},
+    resources::{MemoryReservation, Scope},
+    storage::build_budget::File,
+    vector_similarity::VectorSimilarity,
+};
 use crate::{
     clustering::{ClusterHeader, Medoid, ParentMedoid},
     index::{Clustering, Document, FieldType, IS_SYSTEM_LE, VectorSegment, VectorSegmentArc},
@@ -13,13 +19,12 @@ use crate::{
     },
 };
 use ahash::AHashSet;
-use bytemuck::{Pod, Zeroable, bytes_of, cast_slice, from_bytes, try_cast_slice};
-use memmap2::Mmap;
+use bytemuck::{Pod, Zeroable, bytes_of, cast_slice, cast_slice_mut, from_bytes, try_cast_slice};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
     fmt,
-    io::{Seek, SeekFrom, Write},
+    io::{self, Seek, SeekFrom, Write},
 };
 
 /// Normalization factor for cosine similarity when using i8 quantization.
@@ -206,6 +211,112 @@ pub(crate) fn read_record(
     };
 
     VectorRecordView { header, embedding }
+}
+
+// A bounded, query-owned window. u32 backing keeps F32 payloads aligned;
+// vector records retain their existing wire format and scoring code.
+struct VectorBlock {
+    words: Vec<u32>,
+    file_len: u64,
+    start: u64,
+    loaded: usize,
+    _memory: MemoryReservation,
+}
+
+impl VectorBlock {
+    fn new(file: &File) -> Result<Self, RecordError> {
+        let file_len = file.metadata().map_err(vector_io)?.len();
+        let words = (file_len.min(64 * 1024) as usize).div_ceil(4);
+        let memory = admit_memory((words * 4) as u64, Scope::current().as_ref())?;
+        Ok(Self {
+            words: vec![0; words],
+            file_len,
+            start: 0,
+            loaded: 0,
+            _memory: memory,
+        })
+    }
+
+    fn read(&mut self, file: &File, offset: u64, len: usize) -> io::Result<&[u8]> {
+        let end = offset
+            .checked_add(len as u64)
+            .filter(|end| *end <= self.file_len)
+            .ok_or_else(|| invalid_vector("truncated vector component"))?;
+        if offset < self.start || end > self.start + self.loaded as u64 {
+            let start = offset & !3;
+            let bytes: &mut [u8] = cast_slice_mut(&mut self.words);
+            let count = (self.file_len - start).min(bytes.len() as u64) as usize;
+            if end - start > count as u64 {
+                return Err(invalid_vector("vector record exceeds read window"));
+            }
+            file.read_exact_at(start, &mut bytes[..count])?;
+            self.start = start;
+            self.loaded = count;
+        }
+        let index = (offset - self.start) as usize;
+        Ok(&cast_slice(&self.words)[index..index + len])
+    }
+
+    fn read_level(
+        &mut self,
+        file: &File,
+        start: u64,
+        stride: usize,
+        bound: usize,
+    ) -> Result<VectorLevel, RecordError> {
+        let read_count = |buffer: &mut Self, offset| -> Result<u32, RecordError> {
+            Ok(u32::from_le_bytes(
+                buffer
+                    .read(file, offset, 4)
+                    .map_err(vector_io)?
+                    .try_into()
+                    .unwrap(),
+            ))
+        };
+        let count = read_count(self, start)? as usize;
+        let rows_start = start
+            .checked_add((count as u64 + 1) * 4)
+            .filter(|end| *end <= self.file_len && count <= bound.saturating_add(1))
+            .ok_or_else(|| vector_io(invalid_vector("invalid vector cluster count")))?;
+        // Includes the query's downstream probe heap and selected cluster list.
+        let _memory = admit_memory((count as u64) * 128, Scope::current().as_ref())?;
+        let mut clusters = Vec::with_capacity(count);
+        let mut rows = 0u32;
+        for cluster in 0..count {
+            let child_count = read_count(self, start + ((cluster as u64 + 1) * 4))?;
+            clusters.push(ClusterHeader {
+                start_index: rows,
+                child_count,
+            });
+            rows = rows
+                .checked_add(child_count)
+                .ok_or_else(|| vector_io(invalid_vector("vector level row count overflow")))?;
+        }
+        let end = (rows as u64)
+            .checked_mul(stride as u64)
+            .and_then(|size| rows_start.checked_add(size))
+            .filter(|end| *end <= self.file_len && rows as usize <= bound)
+            .ok_or_else(|| vector_io(invalid_vector("truncated vector rows")))?;
+        Ok(VectorLevel {
+            clusters,
+            rows,
+            rows_start,
+            end,
+            _memory,
+        })
+    }
+}
+
+struct VectorLevel {
+    clusters: Vec<ClusterHeader>,
+    rows: u32,
+    rows_start: u64,
+    end: u64,
+    _memory: MemoryReservation,
+}
+
+fn invalid_vector(message: &'static str) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, message)
 }
 
 /// Quantization method for embeddings.
@@ -969,85 +1080,161 @@ impl VectorSegment {
         }
     }
 
-    pub(crate) async fn commit_vector_shard(&mut self) -> std::io::Result<()> {
-        if self.is_last_level_incomplete {
-            let vector_dimensions = self.vector_dimensions;
-            let vector_type = match self.quantization {
-                Quantization::ScalarQuantizationI8 => Precision::I8,
-                Quantization::TurboQuantI8 => Precision::I8,
-                _ => self.vector_precision,
-            };
-            let vector_size = size_of::<VectorHeader>()
-                + (vector_dimensions
-                    * match vector_type {
-                        Precision::F32 => 4,
-                        Precision::I8 => 1,
-                        Precision::None => 0,
-                    });
+    fn vector_layout(&self) -> (Precision, usize) {
+        let precision = if self.quantization != Quantization::None {
+            Precision::I8
+        } else {
+            self.vector_precision
+        };
+        let width = if precision == Precision::F32 { 4 } else { 1 };
+        (
+            precision,
+            size_of::<VectorHeader>() + self.vector_dimensions * width,
+        )
+    }
 
-            let mut offset = self.last_level_vector_file_start_pos as usize;
-
-            let cluster_number_bytes = &self.vector_file_mmap[offset..offset + 4];
-            let cluster_number =
-                u32::from_le_bytes(cluster_number_bytes.try_into().unwrap()) as usize;
-            offset += 4;
-            self.indexed_cluster_count=self.indexed_cluster_count.checked_sub(cluster_number)
-                .ok_or_else(||std::io::Error::other("vector cluster count underflow"))?;
-
-            let mut clusters = Vec::with_capacity(cluster_number);
-            let mut start_index = 0;
-            for _i in 0..cluster_number {
-                let cluster_header_bytes = &self.vector_file_mmap[offset..offset + 4];
-                let cluster_header = ClusterHeader {
-                    start_index,
-                    child_count: u32::from_le_bytes(cluster_header_bytes.try_into().unwrap()),
-                };
-                offset += 4;
-                start_index += cluster_header.child_count;
-                clusters.push(cluster_header);
+    pub(crate) fn validate_vectors(&self) -> Result<(), RecordError> {
+        if !self.is_vector_indexing {
+            return Ok(());
+        }
+        let (precision, stride) = self.vector_layout();
+        let mut buffer = VectorBlock::new(&self.vector_file)?;
+        let mut offset = 0;
+        let mut last = 0;
+        let mut vectors = 0usize;
+        let mut clusters = 0usize;
+        let euclidean = self.vector_similarity == VectorSimilarity::Euclidean
+            && self.vector_precision == Precision::F32;
+        if euclidean
+            && self.quantization == Quantization::ScalarQuantizationI8
+            && self.max_vector_value != f32::MIN
+        {
+            validate_euclidean_f32(
+                &[self.min_vector_value, self.max_vector_value],
+                self.vector_dimensions,
+            )
+            .map_err(RecordError::Rejected)?;
+            if self.min_vector_value > self.max_vector_value {
+                return Err(RecordError::Rejected(
+                    "invalid euclidean quantization range".into(),
+                ));
             }
-
-            for cluster in clusters.iter() {
-                let cluster_vectors_count = cluster.child_count as usize;
-                let cluster_offset = cluster.start_index as usize * vector_size;
-
-                for vector_id in 0..cluster_vectors_count {
-                    let record = read_record(
-                        &self.vector_file_mmap
-                            [offset + cluster_offset + (vector_id * vector_size)..],
-                        vector_dimensions,
-                        vector_type,
-                    );
-
-                    self.block_vector_buffer.push(ParentMedoid {
-                        medoid_index: 0,
-                        similarity: 0.0,
-                        is_medoid: false,
-
-                        doc_id: record.header.doc_id,
-                        field_id: record.header.field_id,
-                        chunk_id: record.header.chunk_id,
-                        scale: record.header.scale,
-                        norm: record.header.norm,
-                        zero_point: record.header.zero_point,
-                        sum_q: record.header.sum_q,
-                        embedding: match record.embedding {
-                            EmbeddingView::I8(e) => Embedding::I8(e.to_vec()),
-                            EmbeddingView::F32(e) => Embedding::F32(e.to_vec()),
-                        },
-                    });
+        }
+        for _ in 0..self.vector_levels {
+            last = offset;
+            let level =
+                buffer.read_level(&self.vector_file, offset, stride, self.indexed_vector_count)?;
+            clusters = clusters
+                .checked_add(level.clusters.len())
+                .ok_or_else(|| vector_io(invalid_vector("vector count overflow")))?;
+            vectors = vectors
+                .checked_add(level.rows as usize)
+                .ok_or_else(|| vector_io(invalid_vector("vector count overflow")))?;
+            if euclidean {
+                for row in 0..level.rows {
+                    let row_offset = level.rows_start + u64::from(row) * stride as u64;
+                    let bytes = buffer
+                        .read(&self.vector_file, row_offset, stride)
+                        .map_err(vector_io)?;
+                    self.validate_euclidean_row(read_record(
+                        bytes,
+                        self.vector_dimensions,
+                        precision,
+                    ))?;
                 }
             }
+            offset = level.end;
+        }
+        if vectors != self.indexed_vector_count
+            || clusters != self.indexed_cluster_count
+            || (self.vector_levels > 0 && last != self.last_level_vector_file_start_pos)
+        {
+            return Err(vector_io(invalid_vector(
+                "vector component counters mismatch",
+            )));
+        }
+        Ok(())
+    }
 
-            self
-                .vector_file
+    fn validate_euclidean_row(&self, row: VectorRecordView<'_>) -> Result<(), RecordError> {
+        let width = self.vector_dimensions;
+        match row.embedding {
+            EmbeddingView::F32(values) => {
+                validate_euclidean_f32(values, width).map_err(RecordError::Rejected)
+            }
+            EmbeddingView::I8(_) => {
+                let scale = f64::from(row.header.scale);
+                let norm = f64::from(row.header.norm);
+                let zero = i64::from(row.header.zero_point).abs();
+                let sum = i64::from(row.header.sum_q).abs();
+                // Bound every reconstructed coordinate, including affine correction.
+                let bound = width as f64 * (128 + zero).pow(2) as f64 * scale * scale;
+                if !scale.is_finite()
+                    || scale < 0.0
+                    || !norm.is_finite()
+                    || norm < 0.0
+                    || zero > 128
+                    || sum > 128 * width as i64
+                    || norm > f64::from(f32::MAX) / 16.0
+                    || bound > f64::from(f32::MAX) / 16.0
+                {
+                    return Err(RecordError::Rejected(
+                        "euclidean component exceeds the safe F32 arithmetic range".into(),
+                    ));
+                }
+                Ok(())
+            }
+        }
+    }
+
+    pub(crate) async fn commit_vector_shard(&mut self) -> io::Result<()> {
+        if self.is_last_level_incomplete {
+            let (vector_type, vector_size) = self.vector_layout();
+            let mut buffer = VectorBlock::new(&self.vector_file).map_err(io::Error::other)?;
+            let level = buffer
+                .read_level(
+                    &self.vector_file,
+                    self.last_level_vector_file_start_pos,
+                    vector_size,
+                    self.indexed_vector_count,
+                )
+                .map_err(io::Error::other)?;
+            self.indexed_cluster_count = self
+                .indexed_cluster_count
+                .checked_sub(level.clusters.len())
+                .ok_or_else(|| invalid_vector("vector cluster count underflow"))?;
+            for row in 0..level.rows {
+                let offset = level.rows_start + u64::from(row) * vector_size as u64;
+                let record = read_record(
+                    buffer.read(&self.vector_file, offset, vector_size)?,
+                    self.vector_dimensions,
+                    vector_type,
+                );
+                self.block_vector_buffer.push(ParentMedoid {
+                    medoid_index: 0,
+                    similarity: 0.0,
+                    is_medoid: false,
+
+                    doc_id: record.header.doc_id,
+                    field_id: record.header.field_id,
+                    chunk_id: record.header.chunk_id,
+                    scale: record.header.scale,
+                    norm: record.header.norm,
+                    zero_point: record.header.zero_point,
+                    sum_q: record.header.sum_q,
+                    embedding: match record.embedding {
+                        EmbeddingView::I8(e) => Embedding::I8(e.to_vec()),
+                        EmbeddingView::F32(e) => Embedding::F32(e.to_vec()),
+                    },
+                });
+            }
+
+            self.vector_file
                 .seek(SeekFrom::Start(self.last_level_vector_file_start_pos))?;
         } else {
             self.last_level_vector_file_start_pos = self.vector_file.stream_position()?;
         }
 
-        // Old mapped values have been copied into block_vector_buffer above.
-        self.vector_file_mmap = memmap2::MmapOptions::new().len(1).map_anon()?.make_read_only()?;
         let enable_clustering = if let Clustering::Fixed(size) = self.meta.clustering {
             size > 1 && self.block_vector_buffer.len() >= 100
         } else if let Clustering::None = self.meta.clustering {
@@ -1099,10 +1286,10 @@ impl VectorSegment {
 
         self.vector_file.flush()?;
         self.vector_file.sync_all()?;
-        self.vector_file_mmap =
-            unsafe { Mmap::map(&self.vector_file)? };
         Ok(())
     }
+
+
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1117,7 +1304,7 @@ pub(crate) trait SearchVectorSegment {
         cluster_search: AnnMode,
         field_filter: Vec<String>,
         facet_filter: Vec<FacetFilter>,
-    ) -> Result<ResultObject, crate::record::RecordError>;
+    ) -> Result<ResultObject, RecordError>;
 }
 
 /// Defines the source of search results, which can be lexical, vector-based, or a hybrid of both.
@@ -1146,7 +1333,7 @@ impl VectorSegment {
         field_filter_set: &AHashSet<u16>,
         facet_filter: &[FilterSparse],
         top_k: &mut TopK<'_>,
-    ) {
+    ) -> Result<(), RecordError> {
         let level_id = if self.is_last_level_incomplete {
             self.vector_levels - 1
         } else { self.vector_levels };
@@ -1157,7 +1344,7 @@ impl VectorSegment {
 
         for record in self.block_vector_buffer.iter() {
             let doc_id = (level_id << 16) | (record.doc_id as usize);
-            if self.is_deleted(doc_id) || is_facet_filter(self, facet_filter, doc_id) {
+            if self.is_deleted(doc_id) || is_facet_filter(self, facet_filter, doc_id)? {
                 continue;
             }
             if field_filter_set.is_empty() || field_filter_set.contains(&(record.field_id as u16)) {
@@ -1208,6 +1395,7 @@ impl VectorSegment {
                 );
             }
         }
+        Ok(())
     }
 }
 impl SearchVectorSegment for VectorSegmentArc {
@@ -1220,14 +1408,14 @@ impl SearchVectorSegment for VectorSegmentArc {
         ann_mode: AnnMode,
         field_filter: Vec<String>,
         facet_filter: Vec<FacetFilter>,
-    ) -> Result<ResultObject, crate::record::RecordError> {
+    ) -> Result<ResultObject, RecordError> {
         let mut result_object: ResultObject = Default::default();
 
         let shard_ref = self.read().await;
-        if shard_ref.failed { return Err(crate::record::RecordError::RecoveryRequired); }
+        if shard_ref.failed { return Err(RecordError::RecoveryRequired); }
         let facet_filter = match compile_filters(&shard_ref, &facet_filter) {
             Ok(filters) => filters,
-            Err(error) => return Err(crate::record::RecordError::Rejected(error)),
+            Err(error) => return Err(RecordError::Rejected(error)),
         };
         let mut observed_cluster_count = 0;
 
@@ -1253,18 +1441,7 @@ impl SearchVectorSegment for VectorSegmentArc {
 
         let vector_similarity = shard_ref.vector_similarity;
         let vector_dimensions = shard_ref.vector_dimensions;
-        let vector_type = match shard_ref.quantization {
-            Quantization::ScalarQuantizationI8 => Precision::I8,
-            Quantization::TurboQuantI8 => Precision::I8,
-            _ => shard_ref.vector_precision,
-        };
-        let vector_size = size_of::<VectorHeader>()
-            + (vector_dimensions
-                * match vector_type {
-                    Precision::F32 => 4,
-                    Precision::I8 => 1,
-                    Precision::None => 0,
-                });
+        let (vector_type, vector_size) = shard_ref.vector_layout();
 
         let query_embedding = query_vector.unwrap();
 
@@ -1298,31 +1475,15 @@ impl SearchVectorSegment for VectorSegmentArc {
                     &facet_filter,
                     &mut top_k,
                 )
-                .await;
+                .await?;
         }
 
         let mut offset = 0;
+        let mut buffer = if shard_ref.vector_levels > 0 { Some(VectorBlock::new(&shard_ref.vector_file)?) } else { None };
         for level_id in 0..shard_ref.vector_levels {
-            let cluster_number_bytes = &shard_ref.vector_file_mmap[offset..offset + 4];
-            let cluster_number =
-                u32::from_le_bytes(cluster_number_bytes.try_into().unwrap()) as usize;
-            offset += 4;
-
-            let mut clusters = Vec::with_capacity(cluster_number);
-            let mut level_vectors_count = 0;
-            let mut start_index = 0;
-            for _i in 0..cluster_number {
-                let cluster_header_bytes = &shard_ref.vector_file_mmap[offset..offset + 4];
-                let cluster_header = ClusterHeader {
-                    start_index,
-                    child_count: u32::from_le_bytes(cluster_header_bytes.try_into().unwrap()),
-                };
-                offset += 4;
-                start_index += cluster_header.child_count;
-                clusters.push(cluster_header);
-                level_vectors_count += cluster_header.child_count;
-            }
-
+            let buffer = buffer.as_mut().expect("published vector levels have a read window");
+            let level = buffer.read_level(&shard_ref.vector_file, offset, vector_size, shard_ref.indexed_vector_count)?;
+            let clusters = &level.clusters;
             let (n_probe, cluster_similarity_threshold) = match ann_mode {
                 AnnMode::All => (clusters.len(), None),
                 AnnMode::Similaritythreshold(threshold) => (clusters.len(), Some(threshold)),
@@ -1339,9 +1500,10 @@ impl SearchVectorSegment for VectorSegmentArc {
                 let mut top_k_medoid =
                     TopK::new(n_probe, cluster_similarity_threshold, vector_similarity, similarity_normalization);
                 for (cluster_id, cluster) in clusters.iter().enumerate() {
-                    let medoid_offset = offset + cluster.start_index as usize * vector_size;
+                    if cluster.child_count == 0 { continue; }
+                    let medoid_offset = level.rows_start + u64::from(cluster.start_index) * vector_size as u64;
                     let medoid_record = read_record(
-                        &shard_ref.vector_file_mmap[medoid_offset..],
+                        buffer.read(&shard_ref.vector_file, medoid_offset, vector_size).map_err(vector_io)?,
                         vector_dimensions,
                         vector_type,
                     );
@@ -1422,20 +1584,19 @@ impl SearchVectorSegment for VectorSegmentArc {
             for (cluster_id, _level_id2, cluster_score, cluster) in selected_clusters.iter() {
                 let cluster_vectors_count = cluster.child_count as usize;
 
-                let cluster_offset = cluster.start_index as usize * vector_size;
+                let cluster_offset = level.rows_start + u64::from(cluster.start_index) * vector_size as u64;
 
                 unsafe {
                     for i in 0..cluster_vectors_count {
                         let record = read_record(
-                            &shard_ref.vector_file_mmap
-                                [offset + cluster_offset + (i * vector_size)..],
+                            buffer.read(&shard_ref.vector_file, cluster_offset + i as u64 * vector_size as u64, vector_size).map_err(vector_io)?,
                             vector_dimensions,
                             vector_type,
                         );
 
                         let doc_id = (level_id << 16) | (record.header.doc_id as usize);
                         if shard_ref.is_deleted(doc_id)
-                            || is_facet_filter(&shard_ref, &facet_filter, doc_id)
+                            || is_facet_filter(&shard_ref, &facet_filter, doc_id)?
                         {
                             continue;
                         }
@@ -1496,7 +1657,7 @@ impl SearchVectorSegment for VectorSegmentArc {
                 }
             }
 
-            offset += level_vectors_count as usize * vector_size;
+            offset = level.end;
         }
 
         top_k.items[..top_k.len].sort_by(|a, b| shard_ref.rank(b.score, b.doc_id, a.score, a.doc_id));

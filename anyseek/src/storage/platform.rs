@@ -1,6 +1,28 @@
 use std::{io, path::Path};
-#[cfg(unix)]
 use std::fs;
+
+#[cfg(unix)]
+pub(super) fn read_exact_at(file: &fs::File, offset: u64, buf: &mut [u8]) -> io::Result<()> {
+    use std::os::unix::fs::FileExt;
+    file.read_exact_at(buf, offset)
+}
+
+#[cfg(windows)]
+pub(super) fn read_exact_at(mut file: &fs::File, offset: u64, buf: &mut [u8]) -> io::Result<()> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    // The wrapper serializes Windows cursor operations on this handle.
+    let original = file.stream_position()?;
+    file.seek(SeekFrom::Start(offset))?;
+    let read = file.read_exact(buf);
+    let restore = file.seek(SeekFrom::Start(original));
+    read.and(restore.map(|_| ()))
+}
+
+#[cfg(not(any(unix, windows)))]
+pub(super) fn read_exact_at(_: &fs::File, _: u64, _: &mut [u8]) -> io::Result<()> {
+    Err(io::Error::new(io::ErrorKind::Unsupported, "uncertified persistence platform"))
+}
 
 #[derive(Debug)]
 pub(super) enum PublishError {
