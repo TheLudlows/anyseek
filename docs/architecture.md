@@ -83,7 +83,9 @@ VectorIndex 的 schema、距离和量化配置是逻辑查询配置；组件中�
 
 `record/lexical/directory_gate.rs` 按同一物理索引目录共享 I/O mutex，不再让不同目录共用进程级文件操作锁。Unix 以 canonical 路径对应的 device/inode 为键；其他平台使用 canonical 路径。全局 registry 只存弱引用，在打开目录时短持锁，不在该锁内做文件 I/O 或等待容量。
 
-Directory/Writer 克隆与固定读者通过原有 owner 保留目录锁。内存、服务级/集合级 I/O 额度、OS writer/owner lock、取消和包 pin 继续生效；不允许外部替换仍在使用的目录。该改动消除了无关目录间的 mutex 等待，端到端吞吐与 Windows 别名行为仍需独立验收，见[原生 I/O 证据](../benchmarks/native-io/README.zh-CN.md)。
+全文目录用 `storage::build_budget::File` 访问已经打开的普通文件。打开、元数据更换和顺序写入经过各自目录的 I/O gate。已打开的不可变段按偏移读取，不占用目录 gate。读缓冲分配前申请额度，Tantivy 的 `OwnedBytes` 及其切片持有额度直到最后一个引用释放。记录写入在 WAL 前为原生构建读取和快照重载预留额度，重载将预留额度转给实际读缓冲。原生元数据的读入和 JSON 解码使用目录或 writer 持有的预算。固定 Searcher、文件句柄和 writer 持有包 pin，封存与回收继续遵循现有发布协议。Reader 由 Record 发布流程手动重载。
+
+Unix 按偏移读取不改变文件游标。Windows 在同一文件句柄上串行执行范围读和游标操作。进程与集合 I/O 额度、OS writer/owner lock 和取消依旧约束原生 writer。端到端吞吐与 Windows 别名行为见[原生 I/O 证据](../benchmarks/native-io/README.zh-CN.md)。
 
 独立快照按文件阶段借用一份 I/O 额度，内部文件操作共享该额度；与后台物化竞争时等待既有容量，不重复申请或放宽上限。原生构建和网络操作在该文件事务之外进行。独立输出完整认证后不缓存供 live 增量证明使用的 State 容器。
 

@@ -31,6 +31,28 @@ const MAX_DOCUMENTS: usize = 10_000;
 const MAX_FIELDS: usize = 64;
 const MAX_TOKENS: usize = 65_536;
 
+fn native_io_error(error: std::io::Error) -> RecordError {
+    if native_read_busy(&error) {
+        RecordError::Busy
+    } else {
+        storage(error)
+    }
+}
+
+fn native_search_error(error: tantivy::TantivyError) -> RecordError {
+    match &error {
+        tantivy::TantivyError::IoError(source)
+        | tantivy::TantivyError::OpenReadError(tantivy::directory::error::OpenReadError::IoError {
+            io_error: source, ..
+        }) if native_read_busy(source) => RecordError::Busy,
+        _ => storage(error),
+    }
+}
+
+fn native_read_busy(error: &std::io::Error) -> bool {
+    error.get_ref().and_then(|source| source.downcast_ref::<RecordError>()) == Some(&RecordError::Busy)
+}
+
 mod directory;
 #[cfg(test)]
 pub(super) mod package;
@@ -320,7 +342,7 @@ impl Candidate {
         cut: Cut,
         byte_limit: u64,
     ) -> Result<Snapshot, RecordError> {
-        // Reserve before hashing, decoding metadata, mapping native files or
+        // Reserve before hashing, decoding metadata, opening native files or
         // allocating ordinal/length arrays. Retain the lease with the Searcher.
         if self.files.len() > 1024 {
             return Err(storage("lexical closure file budget exceeded"));
@@ -361,8 +383,10 @@ impl Candidate {
         {
             return Err(storage("unsupported or inconsistent lexical package"));
         }
+        drop(_io);
         let (expected, fields) = schema(&manifest.fields)?;
-        let index = NativeIndex::open_in_dir(path.join("lexical")).map_err(storage)?;
+        let directory = directory::BudgetDirectory::open_selected(&path.join("lexical"), byte_limit)?;
+        let index = NativeIndex::open(directory).map_err(storage)?;
         if index.schema() != expected {
             return Err(storage("lexical schema mismatch"));
         }

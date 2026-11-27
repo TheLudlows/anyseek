@@ -41,8 +41,17 @@ impl Runtime {
         let temporary=65536u64.checked_add(count.checked_mul(256).ok_or_else(||storage("visible manifest overflow"))?).and_then(|n|n.checked_add(id_bytes.checked_mul(8)?)).ok_or_else(||storage("visible manifest overflow"))?;
         let fields=self.config.schema.iter().filter(|field|field.index_lexical).count() as u64;
         let snapshot=65536u64.checked_add(count.checked_mul(128+fields*32).ok_or_else(||storage("visible snapshot overflow"))?).and_then(|n|n.checked_add(id_bytes)).ok_or_else(||storage("visible snapshot overflow"))?;
+        // Reload reads file footers and fast-field directories, then capture
+        // reads the identity and field-length columns. Allow a segment per row.
+        let native_reads = count.checked_mul(4096 + fields * 512)
+            .and_then(|bytes| bytes.checked_add(65536))
+            .ok_or_else(|| storage("native snapshot read workspace overflow"))?;
         let row=RowWorkspace{analysis:crate::record::build_budget::admit_retained_memory(analysis_bytes)?,identity:crate::record::build_budget::admit_retained_memory(256+identity_bytes)?};
-        let publication=PublishWorkspace{temporary:crate::record::build_budget::admit_retained_memory(temporary)?,snapshot:crate::record::build_budget::admit_retained_memory(snapshot)?};
+        let publication=PublishWorkspace{
+            temporary:crate::record::build_budget::admit_retained_memory(temporary)?,
+            snapshot:crate::record::build_budget::admit_retained_memory(snapshot)?,
+            native_reads:crate::record::build_budget::admit_retained_memory(native_reads)?,
+        };
         let writer=match state.writer.upgrade(){Some(writer)=>writer,None=>self.directory.as_ref().ok_or_else(||storage("immutable progress reservation"))?.prepare_writer(WRITER_BYTES as u64)?};
         // Publish accounting only after every fallible admission. Cancellation
         // refunds the entire plan; no worker waits for later memory occupancy.
@@ -475,7 +484,8 @@ mod tests {
             while !gate.with_extension("started").exists(){tokio::time::sleep(std::time::Duration::from_millis(1)).await;}
         }).await.unwrap();
         let held=crate::storage::build_budget::fill_memory_for_test();std::fs::remove_file(gate).unwrap();
-        tokio::time::timeout(std::time::Duration::from_secs(5),native.join_visible()).await.unwrap().unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5),native.join_visible()).await.unwrap()
+            .unwrap_or_else(|error| panic!("{error:?}: {:?}", native.live.lock().unwrap().error));
         assert_eq!(native.data.lock().await.identities.len(),3);assert_eq!(native.snapshot().await.unwrap().overlay.len(),0);
         assert!(native.visible_bytes.load(std::sync::atomic::Ordering::Acquire)>0);drop(pinned);
         assert_eq!(native.visible_bytes.load(std::sync::atomic::Ordering::Acquire),0);drop(held);
