@@ -7,7 +7,7 @@ use crate::{
     index::VectorIndexArc,
     min_heap::Result as SearchHit,
     search::{
-        ChannelExplanation, FacetFilter, QueryType, ResultObject, ResultSort, ResultSortIndex,
+        ChannelExplanation, FacetFilter, QueryType, QueryWork, ResultObject, ResultSort, ResultSortIndex,
         ResultType, RrfOptions, SearchMode, SortOrder, rrf_contribution,
     },
     vector::Embedding,
@@ -27,6 +27,10 @@ pub(crate) async fn search(
     sort: Vec<ResultSort>,
     cut: Cut,
 ) -> Result<ResultObject, RecordError> {
+    let work = QueryWork::current();
+    if let Some(work) = &work {
+        work.charge(0)?;
+    }
     {
         let root = index.read().await;
         let config = &root.segments.first().ok_or_else(|| storage("empty retrieval view"))?.lexical.config;
@@ -167,7 +171,16 @@ pub(crate) async fn search(
     }
     let views = snapshots.iter().map(Arc::as_ref).collect::<Vec<_>>();
     scoring::validate_bounds(&plan.scores, &boosts, native_fields.len())?;
-    if !hybrid && !browse && !has_positive_terms(&views, &plan.scores)? {
+    let strict = if let Some(work) = &work {
+        work.charge(snapshots.len())?;
+        // An exact-cut consumer may use a published pair or an aligned bounded
+        // tail, but cannot scan the whole corpus to rejoin mismatched identities.
+        Some(capture_aligned(&root.segments, &snapshots, &active_shards, Some(work))?
+            .ok_or(RecordError::Busy)?)
+    } else {
+        None
+    };
+    if !hybrid && !browse && !has_positive_terms(&views, &plan.scores, work.as_deref())? {
         scoring::CorpusView::validate_snapshots(&views, cut)?;
         for shard in &shards {
             crate::metadata_filter::validate_filters(&shard.schema_map, &filters)
@@ -176,7 +189,10 @@ pub(crate) async fn search(
         return Ok(result);
     }
 
-    let selections = capture_aligned(&root.segments, &snapshots, &active_shards);
+    let selections = match strict {
+        Some(selections) => Some(selections),
+        None => capture_aligned(&root.segments, &snapshots, &active_shards, None)?,
+    };
     let aligned = selections.is_some();
     let mut vectors = BTreeMap::new();
     let _identity_workspace = if aligned {
@@ -438,24 +454,34 @@ fn capture_aligned(
     segments: &[RetrievalSegment],
     snapshots: &[Arc<Snapshot>],
     active_shards: &[&crate::active::ActiveStatistics],
-) -> Option<Vec<LiveSelection>> {
+    work: Option<&QueryWork>,
+) -> Result<Option<Vec<LiveSelection>>, RecordError> {
     let mut remaining = runtime::MUTABLE_TAIL_UPDATES;
     let mut selections = Vec::with_capacity(snapshots.len());
     for ((segment, snapshot), active) in segments.iter().zip(snapshots).zip(active_shards) {
+        if work.is_some() && snapshot.identities.len() != active.keys.len() {
+            return Ok(None);
+        }
         if let Some(live) = segment.visibility.capture(snapshot, active.keys.len()) {
             selections.push(LiveSelection::Published(live));
             continue;
         }
-        remaining = remaining.checked_sub(snapshot.identities.len().max(active.keys.len()))?;
+        let rows = snapshot.identities.len().max(active.keys.len());
+        let Some(next) = remaining.checked_sub(rows) else { return Ok(None); };
+        remaining = next;
+        if let Some(work) = work {
+            // Pair physical identities, then select live metadata ordinals.
+            work.charge(rows * 2)?;
+        }
         if !visibility::aligned_prefix(snapshot, active) {
-            return None;
+            return Ok(None);
         }
         let common = snapshot.identities.len().min(active.keys.len());
         let mut keys = BTreeSet::new();
         let mut selected = BTreeSet::new();
         for (ordinal, key) in active.keys.iter().enumerate().filter(|(ordinal, _)| active.is_live(*ordinal)) {
             if !keys.insert(key) {
-                return None;
+                return Ok(None);
             }
             if ordinal < common {
                 selected.insert(ordinal);
@@ -463,7 +489,7 @@ fn capture_aligned(
         }
         selections.push(LiveSelection::Ordinals(selected));
     }
-    Some(selections)
+    Ok(Some(selections))
 }
 
 #[derive(Default)]
@@ -485,16 +511,26 @@ impl FilteredMatches {
 // Each match of a non-browse predicate needs at least one positive
 // term in a selected field. A dictionary hit is only evidence to keep
 // searching: it may be retired or fail the full Boolean/phrase predicate.
-fn has_positive_terms(snapshots: &[&Snapshot], groups: &[query::ScoreGroup]) -> Result<bool, RecordError> {
+fn has_positive_terms(
+    snapshots: &[&Snapshot],
+    groups: &[query::ScoreGroup],
+    work: Option<&QueryWork>,
+) -> Result<bool, RecordError> {
     for snapshot in snapshots {
         for group in groups {
             for field in &group.match_fields {
                 let term = Term::from_field_text(*field, &group.matched_term);
                 for segment in snapshot.searcher.segment_readers() {
+                    if let Some(work) = work {
+                        work.charge(1)?;
+                    }
                     if segment.inverted_index(*field).map_err(super::native_search_error)?
                         .get_term_info(&term).map_err(super::native_io_error)?.is_some() {
                         return Ok(true);
                     }
+                }
+                if let Some(work) = work {
+                    work.charge(snapshot.overlay.len())?;
                 }
                 if snapshot.overlay.iter().any(|(_, row)| {
                     !row.positions(&snapshot.fields, *field, &group.matched_term).is_empty()

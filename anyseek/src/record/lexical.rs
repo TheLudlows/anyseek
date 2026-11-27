@@ -32,25 +32,34 @@ const MAX_FIELDS: usize = 64;
 const MAX_TOKENS: usize = 65_536;
 
 fn native_io_error(error: std::io::Error) -> RecordError {
-    if native_read_busy(&error) {
-        RecordError::Busy
-    } else {
-        storage(error)
-    }
+    native_read_rejection(&error).unwrap_or_else(|| storage(error))
 }
 
 fn native_search_error(error: tantivy::TantivyError) -> RecordError {
     match &error {
         tantivy::TantivyError::IoError(source)
-        | tantivy::TantivyError::OpenReadError(tantivy::directory::error::OpenReadError::IoError {
-            io_error: source, ..
-        }) if native_read_busy(source) => RecordError::Busy,
-        _ => storage(error),
+        | tantivy::TantivyError::OpenReadError(
+            tantivy::directory::error::OpenReadError::IoError {
+                io_error: source, ..
+            },
+        ) => native_read_rejection(source),
+        _ => None,
     }
+    .unwrap_or_else(|| storage(error))
 }
 
-fn native_read_busy(error: &std::io::Error) -> bool {
-    error.get_ref().and_then(|source| source.downcast_ref::<RecordError>()) == Some(&RecordError::Busy)
+fn native_read_rejection(error: &std::io::Error) -> Option<RecordError> {
+    let cause = error.get_ref()?;
+    match cause.downcast_ref::<RecordError>() {
+        Some(reason @ (RecordError::Busy | RecordError::Rejected(_))) => Some(reason.clone()),
+        _ if cause
+            .downcast_ref::<crate::resources::Busy>()
+            .is_some_and(crate::resources::Busy::is_recoverable) =>
+        {
+            Some(RecordError::Busy)
+        }
+        _ => None,
+    }
 }
 
 mod directory;

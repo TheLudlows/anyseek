@@ -1904,7 +1904,10 @@ async fn query_time_vector_collection(
     deadline: tokio::time::Instant,
 ) -> Result<(Result<TimeVectorResult, Error>, DataOutputPermit), Error> {
     let p = s.record(&tenant, &id).await?;
-    let data = p.output_permit_after_publication().await?;
+    let publication = p.output_permit_after_publication();
+    #[cfg(test)]
+    let publication = event_time_tests::observe_publication_wait(publication);
+    let data = publication.await?;
     let result = s.catalog.authorized_generation(tenant, id, p.generation, move |entry| async move {
         if !request.all || request.count {
             return Err(bad("time and vector recall requires all=true and count=false"));
