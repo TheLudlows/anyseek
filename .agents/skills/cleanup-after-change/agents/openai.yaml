@@ -1,0 +1,6 @@
+interface:
+  display_name: "改动后清理"
+  short_description: "清理旧实现、冗余测试与过期文档，按行为风险保留必要覆盖并完成验证。"
+  default_prompt: "使用 $cleanup-after-change 清理本次改动涉及的旧实现、冗余测试和文档，复用现有覆盖并完成必要验证。"
+policy:
+  allow_implicit_invocation: true
