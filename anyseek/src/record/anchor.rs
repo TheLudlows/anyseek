@@ -589,7 +589,14 @@ impl Reference {
         -> Result<Option<Arc<entity::Projection>>, RecordError>
     {
         let mut members = files.iter().filter(|file| file.path.split('/').next() == Some(entity::DIRECTORY));
-        let Some(descriptor) = members.next() else { return Ok(None); };
+        let member_proof = files.iter().find(|file| file.path == entity::MEMBER_CAPABILITY)
+            .map(|file| (file.bytes, file.sha256));
+        let Some(descriptor) = members.next() else {
+            if member_proof.is_some() {
+                return Err(storage("entity membership capability has no selected sidecar"));
+            }
+            return Ok(None);
+        };
         if descriptor.path != entity::MEMBERS[0]
             || !entity::MEMBERS[1..].iter().all(|name| members.next().is_some_and(|file| file.path == *name))
             || members.next().is_some()
@@ -600,7 +607,7 @@ impl Reference {
             return Err(storage("entity adjacency is outside its selected State base"));
         }
         let binding = state.base.record_rows()?.entity_binding(owner)?;
-        let adjacency = entity::Projection::open(path, &binding, descriptor.bytes, descriptor.sha256)
+        let adjacency = entity::Projection::open(path, &binding, descriptor.bytes, descriptor.sha256, member_proof)
             .map_err(state_rows::entity_error)?;
         Ok(Some(Arc::new(adjacency)))
     }
