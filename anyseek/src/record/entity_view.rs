@@ -5,6 +5,7 @@ use crate::storage::{
     build_budget::{MemoryLease, reserve_memory},
     disk_records::entity,
 };
+use std::sync::Weak;
 use tokio::time::{Instant, timeout_at};
 
 const MAX_TAIL_ROWS: usize = 128;
@@ -16,7 +17,8 @@ fn path_work(deadline: Instant) -> Arc<QueryWork> {
 }
 
 /// Direction of one edge relative to the requested anchor entity.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
 pub enum EntityDirection {
     /// Edges declared from the anchor.
     Out,
@@ -34,7 +36,7 @@ impl EntityDirection {
 }
 
 /// A derived edge declaration. Its canonical version is relative to the pinned cut.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Serialize, utoipa::ToSchema)]
 pub struct EntityCandidate {
     /// Other endpoint of the matched edge.
     pub neighbor: String,
@@ -58,7 +60,7 @@ impl EntityCandidates {
 }
 
 /// Visible canonical revision declaring membership in an entity.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Serialize, utoipa::ToSchema)]
 pub struct EntityMember {
     /// Stable Record identity.
     pub record_id: String,
@@ -67,6 +69,7 @@ pub struct EntityMember {
 }
 
 /// One neighbor, its declarations and visible member revisions at the same cut.
+#[derive(Serialize, utoipa::ToSchema)]
 pub struct EntityNeighborCandidates {
     entity_id: String,
     declarations: Vec<EntityCandidate>,
@@ -103,14 +106,23 @@ impl EntityNeighborCandidates {
 ///     assert!(!neighbors.is_empty());
 /// }
 /// ```
+#[derive(Serialize, utoipa::ToSchema)]
 pub struct EntityCandidatePaths {
+    visible_seq: u64,
     seeds: Vec<EntityMember>,
     neighbors: Vec<EntityNeighborCandidates>,
+    #[serde(skip)]
     expires_at_ms: Option<u64>,
+    #[serde(skip)]
     _memory: MemoryLease,
 }
 
 impl EntityCandidatePaths {
+    /// The canonical cut of the returned identities and versions.
+    pub fn visible_seq(&self) -> u64 {
+        self.visible_seq
+    }
+
     /// Canonical member revisions of the anchor in Record ID order.
     pub fn seeds(&self) -> &[EntityMember] {
         &self.seeds
@@ -132,11 +144,9 @@ pub struct EntityAdjacencyView {
 }
 
 struct Snapshot {
-    cut: u64,
+    publication: EntityPublication,
     evaluation: u64,
     observed_at: Instant,
-    group_revision: u64,
-    selected_owner: String,
     base: Arc<state_rows::Base>,
     tail: Vec<state_memory::Shared<Record>>,
     max_visits: usize,
@@ -145,10 +155,88 @@ struct Snapshot {
     _scope: Option<crate::resources::Lease>,
 }
 
+#[derive(Clone)]
+struct EntityPublication {
+    cut: u64,
+    group_revision: u64,
+    selected_owner: String,
+    base: Weak<state_rows::Base>,
+}
+
+impl EntityPublication {
+    fn check(&self, inner: &Inner) -> Result<(), RecordError> {
+        if !inner.healthy {
+            return Err(RecordError::RecoveryRequired);
+        }
+        if inner.state.seq != self.cut
+            || inner.state.group_publication_revision() != self.group_revision
+            || inner
+                .anchor
+                .as_ref()
+                .is_none_or(|anchor| anchor.selected_owner() != self.selected_owner)
+            || !inner
+                .state
+                .records
+                .entity_base()
+                .is_some_and(|base| std::ptr::eq(self.base.as_ptr(), Arc::as_ptr(base)))
+        {
+            return Err(RecordError::Busy);
+        }
+        Ok(())
+    }
+}
+
+/// Recheck an entity publication without retaining an old partition or its base.
+pub(crate) struct EntityFrameOutput {
+    publication: EntityPublication,
+    owner: Weak<Mutex<Inner>>,
+    barrier: DataOutputPermit,
+    time: output::ReadTimeFence,
+}
+
+pub(crate) struct EntityFrameGuard<'a> {
+    output: &'a EntityFrameOutput,
+    inner: tokio::sync::OwnedMutexGuard<Inner>,
+}
+
+impl EntityFrameOutput {
+    pub(crate) fn try_pin(&self) -> Result<Option<EntityFrameGuard<'_>>, RecordError> {
+        let owner = self.owner.upgrade().ok_or(RecordError::RecoveryRequired)?;
+        let Ok(inner) = owner.try_lock_owned() else {
+            return Ok(None);
+        };
+        Ok(Some(EntityFrameGuard {
+            output: self,
+            inner,
+        }))
+    }
+
+    pub(crate) async fn pin(&self) -> Result<EntityFrameGuard<'_>, RecordError> {
+        let owner = self.owner.upgrade().ok_or(RecordError::RecoveryRequired)?;
+        let inner = timeout_at(self.time.deadline, owner.lock_owned())
+            .await
+            .map_err(|_| RecordError::Busy)?;
+        Ok(EntityFrameGuard {
+            output: self,
+            inner,
+        })
+    }
+}
+
+impl EntityFrameGuard<'_> {
+    pub(crate) fn deliver<T>(&self, handoff: impl FnOnce() -> T) -> Result<T, RecordError> {
+        self.output.publication.check(&self.inner)?;
+        self.output.barrier.deliver(|| {
+            self.output.time.check()?;
+            Ok(handoff())
+        })?
+    }
+}
+
 /// Holds the complete leased result and the exact request work until handoff.
 pub(crate) struct PreparedEntityPaths {
     view: EntityAdjacencyView,
-    owner: std::sync::Weak<Mutex<Inner>>,
+    owner: Weak<Mutex<Inner>>,
     paths: EntityCandidatePaths,
     deadline: Instant,
     work: Arc<QueryWork>,
@@ -216,11 +304,14 @@ impl RecordPartition {
             .map_err(|_| RecordError::Busy)?;
         Ok(EntityAdjacencyView {
             snapshot: Arc::new(Snapshot {
-                cut,
+                publication: EntityPublication {
+                    cut,
+                    group_revision: inner.state.group_publication_revision(),
+                    selected_owner: anchor.selected_owner().to_owned(),
+                    base: Arc::downgrade(&base),
+                },
                 evaluation,
                 observed_at,
-                group_revision: inner.state.group_publication_revision(),
-                selected_owner: anchor.selected_owner().to_owned(),
                 base,
                 tail: records.recent_records().cloned().collect(),
                 max_visits: entity::MAX_VISITS.min(inner.config.max_candidates),
@@ -262,7 +353,7 @@ impl PreparedEntityPaths {
     pub(crate) async fn deliver(
         self,
         p: &RecordPartition,
-    ) -> Result<EntityCandidatePaths, RecordError> {
+    ) -> Result<(EntityCandidatePaths, EntityFrameOutput), RecordError> {
         if !self.owner.ptr_eq(&Arc::downgrade(&p.inner)) {
             return Err(RecordError::Busy);
         }
@@ -270,23 +361,7 @@ impl PreparedEntityPaths {
             .await
             .map_err(|_| RecordError::Busy)?;
         let snapshot = &self.view.snapshot;
-        if !inner.healthy {
-            return Err(RecordError::RecoveryRequired);
-        }
-        if inner.state.seq != snapshot.cut
-            || inner.state.group_publication_revision() != snapshot.group_revision
-            || inner
-                .anchor
-                .as_ref()
-                .is_none_or(|anchor| anchor.selected_owner() != snapshot.selected_owner)
-            || !inner
-                .state
-                .records
-                .entity_base()
-                .is_some_and(|base| Arc::ptr_eq(base, &snapshot.base))
-        {
-            return Err(RecordError::Busy);
-        }
+        snapshot.publication.check(&inner)?;
         // Versions and canonical claims are immutable at the checked cut.
         // Bill each role before moving the complete result across the barrier.
         let roles = self.paths.seeds.len()
@@ -299,15 +374,36 @@ impl PreparedEntityPaths {
         snapshot.barrier.deliver(|| {
             self.work.charge(roles)?;
             let evaluation = inner.observe_time()?;
-            if self.paths.expires_at_ms.is_some_and(|expiry| {
-                let elapsed =
-                    u64::try_from(snapshot.observed_at.elapsed().as_millis()).unwrap_or(u64::MAX);
-                evaluation >= expiry || snapshot.evaluation.saturating_add(elapsed) >= expiry
-            }) {
+            let expires = self.paths.expires_at_ms;
+            let monotonic_expiry = expires.and_then(|expiry| {
+                snapshot
+                    .observed_at
+                    .checked_add(std::time::Duration::from_millis(
+                        expiry.saturating_sub(snapshot.evaluation),
+                    ))
+            });
+            if expires.is_some_and(|expiry| evaluation >= expiry)
+                || monotonic_expiry.is_some_and(|expiry| Instant::now() >= expiry)
+            {
                 return Err(RecordError::Busy);
             }
             self.work.charge(0)?;
-            Ok(self.paths)
+            Ok((
+                self.paths,
+                EntityFrameOutput {
+                    publication: snapshot.publication.clone(),
+                    owner: self.owner,
+                    barrier: snapshot.barrier.clone(),
+                    time: output::ReadTimeFence {
+                        clock: inner.clock.clone(),
+                        observed: inner.observed_time.clone(),
+                        certified_floor: inner.state.time_watermark_ms,
+                        deadline: self.deadline,
+                        expires,
+                        monotonic_expiry,
+                    },
+                },
+            ))
         })?
     }
 }
@@ -315,7 +411,7 @@ impl PreparedEntityPaths {
 impl EntityAdjacencyView {
     /// Canonical Record sequence of the base plus captured overlay.
     pub fn visible_seq(&self) -> u64 {
-        self.snapshot.cut
+        self.snapshot.publication.cut
     }
 
     /// Read declarations matching one entity ID, edge type and direction.
@@ -673,6 +769,7 @@ impl Snapshot {
         }
         work.charge(0)?;
         self.barrier.deliver(|| EntityCandidatePaths {
+            visible_seq: self.publication.cut,
             seeds,
             neighbors,
             expires_at_ms,

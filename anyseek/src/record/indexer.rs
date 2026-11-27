@@ -102,7 +102,10 @@ impl RecordPartition {
     /// Explicitly build the optional adjacency sidecar at a local Record cut.
     /// Available to embedded partition owners with no remote storage or archive.
     pub async fn build_entity_adjacency(&self, timeout: Duration) -> Result<u64, RecordError> {
-        self.start_owned_index_job(timeout, JobMode::Entity)?.finish().await
+        self.start_entity_checkpoint(timeout)?.finish().await
+    }
+    pub(crate) fn start_entity_checkpoint(&self, timeout: Duration) -> Result<IndexJob, RecordError> {
+        self.start_owned_index_job(timeout, JobMode::Entity)
     }
     fn start_owned_index_job(&self,timeout:Duration,mode:JobMode)->Result<IndexJob,RecordError> {
         if timeout.is_zero() || timeout > MAX_DEADLINE {
