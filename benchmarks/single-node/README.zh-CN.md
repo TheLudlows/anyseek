@@ -13,26 +13,54 @@
 
 ## 运行
 
-运行需要 Linux、Python 3.11 或更新版本，以及 util-linux 的 `findmnt` 和 `lsblk`。以下命令在基准工具所在仓库根执行。使用绝对路径设置 `BASE_CHECKOUT`、`LOCAL_NVME`、`BACKUP_DEVICE`。前者是固定基线的独立 checkout，后两者为本轮专用挂载路径。
+正式测量在操作者预留的本地 Linux NVMe 主机上运行，需要 Python 3.11 或更新版本，以及 util-linux 的 `findmnt` 和 `lsblk`。开跑前将干净的 harness checkout 固定在一个完整 Git SHA，两个引擎始终用这同一个 checkout 的脚本。`BASE_CHECKOUT` 和 `CANDIDATE_CHECKOUT` 是独立的引擎 checkout。基线固定为 `74d48d92db27d4fa155ce38004ac079f3bf92835`。等 [#235](https://github.com/TheLudlows/anyseek/pull/235) 生产路径就绪并选定候选，再设置 `CANDIDATE_REVISION`。三个 checkout、证据目录 `META_DIR`、预留数据盘 `LOCAL_NVME` 及独立备份盘 `BACKUP_DEVICE` 均用绝对路径。
+
+在 harness 根目录确认工作树干净，再把提交和文件哈希保存到 checkout 之外的 `META_DIR`。清单覆盖共享 HTTP transport、执行器和本地辅助脚本，与同组报告一起保留。
 
 ```bash
-git -C "$BASE_CHECKOUT" checkout --detach 74d48d92db27d4fa155ce38004ac079f3bf92835
-(cd "$BASE_CHECKOUT" && cargo +1.98.0 build --locked --release -p anyseek --bin anyseek_server -j 4)
+git status --short
+test -z "$(git status --porcelain)" || exit 1
+mkdir -p "$META_DIR"
+git rev-parse --verify HEAD > "$META_DIR/harness.commit"
+sha256sum benchmarks/single-node/{measure,recovery,point_fence,origence_pair}.py \
+  benchmarks/shared_record_http.py > "$META_DIR/harness.sha256"
+```
+
+正式运行前验证同一套 Rust 工具链可编译两边。先用固定基线已验证的 Rust 1.98.0，保持 Release profile、默认特性、目标 CPU 配置及编译器覆写一致。如果两边无法使用同一工具链，保留编译失败证据，随各自结果记录实际编译器、flags 和 Release 设置，并注明这项对照差异。
+
+```bash
+toolchain=1.98.0
+base_revision=74d48d92db27d4fa155ce38004ac079f3bf92835
+git -C "$BASE_CHECKOUT" checkout --detach "$base_revision" || exit 1
+git -C "$CANDIDATE_CHECKOUT" checkout --detach "$CANDIDATE_REVISION" || exit 1
+rustc "+$toolchain" --version --verbose > "$META_DIR/rustc.txt"
+cargo "+$toolchain" --version --verbose > "$META_DIR/cargo.txt"
+(cd "$BASE_CHECKOUT" && CARGO_TARGET_DIR="$BASE_CHECKOUT/target" cargo "+$toolchain" \
+  build --locked --release -p anyseek --bin anyseek_server -j 4) > "$META_DIR/baseline-build.log" 2>&1 || exit 1
+(cd "$CANDIDATE_CHECKOUT" && CARGO_TARGET_DIR="$CANDIDATE_CHECKOUT/target" cargo "+$toolchain" \
+  build --locked --release -p anyseek --bin anyseek_server -j 4) > "$META_DIR/candidate-build.log" 2>&1 || exit 1
 baseline="$BASE_CHECKOUT/target/release/anyseek_server"
-sha256sum "$baseline"
+CANDIDATE_BINARY="$CANDIDATE_CHECKOUT/target/release/anyseek_server"
+sha256sum "$baseline" "$CANDIDATE_BINARY" > "$META_DIR/binaries.sha256"
 
 python3 benchmarks/single-node/measure.py --binary "$baseline" \
   --revision 74d48d92db27d4fa155ce38004ac079f3bf92835 --out /tmp/anyseek-229-smoke
 
 for scale in 100000 1000000 3000000; do
+  test "$(git rev-parse --verify HEAD)" = "$(cat "$META_DIR/harness.commit")" || exit 1
+  sha256sum -c "$META_DIR/harness.sha256" || exit 1
   python3 benchmarks/single-node/measure.py --binary "$baseline" \
-    --revision 74d48d92db27d4fa155ce38004ac079f3bf92835 \
+    --revision "$base_revision" \
     --mode dedicated --scale "$scale" --exclusive-nvme --cpus 0,1 \
     --out "$LOCAL_NVME/baseline-$scale" --backup-root "$BACKUP_DEVICE/baseline-$scale"
+  python3 benchmarks/single-node/measure.py --binary "$CANDIDATE_BINARY" \
+    --revision "$CANDIDATE_REVISION" \
+    --mode dedicated --scale "$scale" --exclusive-nvme --cpus 0,1 \
+    --out "$LOCAL_NVME/candidate-$scale" --backup-root "$BACKUP_DEVICE/candidate-$scale"
 done
 ```
 
-用不同输出目录与候选 SHA 对候选二进制复跑，同一时刻运行一组。专用档要求操作员确认独占，数据路径必须有可识别的 NVMe 底层块设备，备份根必须在不同的块设备。共享/overlay 仅运行固定小夹具。装载达到预算时保留首个停止批及其逐项结果，后续规模仍可单独尝试。
+同一时刻运行一组，每轮保留输出目录的 `report.json` 和 `requests.jsonl.gz`。专用档要求操作者确认独占，数据路径必须有可识别的 NVMe 底层块设备，备份根必须在不同的块设备。共享/overlay 仅运行固定小夹具。装载达到预算时保留首个停止批及其逐项结果，后续规模仍可单独尝试。
 
 在预留主机上记录设备、进程 CPU 分配和实际可用字节，再安排两个版本的运行。
 
@@ -50,6 +78,26 @@ df -B1 --output=source,avail,target "$LOCAL_NVME" "$BACKUP_DEVICE"
 按四条正文循环平均，确定性文档 JSON 每条上界为 1,441 字节。计入 4,096 和 64 条辅助集合，三档文档 JSON 上界分别为 150,094,560、1,446,994,560、4,328,994,560 字节。请求封套和实际磁盘结构须另计。将备份前引擎稳态物理字节记为 `S`，完整归档复制件物理字节记为 `A`，额外的维护、staging 和临时空间峰值记为 `T`，在预留文件系统通过 `du -s -B1` 和报告的分配量采样测算。每轮数据盘先按 `1.2 × (2S + 4A + T)`、独立备份盘按 `1.2 × A` 预留，覆盖源库、恢复库、原归档、两个恢复控制目录复制件及一个归档大小的暂用空间。保留多轮输出时累加。安排 PITR 前按实际归档窗口补算日志字节。1 GiB preflight 采用不同于归档占盘的估算口径，独立记录首次预算拒绝。
 
 `report.json` 的成功请求 p99 使用最近秩。延迟包括 HTTP 往返和读取整个响应，排除生成请求及 JSON 响应解码。吞吐含生成负载、结果检验、记录及等待水位。Busy 和其它失败分别统计，未知结果保留原样。进程内存用 `VmHWM`，数据根、临时目录物理分配量每秒采样。采样峰值不覆盖两个采样点间的瞬时用量。重开是进程冷启动，操作系统页缓存保留。测设备冷读需专用机器另行记录缓存处理和操作。
+
+`status: complete` 只表示 runner 执行到末尾。分别给出 HTTP 503、HTTP 429 和逐项 Busy、快照发布及预算、独立备份恢复、同版本重开、PITR 的结果。验证基础备份恢复只覆盖该归档的切点，PITR 需要单独的目标切点证据。下列提取保留每次失败或 Busy 请求的阶段，可识别故意损坏归档的拒绝。将 `run` 设为任一引擎的输出目录。
+
+```bash
+trace="$run/requests.jsonl.gz"
+gzip -dc "$trace" | jq -c 'select(.status == 503 or .status == 429 or (.busy_items // 0) > 0)
+  | {phase, operation, path, status, code: (.response.code // .response.error.code), busy_items}'
+jq '{runner_status: .status,
+     backup: (.backup | {status, http_status, preflight_payload_bytes, preflight_limit_bytes, archive_bytes: .copy.bytes}),
+     independent_backup_restore, damaged_archive, same_version_reopen, pitr}' "$run/report.json"
+```
+
+单写与混合阶段的真实索引追平使用轨迹中 `sample == "index_catch_up"` 的 `wait_ms`，即收到回执后轮询到全文、向量两路水位都达到目标切点的等待。`index_progress` HTTP p99 衡量轮询往返。批量装载的同类采样在 `report.json` 各集合的 `load.*.catch_up`。
+
+```bash
+gzip -dc "$trace" | jq -c 'select(.sample == "index_catch_up")
+  | {phase: .sample_phase, cut, wait_ms, lexical_seq: .progress.lexical_seq, vector_seq: .progress.vector_seq}'
+jq -c '.load | to_entries[] | .key as $collection | .value.catch_up[]?
+  | {collection: $collection, cut, wait_ms, lexical_seq: .progress.lexical_seq, vector_seq: .progress.vector_seq}' "$run/report.json"
+```
 
 以集合和操作为单位复核混合负载时，将 `trace` 指向本次运行的 `requests.jsonl.gz`。
 
@@ -95,6 +143,8 @@ python3 benchmarks/single-node/measure.py --binary "$CANDIDATE_BINARY" \
 23 次初始 `recovery_required` 都与普通 `async_write` 或 `record_delete` 请求重叠。6 次首次重试仍为 503。近端及静默后的进度采样均显示 `recovery_required: false`。所有失败点读均在原进程读回同一版本和原文。仅加日志的诊断 Release 对 8 次初始和 6 次首次重试 503 输出了 14 条 `stage=capture ... fenced=true`，未命中 Record 健康检查或响应交付拒绝分支。 [探针报告](results/point-fence-report.json) · [逐请求轨迹](results/point-fence-requests.jsonl.gz) · [诊断和原生用例输出](results/point-fence-diagnostic.txt)
 
 集成 Release `d8e19e18ac4166a5ffa71f41fe79888566496a89` 也未通过探针。并发写入无 checkpoint 时首次点读 503 为 7 / 96，加 checkpoint 为 3 / 96。两个窗口各有 23 次混合 HTTP 429。仅读及仅 checkpoint 均无点读 503，混合 429 分别为 4 次和 1 次。10 次失败都在原进程读回同一版本和原文，5 次首次重试仍为 503，进度采样均正常，无需重开。 [集成 PR #235](https://github.com/TheLudlows/anyseek/pull/235)
+
+集成 Release `2811966` 和 `f068270` 在同一小库探针中各有 384 次初始点读，均返回 HTTP 200。每版的两个 checkpoint 场景各有 72 次同集合点读重叠。其他混合请求仍有 HTTP 429，另行统计。两版均用 Rust 1.98.0 构建，操作者本地 NVMe 正式运行的候选尚待选定。 [#233 补充证据](https://github.com/TheLudlows/anyseek/pull/233)
 
 点读路由在查询 Record 前同步取得 `output_permit()`。读到 `OutputState.fenced` 即返回 `RecordError::RecoveryRequired`，HTTP 映射为 503。普通批写在发布阶段置位，成功后清除。进度接口获取 `Inner`，因此会在短时 fence 清除后才采样。#224 可复用查询路由已用的等待发布机制，涵盖点读捕获和交付，并保留真正发布失败时的拒绝语义。修改后复跑本探针，以及暂停健康写者和实际发布失败两项回归。 [点读入口](https://github.com/TheLudlows/anyseek/blob/74d48d92db27d4fa155ce38004ac079f3bf92835/anyseek/src/server/record_service.rs#L970-L995) · [捕获检查](https://github.com/TheLudlows/anyseek/blob/74d48d92db27d4fa155ce38004ac079f3bf92835/anyseek/src/record.rs#L998-L1005) · [写入发布](https://github.com/TheLudlows/anyseek/blob/74d48d92db27d4fa155ce38004ac079f3bf92835/anyseek/src/record/write.rs#L250-L281) · [查询交付](https://github.com/TheLudlows/anyseek/blob/74d48d92db27d4fa155ce38004ac079f3bf92835/anyseek/src/server/record_service.rs#L1687-L1705)
 

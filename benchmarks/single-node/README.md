@@ -13,26 +13,54 @@ This covers [#229](https://github.com/TheLudlows/anyseek/issues/229) under [#224
 
 ## Run
 
-Run with Linux, Python 3.11 or later, and `findmnt` and `lsblk` from util-linux. Set absolute paths for `BASE_CHECKOUT`, `LOCAL_NVME` and `BACKUP_DEVICE` before running from the harness checkout. The first is a separate AnySeek checkout. Use reserved mounts for the other two.
+Run on the operator's reserved Linux NVMe host with Python 3.11 or later and `findmnt` and `lsblk` from util-linux. Freeze a clean harness checkout at one full Git SHA before either run. Run both engines from that same checkout. `BASE_CHECKOUT` and `CANDIDATE_CHECKOUT` are separate engine checkouts. The baseline is `74d48d92db27d4fa155ce38004ac079f3bf92835`. Set `CANDIDATE_REVISION` only after the production path in [#235](https://github.com/TheLudlows/anyseek/pull/235) is ready and the candidate is selected. Use absolute paths for the checkouts, evidence directory `META_DIR`, reserved data mount `LOCAL_NVME`, and separate `BACKUP_DEVICE`.
+
+From the harness root, check that its working tree is clean, then save its commit and file hashes to `META_DIR` outside the checkout. The manifest covers the shared HTTP transport as well as the runner and its local helpers. Keep it with each pair's reports.
 
 ```bash
-git -C "$BASE_CHECKOUT" checkout --detach 74d48d92db27d4fa155ce38004ac079f3bf92835
-(cd "$BASE_CHECKOUT" && cargo +1.98.0 build --locked --release -p anyseek --bin anyseek_server -j 4)
+git status --short
+test -z "$(git status --porcelain)" || exit 1
+mkdir -p "$META_DIR"
+git rev-parse --verify HEAD > "$META_DIR/harness.commit"
+sha256sum benchmarks/single-node/{measure,recovery,point_fence,origence_pair}.py \
+  benchmarks/shared_record_http.py > "$META_DIR/harness.sha256"
+```
+
+Check that the same Rust toolchain builds both engines before measuring. Start with Rust 1.98.0, the frozen baseline's verified toolchain. Keep the Release profile, default features, target CPU settings, and compiler overrides consistent. If a shared toolchain cannot build both, preserve the failed build evidence and record each version's actual compiler, flags and Release settings alongside its results. Qualify the comparison accordingly.
+
+```bash
+toolchain=1.98.0
+base_revision=74d48d92db27d4fa155ce38004ac079f3bf92835
+git -C "$BASE_CHECKOUT" checkout --detach "$base_revision" || exit 1
+git -C "$CANDIDATE_CHECKOUT" checkout --detach "$CANDIDATE_REVISION" || exit 1
+rustc "+$toolchain" --version --verbose > "$META_DIR/rustc.txt"
+cargo "+$toolchain" --version --verbose > "$META_DIR/cargo.txt"
+(cd "$BASE_CHECKOUT" && CARGO_TARGET_DIR="$BASE_CHECKOUT/target" cargo "+$toolchain" \
+  build --locked --release -p anyseek --bin anyseek_server -j 4) > "$META_DIR/baseline-build.log" 2>&1 || exit 1
+(cd "$CANDIDATE_CHECKOUT" && CARGO_TARGET_DIR="$CANDIDATE_CHECKOUT/target" cargo "+$toolchain" \
+  build --locked --release -p anyseek --bin anyseek_server -j 4) > "$META_DIR/candidate-build.log" 2>&1 || exit 1
 baseline="$BASE_CHECKOUT/target/release/anyseek_server"
-sha256sum "$baseline"
+CANDIDATE_BINARY="$CANDIDATE_CHECKOUT/target/release/anyseek_server"
+sha256sum "$baseline" "$CANDIDATE_BINARY" > "$META_DIR/binaries.sha256"
 
 python3 benchmarks/single-node/measure.py --binary "$baseline" \
   --revision 74d48d92db27d4fa155ce38004ac079f3bf92835 --out /tmp/anyseek-229-smoke
 
 for scale in 100000 1000000 3000000; do
+  test "$(git rev-parse --verify HEAD)" = "$(cat "$META_DIR/harness.commit")" || exit 1
+  sha256sum -c "$META_DIR/harness.sha256" || exit 1
   python3 benchmarks/single-node/measure.py --binary "$baseline" \
-    --revision 74d48d92db27d4fa155ce38004ac079f3bf92835 \
+    --revision "$base_revision" \
     --mode dedicated --scale "$scale" --exclusive-nvme --cpus 0,1 \
     --out "$LOCAL_NVME/baseline-$scale" --backup-root "$BACKUP_DEVICE/baseline-$scale"
+  python3 benchmarks/single-node/measure.py --binary "$CANDIDATE_BINARY" \
+    --revision "$CANDIDATE_REVISION" \
+    --mode dedicated --scale "$scale" --exclusive-nvme --cpus 0,1 \
+    --out "$LOCAL_NVME/candidate-$scale" --backup-root "$BACKUP_DEVICE/candidate-$scale"
 done
 ```
 
-Rerun each point with the candidate binary, its full SHA and distinct output directories. Run one measurement at a time. Dedicated mode requires operator attestation, an identifiable backing NVMe data device and a separate backing block device for the backup. Overlay and shared runners use the small fixture. If loading stops, record the first affected batch and its exact item outcomes. Each later point can still be run independently.
+Run one measurement at a time and keep `report.json` and `requests.jsonl.gz` from each output directory. Dedicated mode requires operator attestation, an identifiable backing NVMe data device and a separate backing block device for the backup. Overlay and shared runners use the small fixture. If loading stops, record the first affected batch and its exact item outcomes. Each later point can still be run independently.
 
 Record the environment and free bytes before scheduling either binary on the reserved host.
 
@@ -50,6 +78,26 @@ df -B1 --output=source,avail,target "$LOCAL_NVME" "$BACKUP_DEVICE"
 The canonical document JSON has an upper bound of 1,441 bytes per Record averaged over each four-Record body cycle. The three scales, including the 4,096 and 64 auxiliary Records, have respective document JSON bounds of 150,094,560, 1,446,994,560, and 4,328,994,560 bytes. The bounds exclude the request envelope and on-disk data structures. Use `S` for measured steady physical engine bytes before backup, `A` for measured physical bytes of a complete archive copy, and `T` for additional peak bytes for maintenance, staging and temporary files above the reserved copies. Use physical `du -s -B1` and the report's allocation samples on the reserved filesystem. For planning, reserve at least `1.2 × (2S + 4A + T)` on the data device and `1.2 × A` on the separate backup device per run. Allow for the original and restored roots, the published archive, two restore-control copies and one transient archive-sized allowance. Sum retained runs and include the integrated replay window's measured log bytes before scheduling PITR. The 1 GiB admission estimate uses different inputs from archive disk usage. Record the first observed budget rejection separately.
 
 Successful-request p99 in `report.json` uses nearest rank. HTTP latency includes the round trip and reading the response body. Workload generation and JSON decoding are excluded from HTTP latency and included in end-to-end throughput alongside validation, reporting and catch-up. Report Busy and other failures separately and preserve unknown outcomes. Sample process `VmHWM` and physical allocations in the data root and temporary directory every second. Sampled storage peaks can miss short-lived allocations. Reopen timings are process-cold with the OS cache intact. Device-cold measurements require separate cache evidence on the reserved machine.
+
+`status: complete` means the runner reached the end. Record separate outcomes for HTTP 503, HTTP 429 and per-item Busy, archive publication and its budget, independent backup restore, same-version reopen, and PITR. A verified restore from the base archive covers its own cut. PITR needs separate target-cut evidence. The extraction below preserves each failed or Busy request's phase so intentional damaged-archive rejection can be identified. Set `run` to the output directory for either engine.
+
+```bash
+trace="$run/requests.jsonl.gz"
+gzip -dc "$trace" | jq -c 'select(.status == 503 or .status == 429 or (.busy_items // 0) > 0)
+  | {phase, operation, path, status, code: (.response.code // .response.error.code), busy_items}'
+jq '{runner_status: .status,
+     backup: (.backup | {status, http_status, preflight_payload_bytes, preflight_limit_bytes, archive_bytes: .copy.bytes}),
+     independent_backup_restore, damaged_archive, same_version_reopen, pitr}' "$run/report.json"
+```
+
+For actual index catch-up in the write-only and mixed phases, use `wait_ms` from each trace event with `sample == "index_catch_up"`. It measures the post-receipt polling wait until both index watermarks reach the cut. `index_progress` HTTP p99 measures poll round trips. For bulk load, use the same kind of sample under each collection's `load.*.catch_up` in `report.json`.
+
+```bash
+gzip -dc "$trace" | jq -c 'select(.sample == "index_catch_up")
+  | {phase: .sample_phase, cut, wait_ms, lexical_seq: .progress.lexical_seq, vector_seq: .progress.vector_seq}'
+jq -c '.load | to_entries[] | .key as $collection | .value.catch_up[]?
+  | {collection: $collection, cut, wait_ms, lexical_seq: .progress.lexical_seq, vector_seq: .progress.vector_seq}' "$run/report.json"
+```
 
 For collection-level mixed results, set `trace` to the run's `requests.jsonl.gz` and group the actual requests by collection and operation.
 
@@ -95,6 +143,8 @@ The frozen baseline failed the three-round overlay probe. The earlier five failu
 All 23 initial `recovery_required` responses overlapped a normal `async_write` or `record_delete` request. Six first retries also returned 503. Near-failure and settled progress samples reported `recovery_required: false`, and all failed reads recovered on the original process. The diagnostic Release emitted 14 `stage=capture ... fenced=true` events for eight initial failures and six first-retry failures. It emitted no rejection at the Record health check or output handoff. The diagnostic build adds logging only. [Probe reports](results/point-fence-report.json) · [Per-request traces](results/point-fence-requests.jsonl.gz) · [Fence and native regression output](results/point-fence-diagnostic.txt)
 
 Integration Release `d8e19e18ac4166a5ffa71f41fe79888566496a89` also failed this probe. Initial point 503 counts were 7 of 96 with writes alone and 3 of 96 with writes and checkpoint. Both windows logged 23 mixed 429 responses each. The read-only and checkpoint-only controls had zero point 503s with four and one mixed 429 responses respectively. All ten failed reads recovered the original version and body on the same process. Five first retries still returned 503, the progress samples stayed healthy, and no reopen was required. [Integration PR #235](https://github.com/TheLudlows/anyseek/pull/235)
+
+Integration Releases `2811966` and `f068270` each returned HTTP 200 for all 384 initial point reads in the same small-store probe. Each version had 72 same-collection read overlaps in each checkpoint case. Other mixed requests still returned HTTP 429, counted separately. Both builds used Rust 1.98.0. The production candidate remains to be selected for the operator's NVMe run. [Follow-up evidence in #233](https://github.com/TheLudlows/anyseek/pull/233)
 
 The point route captures a synchronous `output_permit()` before looking up the Record. A set `OutputState.fenced` returns `RecordError::RecoveryRequired`, which becomes HTTP 503. An ordinary batch sets the flag while publishing and clears it on success. The progress call acquires `Inner` and can therefore wait out the transient fence. Preserve rejection for an actual failed publication. For #224, the point route's capture and handoff can use the existing wait-for-publication path used by query. Apply the probe again after the transport change, and preserve the paused-writer and failed-publication regressions. [Point handler](https://github.com/TheLudlows/anyseek/blob/74d48d92db27d4fa155ce38004ac079f3bf92835/anyseek/src/server/record_service.rs#L970-L995) · [Capture check](https://github.com/TheLudlows/anyseek/blob/74d48d92db27d4fa155ce38004ac079f3bf92835/anyseek/src/record.rs#L998-L1005) · [Writer publication](https://github.com/TheLudlows/anyseek/blob/74d48d92db27d4fa155ce38004ac079f3bf92835/anyseek/src/record/write.rs#L250-L281) · [Query handoff](https://github.com/TheLudlows/anyseek/blob/74d48d92db27d4fa155ce38004ac079f3bf92835/anyseek/src/server/record_service.rs#L1687-L1705)
 
