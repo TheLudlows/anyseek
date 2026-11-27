@@ -276,6 +276,8 @@ pub(crate) struct File {
     path: PathBuf,
     charge: Option<Arc<Disk>>,
     append: bool,
+    #[cfg(windows)]
+    cursor: Mutex<()>,
 }
 impl File {
     pub(crate) fn options() -> OpenOptions {
@@ -315,6 +317,24 @@ impl File {
         self.charge(len)?;
         self.inner.set_len(len)
     }
+
+    /// Read exactly this range from the already open file, preserving its cursor.
+    /// The caller admits and owns the buffer. An incomplete read returns an error.
+    pub(crate) fn read_exact_at(&self, offset: u64, buf: &mut [u8]) -> io::Result<()> {
+        u64::try_from(buf.len())
+            .ok()
+            .and_then(|length| offset.checked_add(length))
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "file range overflow"))?;
+        let _io = io_admission()?;
+        #[cfg(windows)]
+        let _cursor = self.lock_cursor()?;
+        super::platform::read_exact_at(&self.inner, offset, buf)
+    }
+
+    #[cfg(windows)]
+    fn lock_cursor(&self) -> io::Result<std::sync::MutexGuard<'_, ()>> {
+        self.cursor.lock().map_err(|_| io::Error::other("file cursor lock poisoned"))
+    }
 }
 impl Deref for File {
     type Target = fs::File;
@@ -324,16 +344,7 @@ impl Deref for File {
 }
 impl Write for File {
     fn write(&mut self, b: &[u8]) -> io::Result<usize> {
-        let _io = io_admission()?;
-        let end = (if self.append {
-            self.inner.metadata()?.len()
-        } else {
-            self.inner.stream_position()?
-        })
-        .checked_add(b.len() as u64)
-        .ok_or_else(exceeded)?;
-        self.charge(end)?;
-        self.inner.write(b)
+        (&*self).write(b)
     }
     fn flush(&mut self) -> io::Result<()> {
         self.inner.flush()
@@ -342,6 +353,8 @@ impl Write for File {
 impl Write for &File {
     fn write(&mut self, b: &[u8]) -> io::Result<usize> {
         let _io = io_admission()?;
+        #[cfg(windows)]
+        let _cursor = self.lock_cursor()?;
         let mut f = &self.inner;
         let end = (if self.append {
             f.metadata()?.len()
@@ -359,13 +372,14 @@ impl Write for &File {
 }
 impl Read for File {
     fn read(&mut self, b: &mut [u8]) -> io::Result<usize> {
-        let _io = io_admission()?;
-        self.inner.read(b)
+        (&*self).read(b)
     }
 }
 impl Seek for File {
     fn seek(&mut self, p: SeekFrom) -> io::Result<u64> {
-        self.inner.seek(p)
+        #[cfg(windows)]
+        let _cursor = self.lock_cursor()?;
+        (&self.inner).seek(p)
     }
 }
 #[cfg(unix)]
@@ -435,6 +449,8 @@ impl OpenOptions {
             path: absolute,
             charge,
             append: self.append,
+            #[cfg(windows)]
+            cursor: Mutex::new(()),
         };
         file.charge(file.inner.metadata()?.len())?;
         Ok(file)
@@ -444,6 +460,8 @@ impl OpenOptions {
 impl Read for &File {
     fn read(&mut self, b: &mut [u8]) -> io::Result<usize> {
         let _io = io_admission()?;
+        #[cfg(windows)]
+        let _cursor = self.lock_cursor()?;
         (&self.inner).read(b)
     }
 }
@@ -465,6 +483,35 @@ pub(crate) fn fill_memory_except_for_test(leave:u64) -> Vec<MemoryLease> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn positioned_reads_share_one_handle_without_moving_its_cursor() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("blocks");
+        fs::write(&path, b"abcdefghijkl").unwrap();
+        let mut file = File::open(path).unwrap();
+        file.seek(SeekFrom::Start(1)).unwrap();
+        std::thread::scope(|threads| {
+            for (offset, expected) in [(3, b"def"), (6, b"ghi"), (9, b"jkl")] {
+                let file = &file;
+                threads.spawn(move || {
+                    for _ in 0..32 {
+                        let mut bytes = [0; 3];
+                        file.read_exact_at(offset, &mut bytes).unwrap();
+                        assert_eq!(&bytes, expected);
+                    }
+                });
+            }
+            let mut sequential = [0; 2];
+            (&file).read_exact(&mut sequential).unwrap();
+            assert_eq!(&sequential, b"bc");
+        });
+        let mut bytes = [0; 2];
+        assert_eq!(file.read_exact_at(11, &mut bytes).unwrap_err().kind(), io::ErrorKind::UnexpectedEof);
+        assert_eq!(file.read_exact_at(u64::MAX, &mut bytes).unwrap_err().kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(file.stream_position().unwrap(), 3);
+    }
+
     #[test]
     fn shared_memory_marker_does_not_classify_limits_or_error_text() {
         let limits=memory_limits().unwrap();let counter=Arc::new(AtomicU64::new(limits.shared));
