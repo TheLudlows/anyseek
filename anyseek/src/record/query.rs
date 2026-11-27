@@ -45,17 +45,69 @@ impl PinnedCandidate {
     }
 }
 
-fn check_publication(inner: &mut Inner, group_revision: u64, indexes_failed: bool) -> Result<(), RecordError> {
+fn check_health(inner: &mut Inner, indexes_failed: bool) -> Result<(), RecordError> {
     inner.observe_time()?;
     if !inner.healthy || indexes_failed {
         return Err(RecordError::RecoveryRequired);
     }
+    Ok(())
+}
+
+#[derive(Debug)]
+enum AttemptError {
+    Record(RecordError),
+    GroupChanged,
+}
+
+impl From<RecordError> for AttemptError {
+    fn from(error: RecordError) -> Self {
+        Self::Record(error)
+    }
+}
+
+impl From<AttemptError> for RecordError {
+    fn from(error: AttemptError) -> Self {
+        match error {
+            AttemptError::Record(error) => error,
+            AttemptError::GroupChanged => Self::Busy,
+        }
+    }
+}
+
+fn check_group(
+    inner: &Inner,
+    group_revision: u64,
+    barrier: &DataOutputPermit,
+) -> Result<(), AttemptError> {
     // A group replacement cannot be observed as a subset of the old and new
     // membership. Independent updates can instead discard a changed candidate.
     if inner.state.group_publication_revision() != group_revision {
-        return Err(RecordError::Busy);
+        barrier.deliver(|| ())?;
+        return Err(AttemptError::GroupChanged);
     }
     Ok(())
+}
+
+#[derive(Clone)]
+pub(super) struct Retry {
+    pub(super) waiter: std::sync::Weak<()>,
+    pub(super) deadline: Option<tokio::time::Instant>,
+}
+
+impl Retry {
+    fn deadline_error() -> RecordError {
+        RecordError::OutcomeUnknown("request deadline exceeded".into())
+    }
+
+    fn check(&self) -> Result<(), RecordError> {
+        if self.deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline) {
+            return Err(Self::deadline_error());
+        }
+        if self.waiter.strong_count() == 0 {
+            return Err(RecordError::Busy);
+        }
+        Ok(())
+    }
 }
 impl Handle {
     pub async fn capture(index: &VectorIndexArc, length: usize) -> Result<Self, RecordError> {
@@ -125,32 +177,83 @@ impl Handle {
 }
 
 impl RecordPartition {
+    async fn query_guard(&self, retry: Option<&Retry>) -> Result<tokio::sync::MutexGuard<'_, Inner>, RecordError> {
+        let lock = self.inner.lock();
+        match retry.and_then(|retry| retry.deadline) {
+            Some(deadline) => tokio::time::timeout_at(deadline, lock).await
+                .map_err(|_| Retry::deadline_error()),
+            None => Ok(lock.await),
+        }
+    }
+
+    pub(super) async fn query_with_retry(
+        &self,
+        query: RecordQuery,
+        output_fields: Option<&[String]>,
+        retry: Retry,
+    ) -> Result<RecordSearch, RecordError> {
+        match self.query_attempt(&query, output_fields, None).await {
+            Err(AttemptError::GroupChanged) => {
+                // The first future has finished: its candidates, output copies
+                // and file handles have been released. Keep the original
+                // request admission and capture a fresh, complete view.
+                self.query_attempt(&query, output_fields, Some(&retry)).await.map_err(Into::into)
+            }
+            result => result.map_err(Into::into),
+        }
+    }
+
+    #[cfg(test)]
     pub(super) async fn query_independent(
         &self,
-        mut query: RecordQuery,
+        query: RecordQuery,
         output_fields: Option<&[String]>,
     ) -> Result<RecordSearch, RecordError> {
+        self.query_attempt(&query, output_fields, None).await.map_err(Into::into)
+    }
+
+    async fn query_attempt(
+        &self,
+        input: &RecordQuery,
+        output_fields: Option<&[String]>,
+        retry: Option<&Retry>,
+    ) -> Result<RecordSearch, AttemptError> {
+        if let Some(retry) = retry {
+            retry.check()?;
+        }
         let (handle, evaluation, has_ttl, barrier, root, group_publication_revision) = {
-            let mut inner = self.inner.lock().await;
-            inner.observe_time()?;
-            if !inner.healthy || self.indexes.error().is_some()
-            {
-                return Err(RecordError::RecoveryRequired);
+            let mut inner = self.query_guard(retry).await?;
+            check_health(&mut inner, self.indexes.error().is_some())?;
+            if let Some(retry) = retry {
+                retry.check()?;
             }
-            validate(&query, &inner.config)?;
-            let handle = inner.index.capture_query(query.length).await?;
+            validate(input, &inner.config)?;
+            let barrier = self.output_permit()?;
+            let handle = inner.index.capture_query(input.length).await?;
             (
                 handle,
                 inner.evaluation_time_ms,
                 inner.state.records.live_ttl_count()>0,
-                self.output_permit()?,
+                barrier,
                 inner.journal.root().to_owned(),
                 inner.state.group_publication_revision(),
             )
         };
         #[cfg(test)]
         pause(&root, ".test-query-scoring-pause").await?;
+        #[cfg(test)]
+        if retry.is_some() {
+            pause(&root, ".test-query-retry-pause").await?;
+        }
         let _ = root;
+        // Keep the original query intact for recapture. Charge the attempt's
+        // input copy before cloning it using the current request's byte scope.
+        let bytes = checkpoint_codec::json_length(&(
+            &input.text, &input.vector, &input.fields, &input.filters, &input.sort,
+        ))? as u64;
+        let bytes = bytes.checked_mul(32).and_then(|n| n.checked_add(1024)).ok_or(RecordError::Busy)?;
+        let input_memory = build_budget::admit_memory(bytes, crate::resources::Scope::current().as_ref())?;
+        let mut query = input.clone();
         if has_ttl {query.filters.push(temporal::expiry_filter(evaluation));}
         if let Some(temporal) = query.temporal.take() {
             query.filters.extend(temporal::filters(temporal)?);
@@ -178,12 +281,16 @@ impl RecordPartition {
         let context = crate::resources::Scope::current();
         let runtime = tokio::runtime::Handle::current();
         let owner = self.clone();
+        let scoring_retry = retry.cloned();
         #[cfg(test)] let scoring_root = root.clone();
-        let (handle, result) = crate::resources::spawn_blocking(move || {
+        let (handle, result, _input_memory) = crate::resources::spawn_blocking(move || {
             let _owner = owner;
             let work = async move {
                 #[cfg(test)]
                 blocking_pause(&scoring_root, ".test-blocking-scoring-pause")?;
+                if let Some(retry) = scoring_retry {
+                    retry.check()?;
+                }
                 let result = lexical::runtime_query::search(
                     &handle.index,
                     query.text,
@@ -201,7 +308,9 @@ impl RecordPartition {
                         evaluation_time_ms: evaluation,
                     },
                 ).await;
-                Ok::<_, RecordError>((handle, result))
+                // The result still owns the attempt's text. Keep the charge
+                // attached until the completed result or failed attempt drops.
+                Ok::<_, RecordError>((handle, result, input_memory))
             };
             runtime.block_on(async move {
                 match context {
@@ -216,8 +325,12 @@ impl RecordPartition {
             .await?;
         #[cfg(test)]
         pause(&root, ".test-query-candidates-pause").await?;
-        let mut inner = self.inner.lock().await;
-        check_publication(&mut inner, group_publication_revision, self.indexes.error().is_some())?;
+        let mut inner = self.query_guard(retry).await?;
+        check_health(&mut inner, self.indexes.error().is_some())?;
+        check_group(&inner, group_publication_revision, &barrier)?;
+        if let Some(retry) = retry {
+            retry.check()?;
+        }
         let (cut, read_time) = (inner.state.seq, inner.evaluation_time_ms);
         let mut pinned = Vec::with_capacity(candidates.len());
         for (rank, candidate) in candidates.into_iter().enumerate() {
@@ -232,6 +345,7 @@ impl RecordPartition {
         } else {
             let fields = output_fields.map(<[String]>::to_vec);
             let owner = self.clone();
+            let readback_retry = retry.cloned();
             #[cfg(test)]
             let read_root = root.clone();
             drop(inner);
@@ -239,6 +353,9 @@ impl RecordPartition {
                 let _owner = owner;
                 #[cfg(test)]
                 blocking_pause(&read_root, ".test-blocking-readback-pause")?;
+                if let Some(retry) = readback_retry {
+                    retry.check()?;
+                }
                 let mut records = Vec::with_capacity(pinned.len());
                 for candidate in pinned {
                     if let Some(record) = candidate.read(fields.as_deref(), read_time)? {
@@ -247,9 +364,13 @@ impl RecordPartition {
                 }
                 Ok::<_, RecordError>(records)
             }).await.map_err(storage)?;
-            inner = self.inner.lock().await;
-            check_publication(&mut inner, group_publication_revision, self.indexes.error().is_some())?;
-            records?
+            inner = self.query_guard(retry).await?;
+            check_health(&mut inner, self.indexes.error().is_some())?;
+            // A concurrent group switch must not mask an I/O or integrity
+            // failure from the first read.
+            let records = records?;
+            check_group(&inner, group_publication_revision, &barrier)?;
+            records
         };
         let mut hits = Vec::with_capacity(records.len());
         for (PinnedCandidate { rank, candidate, source }, record) in records {
@@ -282,6 +403,9 @@ impl RecordPartition {
                 record,
                 score: candidate.hit.score,
             });
+        }
+        if let Some(retry) = retry {
+            retry.check()?;
         }
         barrier.deliver(|| ())?;
         Ok(RecordSearch {
@@ -347,20 +471,21 @@ mod tests {
         .await
         .unwrap();
     }
-    #[tokio::test]
-    async fn group_replacement_rejects_overlapping_queries_but_keeps_complete_results() {
-        fn replacement(nonce: &str, version: u64, ids: &[&str], body: &str) -> GroupReplace {
-            GroupReplace {
-                operation_id: OperationId::new(nonce.into()),
-                group_id: "group".into(),
-                expected_group_version: version,
-                records: ids.iter().map(|id| GroupRecord {
-                    record_id: (*id).into(),
-                    document: write("unused", id, body, ExpectedVersion::Any).document.unwrap(),
-                    temporal: None,
-                }).collect(),
-            }
+    fn replacement(nonce: &str, version: u64, ids: &[&str], body: &str) -> GroupReplace {
+        GroupReplace {
+            operation_id: OperationId::new(nonce.into()),
+            group_id: "group".into(),
+            expected_group_version: version,
+            records: ids.iter().map(|id| GroupRecord {
+                record_id: (*id).into(),
+                document: write("unused", id, body, ExpectedVersion::Any).document.unwrap(),
+                temporal: None,
+            }).collect(),
         }
+    }
+
+    #[tokio::test]
+    async fn group_replacement_retries_overlapping_queries_with_complete_results() {
         fn ids(result: &RecordSearch) -> BTreeSet<String> {
             result.hits.iter().map(|hit| hit.record.record_id.clone()).collect()
         }
@@ -398,8 +523,7 @@ mod tests {
                 std::fs::remove_file(root.join(gate)).unwrap();
                 let result = tokio::time::timeout(std::time::Duration::from_secs(5), pending)
                     .await.expect("query must return a bounded retryable result").unwrap();
-                assert!(matches!(result, Err(RecordError::Busy)), "cross-generation query must not return partial success");
-                let fresh = p.query(query()).await.unwrap();
+                let fresh = result.expect("one group switch should recompute the query");
                 assert_eq!(ids(&fresh), BTreeSet::from(["a".into(), "d".into()]));
                 assert_eq!(fresh.count_total, 2);
                 assert!(fresh.hits.iter().all(|hit| hit.record.document.as_ref().unwrap()["body"] == "alpha new"));
@@ -413,6 +537,80 @@ mod tests {
             }
         }
     }
+    #[tokio::test]
+    async fn group_retry_stops_at_second_change_deadline_or_failure() {
+        use std::time::Duration;
+
+        for scenario in ["second_change", "expired", "durable_failure", "readback_busy", "readback_corrupt"] {
+            let temporary = tempfile::tempdir().unwrap();
+            let root = temporary.path().join("records");
+            let p = RecordPartition::create(&root, config()).await.unwrap();
+            p.replace_group(replacement("old", 0, &["a", "b"], "alpha old")).await.unwrap();
+            let gate = if scenario.starts_with("readback_") {
+                p.compact_journal().await.unwrap();
+                ".test-blocking-readback-pause"
+            } else {
+                ".test-query-candidates-pause"
+            };
+            let retry_gate = ".test-query-retry-pause";
+            std::fs::write(root.join(gate), b"pause").unwrap();
+            std::fs::write(root.join(retry_gate), b"pause").unwrap();
+            let query = RecordQuery {
+                temporal: None, text: "alpha".into(), vector: None, mode: SearchMode::Lexical,
+                query_type: QueryType::Union, offset: 0, length: 10, result_type: ResultType::TopkCount,
+                fields: vec![], filters: vec![], sort: vec![],
+            };
+            let deadline = (scenario == "expired").then(|| tokio::time::Instant::now() + Duration::from_millis(250));
+            let scope = Arc::new(crate::resources::Governor::default())
+                .admit("query".into(), crate::resources::Lane::Foreground, 0).unwrap();
+            let pending = {
+                let p = p.clone();
+                tokio::spawn(scope.clone().run(async move { p.query_output(query, None, deadline).await }))
+            };
+            entered(&root, gate).await;
+
+            if scenario == "durable_failure" {
+                p.inner.lock().await.fail_after_durable = true;
+                assert!(matches!(p.replace_group(replacement("failed", 1, &["c", "d"], "alpha failed")).await,
+                    Err(RecordError::DurablePending(2))));
+            } else {
+                p.replace_group(replacement("new", 1, &["a", "d"], "alpha new")).await.unwrap();
+            }
+            if let Some(deadline) = deadline {
+                tokio::time::sleep_until(deadline).await;
+            }
+            let held_io = if scenario == "readback_busy" {
+                Some((crate::resources::hold_io_for_test(&scope).await,
+                    crate::resources::hold_io_for_test(&scope).await))
+            } else {
+                None
+            };
+            if scenario == "readback_corrupt" {
+                let payload = std::fs::read_dir(&root).unwrap().map(|file| file.unwrap().path())
+                    .find(|path| path.file_name().unwrap().to_string_lossy().starts_with("payload-"))
+                    .unwrap();
+                std::fs::OpenOptions::new().write(true).open(payload).unwrap().set_len(0).unwrap();
+            }
+            std::fs::remove_file(root.join(gate)).unwrap();
+            if scenario == "second_change" {
+                entered(&root, retry_gate).await;
+                p.replace_group(replacement("third", 2, &["d", "e"], "alpha third")).await.unwrap();
+                std::fs::remove_file(root.join(retry_gate)).unwrap();
+            }
+            let result = tokio::time::timeout(Duration::from_secs(5), pending).await
+                .expect("the query must not start an extra attempt").unwrap();
+            drop(held_io);
+            match scenario {
+                "durable_failure" => assert!(matches!(result, Err(RecordError::RecoveryRequired))),
+                "expired" => assert!(matches!(result, Err(RecordError::OutcomeUnknown(_)))),
+                "readback_corrupt" => assert!(matches!(result, Err(RecordError::Storage(_)))),
+                _ => assert!(matches!(result, Err(RecordError::Busy))),
+            }
+            assert_eq!(root.join(format!("{retry_gate}-entered")).exists(), scenario == "second_change");
+            p.finish_service_shutdown().await.unwrap();
+        }
+    }
+
     #[tokio::test]
     async fn euclidean_cached_rows_and_rebuild_inputs_require_safe_numbers() {
         use crate::component::{create_index, open_index, Commit};
@@ -493,7 +691,7 @@ mod tests {
         let query = || RecordQuery { temporal:None, text:"alpha".into(), vector:None,
             mode:SearchMode::Lexical, query_type:QueryType::Union, offset:0, length:10,
             result_type:ResultType::TopkCount, fields:vec![], filters:vec![], sort:vec![] };
-        let projected = scope.clone().run(p.query_output(query(), Some(vec!["body".into()]))).await.unwrap();
+        let projected = scope.clone().run(p.query_output(query(), Some(vec!["body".into()]), None)).await.unwrap();
         assert_eq!(projected.count_total, 1);
         assert_eq!(projected.hits[0].record.document.as_ref().unwrap().len(), 1);
         assert_eq!(projected.hits[0].record.document.as_ref().unwrap()["body"], "alpha");

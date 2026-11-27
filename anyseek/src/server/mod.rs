@@ -12,6 +12,7 @@ pub async fn query_records(
     partition: &crate::record::RecordPartition,
     query: crate::record::RecordQuery,
     fields: Vec<String>,
+    deadline: Option<tokio::time::Instant>,
 ) -> Result<crate::record::RecordSearch, crate::record::RecordError> {
-    partition.query_output(query, Some(fields)).await
+    partition.query_output(query, Some(fields), deadline).await
 }

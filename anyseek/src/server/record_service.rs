@@ -1723,6 +1723,7 @@ async fn query_collection(
     if request.query_vector.is_none() && request.similarity_threshold.is_some() {
         return Err(bad("similarity_threshold requires query_vector"));
     }
+    let deadline = REQUEST_DEADLINE.try_with(|deadline| *deadline).ok();
     let result =s.catalog.authorized_generation(key, id, p.generation,move|entry|async move{
         let start=std::time::Instant::now();
         let vector=request.query_vector.as_ref().map(|value|anyseek::vector::parse_external_embedding(value,&entry.config.index.inference)).transpose().map_err(bad)?;
@@ -1730,7 +1731,7 @@ async fn query_collection(
         let fields = entry.config.schema.iter().filter(|f| f.store &&
             (request.fields.is_empty() || request.fields.contains(&f.field)))
             .map(|f| f.field.clone()).collect();
-        let result=anyseek::server::query_records(&p,query,fields).await?;
+        let result=anyseek::server::query_records(&p,query,fields,deadline).await?;
         let analysis = entry.config.analysis_contract()?;
         let progress = p.committed_progress().await;
         let diagnostics = diagnostics::QueryDiagnostics::new(request_id, diagnostic_mode, start.elapsed(), analysis.fingerprint, entry.config.embedding_space_id.as_deref(), progress);
@@ -2233,6 +2234,72 @@ mod tests {
         }
         drop(partition);drop(app);service.shutdown().wait().await.unwrap();std::fs::remove_dir_all(path).unwrap();
     }
+    #[tokio::test]
+    async fn group_http_query_retries_within_original_deadline() {
+        use std::time::Duration;
+
+        for expire in [false, true] {
+            let (mut service, path, headers) = setup().await;
+            if expire {
+                Arc::get_mut(&mut service).unwrap().request_timeout = Duration::from_secs(1);
+            }
+            let entry = service.catalog.collection_entry("tenant", "c").await.unwrap();
+            let root = path.join(entry.directory());
+            let app = router(service.clone());
+            let key = headers["apikey"].to_str().unwrap();
+            let replace = |nonce: &str, version: u64, ids: &[&str]| json!({
+                "operation_id": OperationId::new(nonce.into()), "group_id": "g",
+                "expected_group_version": version, "records": ids.iter()
+                    .map(|id| json!({"record_id": id, "document": {"body": "alpha"}})).collect::<Vec<_>>()
+            });
+            let group = "/api/v1/index/c/group/replace";
+            assert_eq!(tenant_api(&app, "POST", group, key, Some(replace("old", 0, &["a", "b"]))).await.0,
+                StatusCode::OK);
+            let gate = root.join(".test-query-candidates-pause");
+            let retry_gate = root.join(".test-query-retry-pause");
+            std::fs::write(&gate, b"pause").unwrap();
+            if expire {
+                std::fs::write(&retry_gate, b"pause").unwrap();
+            }
+            let pending = {
+                let app = app.clone();
+                let key = key.to_owned();
+                tokio::spawn(async move {
+                    tenant_api(&app, "POST", "/api/v1/index/c/query", &key, Some(json!({"query": "alpha"}))).await
+                })
+            };
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while !root.join(".test-query-candidates-pause-entered").exists() {
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+            }).await.unwrap();
+            assert_eq!(tenant_api(&app, "POST", group, key, Some(replace("new", 1, &["a", "d"]))).await.0,
+                StatusCode::OK);
+
+            if expire {
+                let (status, result) = tokio::time::timeout(Duration::from_secs(3), pending).await.unwrap().unwrap();
+                assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+                assert_eq!(result["code"], "outcome_unknown");
+                assert!(result.get("hits").is_none());
+                std::fs::remove_file(&gate).unwrap();
+            } else {
+                std::fs::remove_file(&gate).unwrap();
+                let (status, result) = tokio::time::timeout(Duration::from_secs(5), pending).await.unwrap().unwrap();
+                assert_eq!(status, StatusCode::OK, "{result}");
+                let hits = result["hits"].as_array().unwrap();
+                assert_eq!(hits.len(), 2);
+                assert!(hits.iter().any(|hit| hit["record"]["record_id"] == "a" && hit["record"]["version"] == 2));
+                assert!(hits.iter().any(|hit| hit["record"]["record_id"] == "d" && hit["record"]["version"] == 1));
+            }
+            drop(app);
+            // The expired HTTP waiter may have left its first, already admitted
+            // attempt draining. It must never enter the retry gate.
+            tokio::time::timeout(Duration::from_secs(5), service.shutdown().wait()).await.unwrap().unwrap();
+            assert!(!root.join(".test-query-retry-pause-entered").exists());
+            std::fs::remove_dir_all(path).unwrap();
+        }
+    }
+
     #[tokio::test]
     async fn group_http_rejects_invalid_requests_conflicts_and_other_credentials() {
         let (service,path,headers)=setup().await;

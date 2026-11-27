@@ -618,6 +618,7 @@ pub struct RecordHit {
     pub score: f32,
 }
 /// Retrieval options for independently published caches and current Record validation.
+#[derive(Clone)]
 pub struct RecordQuery {
     /// Optional system temporal predicates, applied before candidate selection.
     pub temporal: Option<TemporalFilter>,
@@ -1686,17 +1687,26 @@ impl RecordPartition {
     }
     /// Retrieve independent cache observations, then revalidate current records.
     pub async fn query(&self, query: RecordQuery) -> Result<RecordSearch, RecordError> {
-        self.query_output(query, None).await
+        self.query_output(query, None, None).await
     }
-    pub(crate) async fn query_output(&self, query: RecordQuery, fields: Option<Vec<String>>) -> Result<RecordSearch, RecordError> {
+    pub(crate) async fn query_output(
+        &self,
+        query: RecordQuery,
+        fields: Option<Vec<String>>,
+        deadline: Option<tokio::time::Instant>,
+    ) -> Result<RecordSearch, RecordError> {
         let permit=self.admission.clone().try_acquire_owned().map_err(|_|RecordError::Busy)?;
         let partition=self.clone();
-        crate::resources::spawn(async move {
+        let waiter = Arc::new(());
+        let retry = query::Retry { waiter: Arc::downgrade(&waiter), deadline };
+        let result = crate::resources::spawn(async move {
             let _permit=permit;
-            let result=partition.query_independent(query, fields.as_deref()).await;
+            let result=partition.query_with_retry(query, fields.as_deref(), retry).await;
             partition.kick_maintenance().await;
             result
-        }).await.map_err(storage)?
+        }).await.map_err(storage)?;
+        drop(waiter);
+        result
     }
     /// Iterate active records by stable identity. Changing the logical position
     /// invalidates continuation rather than silently skipping or duplicating rows.
