@@ -265,6 +265,15 @@ impl http_body::Body for DataBody {
         }
     }
 }
+
+fn transport_data(response: &Response) -> Option<TransportData> {
+    let extensions = response.extensions();
+    if let Some(data) = extensions.get::<Arc<entity::Output>>() {
+        return Some(TransportData::Entity(data.clone()));
+    }
+    extensions.get::<DataOutputPermit>().cloned().map(TransportData::Record)
+}
+
 fn response<T: Serialize>(value: T) -> Result<Response, Error> {
     protected(Ok(value))
 }
@@ -289,7 +298,7 @@ fn protected_data<T: Serialize>(
     result: Result<T, Error>, data: Option<DataOutputPermit>,
 ) -> Result<Response, Error> {
     let response = encode_data_response(result, data.map(TransportData::Record))?;
-    let data = response.extensions().get::<TransportData>().cloned();
+    let data = transport_data(&response);
     deliver(data.as_ref(), || response)
 }
 async fn protected_after_publication<T: Serialize>(
@@ -297,7 +306,7 @@ async fn protected_after_publication<T: Serialize>(
     data: DataOutputPermit,
 ) -> Result<Response, Error> {
     let response = encode_data_response(result, Some(TransportData::Record(data)))?;
-    let data = response.extensions().get::<TransportData>().cloned();
+    let data = transport_data(&response);
     deliver_after_publication(data.as_ref(), || response).await
 }
 fn encode_data_response<T: Serialize>(
@@ -348,7 +357,11 @@ fn encode_data_response<T: Serialize>(
     if let Some(code) = code {
         response.headers_mut().insert(ERROR_CODE_HEADER, header::HeaderValue::from_static(code));
     }
-    if let Some(data) = data { response.extensions_mut().insert(data); }
+    match data {
+        Some(TransportData::Record(data)) => { response.extensions_mut().insert(data); }
+        Some(TransportData::Entity(data)) => { response.extensions_mut().insert(data); }
+        None => {}
+    }
     Ok(response)
 }
 
@@ -2067,7 +2080,7 @@ impl QueryResponse {
 // Keep source/data validity checks at headers and body handoff; no credential recheck.
 async fn delivery_gate(request: axum::extract::Request, next: axum::middleware::Next) -> Response {
     let response = next.run(request).await;
-    let data = response.extensions().get::<TransportData>().cloned();
+    let data = transport_data(&response);
     match deliver_after_publication(data.as_ref(), || response).await { Ok(response)=>response, Err(error)=>error.into_response() }
 
 }
