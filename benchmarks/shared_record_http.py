@@ -77,6 +77,7 @@ def files(root):
 class LocalServer:
     # Callers retain their experiment-specific preload location.
     allocation_library = None
+    tenant = None
     def __init__(self, binary, data, log, cpus, allocation_file=None):
         self.child_usage_before = usage.getrusage(usage.RUSAGE_CHILDREN)
         self.local = threading.local()
@@ -99,7 +100,7 @@ class LocalServer:
                 if self.p.poll() is not None:
                     raise RuntimeError(f'server exited: {log.read_text()[-4000:]}')
                 try:
-                    self.call('GET', '/api/v1/live')
+                    self.call('GET', '/api/v1/live', key=MASTER)
                     self.proc_pid = proc_pid(binary, data)
                     return
                 except (OSError, http.client.HTTPException):
@@ -125,14 +126,19 @@ class LocalServer:
         self.total_cpu_s = used.ru_utime+used.ru_stime-self.child_usage_before.ru_utime-self.child_usage_before.ru_stime
         self.shutdown_ms = (time.perf_counter()-started)*1000
 
-    def call(self, method, path, body=None, key=KEY, allowed=(200,)):
+    def call(self, method, path, body=None, key=None, allowed=(200,)):
         conn = getattr(self.local, 'connection', None)
         if conn is None:
             conn = self.local.connection = http.client.HTTPConnection('127.0.0.1', self.port, timeout=120)
         payload = None if body is None else json.dumps(body, separators=(',', ':')).encode()
+        if key is None:
+            key = MASTER if self.tenant is not None else KEY
+        headers = {'Content-Type': 'application/json', 'apikey': key}
+        if self.tenant is not None:
+            headers['X-AnySeek-Tenant'] = self.tenant
         started = time.perf_counter_ns()
         try:
-            conn.request(method, path, payload, {'Content-Type': 'application/json', 'apikey': key})
+            conn.request(method, path, payload, headers)
             response = conn.getresponse()
             raw = response.read()
             elapsed = (time.perf_counter_ns()-started)/1e6
