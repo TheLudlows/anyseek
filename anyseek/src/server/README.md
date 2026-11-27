@@ -34,6 +34,8 @@ Windows PowerShell 使用 `.\target\debug\anyseek_server.exe print_master_key=tr
 
 服务凭据通过 `apikey` 请求头用于 Origence／网关到 AnySeek 的全部受保护接口；数据接口另需 `X-AnySeek-Tenant`。`/api/v1/live` 保持公开；如果请求携带 `apikey`，则严格验证该服务凭据，支持宿主在无租户/集合时检查连接。用户认证与权限由上游完成，网关须校验用户对所选租户及服务管理操作的权限。AnySeek 不注册租户，不签发、保存或撤销租户 Key。使用 GET `/api/v1/index` 列出集合。租户命名空间须匹配 `^[a-z0-9][a-z0-9_-]{0,62}$`（支持数字开头的 UUID），集合名须匹配 `^[a-z][a-z0-9_-]{0,62}$`，不转换大小写。Origence 直接传业务 tenant UUID，并以 `ws_<workspace UUID 无连字符>` 作为集合名。默认数据目录位于可执行文件旁的 `anyseek_index`。首次 `index_path` 必须不存在且父目录存在；重启须指向可恢复的 Catalog 根。支持的格式见[存储协议](../../../docs/storage.md)。
 
+独立 HTTP 服务启动时核对 Catalog 并完成未决的创建和恢复。已存在的活动集合在首次获准访问时打开，同一租户、集合及代次的并发请求共享一次 Recovery 打开。某个请求取消后，其余请求继续等待。GET `/api/v1/index` 返回实时统计，也会打开该租户仍处于冷态的集合。冷集合上的打开错误由相应请求返回，后续请求可以重试。
+
 | 参数 | 默认值与约束 |
 | --- | --- |
 | `index_path` | `anyseek_index`；相对路径以可执行文件目录为基准 |
