@@ -61,10 +61,8 @@ impl replay::Context<'_> {
         }
         apply_prepared(&mut *self.state, applied, Some(prepared)).map_err(|_| RecordError::DurablePending(receipt.seq))?;
         *self.snapshot_bytes = snapshot_bytes;
-        // Still serialize every Record/operation independently of incremental
-        // snapshot_after arithmetic. Counting needs neither a clone nor decode.
         #[cfg(test)]
-        assert_eq!(*self.snapshot_bytes,checkpoint_codec::full_length(self.config,self.state)?);
+        checkpoint_codec::assert_full_length(self.config, self.state, *self.snapshot_bytes).await?;
         Ok(())
     }
 

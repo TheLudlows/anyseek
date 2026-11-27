@@ -330,7 +330,7 @@ impl Inner {
         prepared.install(&mut self.state, event)
             .map_err(|_| RecordError::DurablePending(seq))?;
         #[cfg(test)]
-        assert_eq!(snapshot_bytes, checkpoint_codec::full_length(&self.config, &self.state)?);
+        checkpoint_codec::assert_full_length(&self.config, &self.state, snapshot_bytes).await?;
         self.snapshot_bytes = snapshot_bytes;
         self.evaluation_time_ms = evaluation;
         self.output
