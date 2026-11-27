@@ -1264,10 +1264,20 @@ async fn event_time_zero_weight_candidates_do_not_fence_http_or_sdk_delivery() {
 
 #[tokio::test]
 async fn event_time_http_authority_reopen_and_work_limits() {
+    async fn open_for_projection_damage(root: &FsPath) -> (Arc<Service>, Router) {
+        let service = open(root).await;
+        let app = router(service.clone());
+        // Logical expiry is exercised by the query. Keep the periodic sweep
+        // from replacing the selected projection while the test damages it.
+        let sweep = service.reclamation.lock().unwrap().take().unwrap();
+        sweep.abort();
+        assert!(sweep.await.unwrap_err().is_cancelled());
+        (service, app)
+    }
+
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("catalog");
-    let service = open(&root).await;
-    let app = router(service.clone());
+    let (service, app) = open_for_projection_damage(&root).await;
     let (status, create) = namespace_api(
         &app,
         "POST",
@@ -1408,8 +1418,7 @@ async fn event_time_http_authority_reopen_and_work_limits() {
             Some(contents) => std::fs::write(&pages, contents).unwrap(),
             None => std::fs::remove_file(&pages).unwrap(),
         }
-        let service = open(&root).await;
-        let app = router(service.clone());
+        let (service, app) = open_for_projection_damage(&root).await;
         let (status, replayed) = window(&app, bounded_request()).await;
         if valid {
             assert_eq!(status, StatusCode::OK, "{replayed}");
@@ -1456,8 +1465,7 @@ async fn event_time_http_authority_reopen_and_work_limits() {
 
     // The ordinary checkpoint selected a base without the projection. Reopen
     // that actual certificate before rebuilding through the same admin route.
-    let service = open(&root).await;
-    let app = router(service.clone());
+    let (service, app) = open_for_projection_damage(&root).await;
     let missing = window(&app, bounded_request()).await;
     assert_eq!(missing.0, StatusCode::BAD_REQUEST, "{:?}", missing.1);
     assert_eq!(missing.1["code"], "event_time_unavailable");
