@@ -636,6 +636,7 @@ mod tests {
                 receipt:group_plan::GroupReceipt{seq:1,group_id:"g".into(),group_version:2,record_count:1},
                 observed_epoch:0,observed_time_ms:1,
             }],publication_seq:1,
+            ..Default::default()
         };
         let state=State {groups:Some(groups),seq:1,time_watermark_ms:1,..State::default()};
         let mut pieces=Collected(Vec::new());visit_state(&state,&mut pieces).unwrap();

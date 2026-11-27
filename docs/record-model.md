@@ -34,6 +34,12 @@ HTTP `/batch` 只负责请求校验和逐项响应编码；核心 `write_indepen
 
 确定拒绝之后推进到下一项，Busy 只允许已知未尝试项走标量准入；标量成功后可重新组合未尝试后缀。未知项不重试，致命中断保留已确认回执并停止后续尝试。所有推进使用输入切片和位置，不复制剩余请求后缀；每个内核窗口只计长一次，前缀推进直接扣除累计字节；仅实际进入 planner 的命令在预留的规划窗口内克隆。同步回执仍等两个消费者发布，异步回执仍仅确认权威持久结果。
 
+### 组原子替换
+
+`replace_group` 读取目标组、旧成员和请求成员的并集，并按操作 ID 精确获取回执。新成员值、归属和回执、checkpoint 字节增量、TTL 预留及派生索引准入按本次变更准备。空组保留版本和已退出成员的归属。
+
+一条 `GroupApplied` WAL 决定先持久化。分区 writer 和组发布屏障保护成员安装与两个索引通道，成功回执确认该提交及两个通道的可见水位。持久化后失败则封锁并等待恢复。重放消费同一决定，继续使用原有的顺序回执数组和 checkpoint 格式。打开集合及维护裁剪后从保留回执重建 ID 和过期索引。
+
 ## 检索引擎与应用边界
 
 来源版本、分块、章节、证据依赖和关系属于上层应用；可将这些信息作为普通 document 字段保存。AnySeek 不提供 source/derived 写入、旧版本正文摘录、定位符验证、关系遍历或关系融合接口。全文/向量通用混合检索、条件更新和精确正文版本的向量后补继续保留。
@@ -132,10 +138,10 @@ query/get/page/statistics 的 observe_time 仅修改 transient evaluation_time�
 
 ```text
 values_next = values_before - prior_record_wire + next_record_wire + applied_wire
-lookup_next = lookup_before + operation_id_wire
+lookup_next = lookup_before + operation_id_wire + epoch_index_allowance
 containers_next = snapshot_next - values_next + lookup_next
 ```
 
 snapshot_next 继续使用原增量编码公式，包括全局空/非空的逗号、转义 key、序号/epoch/time 位数变化。每个成功前缀的 container 高水位都在持久化前为 canonical State 预留；不是只计算最终状态或小 map 大小。map 的 key/node 在插入前逐项取得独立内存租约，Shared 值保持原 Prepared 所有权。所有可失败检查、预算申请均在局部前缀修改之前完成。减少复制会改变可用资源余量，不能承诺低内存情况下与旧实现有相同的拒绝点。
 
-收据 GC 的检查仍针对固定 canonical 前缀：本批新 operation 的 seq 大于固定 history.floor，不可能成为本轮 GC 对象。检查 epoch 取当前 UTC epoch 与成功候选 epoch watermark 的较大者，不能在午夜附近丢弃候选已观察的更高 epoch。这个 GC 前缀扫描仍可能与历史规模有关；查找仍有树索引成本，持久化和异步索引也有各自成本。因此不宣称整个写入已成为 O(batch)，或尾延迟、RSS 必然改善。
+收据 GC 的检查仍针对固定 canonical 前缀：本批新 operation 的 seq 大于固定 history.floor，不可能成为本轮 GC 对象。检查 epoch 取当前 UTC epoch 与成功候选 epoch watermark 的较大者，不能在午夜附近丢弃候选已观察的更高 epoch。普通和组回执分别按序号维护前缀最小 epoch，直接判断 history floor 内是否存在过期回执，由维护任务选择并裁剪实际回执。查找仍有树索引成本，持久化和异步索引也有各自成本。因此不宣称整个写入已成为 O(batch)，或尾延迟、RSS 必然改善。

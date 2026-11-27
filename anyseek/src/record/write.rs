@@ -355,7 +355,7 @@ impl RecordPartition {
                 if !inner.healthy {
                     return Err(RecordError::RecoveryRequired);
                 }
-                if inner.state.groups.as_ref().is_some_and(|g|g.owners.contains_key(&request.record_id) || g.receipts.iter().any(|r|r.operation_id==request.operation_id)) {
+                if inner.state.groups.as_ref().is_some_and(|g|g.owners.contains_key(&request.record_id) || g.receipt(&request.operation_id).is_some()) {
                     return Err(RecordError::Conflict("record or operation belongs to a group".into()));
                 }
                 let (previous, operation) = candidate.read(&inner.state, &request);
@@ -366,7 +366,7 @@ impl RecordPartition {
                     }
                     // New prefix decisions are above the fixed history floor;
                     // only the unchanged canonical prefix can require GC.
-                    if maintenance::has_expired_operations(&inner.state, current_epoch().max(candidate.epoch_watermark))? {
+                    if maintenance::has_expired_operations(&inner.state, current_epoch().max(candidate.epoch_watermark)) {
                         return Err(inner.request_checkpoint("expired_operation_receipts"));
                     }
                 }
