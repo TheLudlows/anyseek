@@ -51,3 +51,15 @@ python3 benchmarks/vector-segments/compare.py \
 ```
 
 The manual test is ignored by default, so normal CI does not time it. It adds no dependencies or flaky pass threshold. Windows does not support its CPU affinity or resource collection. Cross-platform CI verifies correctness.
+
+## #227 filtered I/O comparison
+
+Use the build procedure above and copy the same probe into both checkouts. The matrix uses independent temporary databases, 2,048 synthetic records, and four batches. It covers vector and hybrid queries, no filter and about 5% or 90% matching, and one or four concurrent requests. Each condition records a first round after reopen, then warms up and repeats the query. Reopen itself can warm OS pages, so this first round measures cold application readers. JSON records individual successful query and admission durations alongside the number of Busy responses.
+
+```sh
+ANYSEEK_FOREGROUND_PER_COLLECTION_IO=8 python3 benchmarks/vector-segments/compare.py \
+  --before /tmp/segment-before --after /tmp/segment-after --cpus 1,2 \
+  --matrix --pairs 5 --trace --output /tmp/segment-filter-io
+```
+
+The example uses the same per-collection I/O limit of 8 to measure successful queries at concurrency four. Remove the environment override to observe default admission. The optional `--trace` pass runs separate processes under `strace` to count calls, requested and returned bytes, and file mappings for the two component files. Noncontiguous ranges are counted in call order within each file. Concurrent rounds include repeat ranges across requests. Trace collection and latency sampling run separately.

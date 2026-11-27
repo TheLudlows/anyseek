@@ -586,6 +586,25 @@ mod tests {
         let mut update=write("update","updated","beta new",ExpectedVersion::Match(1));update.document.as_mut().unwrap().insert("rank".into(),0.into());p.write(update.clone()).await.unwrap();
         let mut delete=write("delete","deleted","unused",ExpectedVersion::Match(1));delete.document=None;p.write(delete.clone()).await.unwrap();
         clock.0.store(1100,std::sync::atomic::Ordering::SeqCst);
+        async fn assert_vector_visibility(partition: &RecordPartition) {
+            let expected: std::collections::BTreeSet<_> = std::iter::once("base".to_owned())
+                .chain((0..12).filter(|i| i % 3 != 0).map(|i| format!("delta-{i:02}"))).collect();
+            let ann = crate::vector_similarity::AnnMode::All;
+            for mode in [SearchMode::Vector { similarity_threshold: None, ann_mode: ann.clone() },
+                SearchMode::Hybrid { similarity_threshold: None, ann_mode: ann, rrf: Default::default() }] {
+                let result = partition.query(RecordQuery {
+                    text: "alpha".into(), vector: Some(crate::vector::Embedding::F32(vec![1.0, 0.0])),
+                    mode, query_type: QueryType::Union, offset: 0, length: 15, result_type: ResultType::TopkCount,
+                    fields: Vec::new(), temporal: None, sort: Vec::new(),
+                    filters: serde_json::from_value(serde_json::json!([
+                        {"Int":{"field":"rank","filter":{"start":1,"end":4}}}
+                    ])).unwrap(),
+                }).await.unwrap();
+                assert_eq!(result.hits.iter().map(|hit| hit.record.record_id.clone())
+                    .collect::<std::collections::BTreeSet<_>>(), expected);
+            }
+        }
+        assert_vector_visibility(&p).await;
         let held=native.snapshot().await.unwrap();assert_eq!(held.overlay.len(),13);
         let query=|text:&str,field:&str,order:SortOrder|RecordQuery{temporal:None,text:text.into(),vector:None,mode:SearchMode::Lexical,query_type:QueryType::Union,offset:1,length:5,result_type:ResultType::TopkCount,fields:vec![],filters:vec![],sort:vec![ResultSort{field:field.into(),order}]};
         let mut before=Vec::new();
@@ -601,9 +620,11 @@ mod tests {
         std::fs::remove_file(&pause).unwrap();native.join_visible().await.unwrap();
         for (text,field,order,count,hits) in &before {let result=p.query(query(text,field,order.clone())).await.unwrap();assert_eq!(*count,result.count_total);assert_eq!(*hits,result.hits.iter().map(|h|(h.record.record_id.clone(),h.score)).collect::<Vec<_>>());}
         assert!(native.visible_bytes.load(std::sync::atomic::Ordering::Acquire)>0);drop(held);assert_eq!(native.visible_bytes.load(std::sync::atomic::Ordering::Acquire),0);
+        assert_vector_visibility(&p).await;
         p.finish_service_shutdown().await.unwrap();drop(native);drop(p);
         let p=RecordPartition::open(&root,cfg.max_journal_bytes).await.unwrap();p.inner.lock().await.clock=clock;
         for (text,field,order,count,hits) in before {let result=p.query(query(text,field,order)).await.unwrap();assert_eq!(count,result.count_total);assert_eq!(hits,result.hits.iter().map(|h|(h.record.record_id.clone(),h.score)).collect::<Vec<_>>());}
+        assert_vector_visibility(&p).await;
         p.finish_service_shutdown().await.unwrap();
     }
 

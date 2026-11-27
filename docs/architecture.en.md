@@ -65,7 +65,7 @@ A logical VectorIndex owns a bounded `segments` topology with one mutable tail a
 | --- | --- | --- |
 | RecordPartition | Canonical data, version/TTL, receipts, and ordinal-to-stable-identity mapping | Authoritative commit and recovery |
 | VectorIndex / RetrievalView | Topology, global Top-K and candidate budget, reader pins | Capture views and replace topology on rotation or merge |
-| VectorSegment | Files and mmap, ANN clusters and quantization, physical row identity, active mask, and component admission | Build, freeze, merge, and eventually release one component |
+| VectorSegment | Explicit range reads and writes, ANN clusters and quantization, physical row identity, active mask, and component admission | Build, freeze, merge, and eventually release one component |
 | Tantivy runtime | Native Searcher, queryable deltas, native files, writer, directory owner | Full-text publication, materialization, and pinned readers |
 
 VectorIndex schema, distance, and quantization are logical query configuration. Component configuration interprets local files. `indexed_*`, `committed_doc_count`, `uncommitted`, and `failed` describe progress. `active`, `delete_hashset`, and retirement tokens describe derived active state. Component admission accounts for held and pending-transfer leases. Rotation closes old-generation admission, while work already admitted can finish under its original binding.
@@ -105,7 +105,7 @@ Production release uses `panic = "abort"`. A Rust panic, native crash, or alloca
 | Authoritative publication unknown or unhealthy | Reads and writes are fenced. A missing response does not prove no commit. | Recover authority, then rebuild caches |
 | Process panic | API disconnect. Only durable authority is recoverable. | Restart, reopen, look up or retry with the original identity |
 
-Independent consumption does not imply independent failure isolation. Do not advance cursors manually, clear shared errors to serve partial results, remove caches in use, or reuse failed writers. Failed recovery keeps the partition unavailable. Regressions cover consumer errors, failed metadata mmap growth, partial vector commits, partial authoritative frames, and reopen. Execution results belong to the matching source revision.
+Independent consumption does not imply independent failure isolation. Do not advance cursors manually, clear shared errors to serve partial results, remove caches in use, or reuse failed writers. Failed recovery keeps the partition unavailable. Regressions cover consumer errors, failed metadata writes, partial vector commits, partial authoritative frames, and reopen. Execution results belong to the matching source revision.
 
 The blocking worker holds query admission, resource scope, handles, and package pins until join. Client cancellation does not revoke these resources. Checkpoint journal install also transfers partition/writer guards and I/O leases to a blocking worker while still holding the publication lock. Moving work off an async executor does not prove the publishing pause disappeared or throughput improved.
 
@@ -117,7 +117,7 @@ Shutdown order follows.
 
 1. Join the periodic maintenance coordinator. Stop new automatic checkpoint/cache maintenance and retries without admission. Already accepted consumers finish existing bounded flush and merge.
 2. Drain owned HTTP, indexing, and blocking executor activity, including cancelled tasks, frames held after a body is dropped, and undelivered task results. Completed handles storing only status do not count as in flight.
-3. Join index consumers, lexical materialization, and native writers. Release partitions, readers, package pins, mmap, and Catalog.
+3. Join index consumers, lexical materialization, and native writers. Release partitions, readers, package pins, index file handles, and Catalog.
 4. Release the service root lock last. Report `Shutdown complete` only after full success. The directory can then be reopened or reclaimed immediately.
 
 Shutdown does not force a checkpoint, TTL sweep, or GC and makes no stronger durability guarantee. It waits for outstanding transport owners. Repeated calls share a completion state. Reopening can recover consumer health errors. Worker join failure, native writer termination failure, or remaining partition owners report incomplete shutdown, retain the root lock until process exit, and produce a nonzero executable exit.

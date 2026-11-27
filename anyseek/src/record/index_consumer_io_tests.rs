@@ -42,7 +42,8 @@ async fn vector_io_waits_before_identity_and_metadata_growth() {
     let (_root,index,config,engine,scope) = fixture().await;
     let component = index.read().await.segments[0].vector.clone();
     // Force capacity growth with one row rather than a 65K-row workload.
-    component.write().await.facets_file_mmap = memmap2::MmapOptions::new().len(1).map_anon().unwrap();
+    let metadata = std::path::PathBuf::from(index.read().await.index_path_string.clone()).join("metadata.bin");
+    std::fs::OpenOptions::new().write(true).open(&metadata).unwrap().set_len(1).unwrap();
     let held = scope.io().unwrap(); let cursors = Arc::new(Cursors::default());
     let queued = scope.clone().run(async { input(&config) }).await;
     let bytes = queued._memory.bytes();
@@ -51,17 +52,17 @@ async fn vector_io_waits_before_identity_and_metadata_growth() {
     let mut pending = Box::pin(scope.clone().run(engine.append(queued,&cursors)));
     assert!(tokio::time::timeout(std::time::Duration::from_millis(20),&mut pending).await.is_err());
     assert!(component.try_read().is_err(), "guard acquired before I/O wait");
-    drop(pending); // Cancellation before admission cannot change identity or mmap.
+    drop(pending); // Cancellation before admission cannot change identity or file length.
     assert!(scope.bytes(bytes).is_ok(), "cancelled input releases its retained lease");
     drop(remaining);
     { let shard = component.read().await;
       assert_eq!(shard.active.as_ref().unwrap().keys.len(),0);
-      assert_eq!(shard.indexed_doc_count,0); assert_eq!(shard.facets_file_mmap.len(),1); assert!(!shard.failed); }
+      assert_eq!(shard.indexed_doc_count,0); assert_eq!(std::fs::metadata(&metadata).unwrap().len(),1); assert!(!shard.failed); }
     assert!(cursors.error().is_none()); drop(held);
     tokio::time::timeout(std::time::Duration::from_secs(5),scope.clone().run(engine.append(input(&config),&cursors))).await.unwrap().unwrap();
     let shard = component.read().await;
     assert_eq!(shard.indexed_doc_count,1); assert_eq!(shard.active.as_ref().unwrap().keys.len(),1);
-    assert!(shard.facets_file_mmap.len()>1); assert!(!shard.failed); assert!(cursors.error().is_none());
+    assert!(std::fs::metadata(&metadata).unwrap().len()>1); assert!(!shard.failed); assert!(cursors.error().is_none());
     assert!(scope.io().is_ok());
 }
 #[tokio::test(flavor="current_thread")]
@@ -88,7 +89,6 @@ async fn vector_real_metadata_io_failure_still_fences_component_and_cursor() {
     let (_root,index,config,engine,scope) = fixture().await;
     let component = index.read().await.segments[0].vector.clone();
     { let mut shard = component.write().await;
-      shard.facets_file_mmap = memmap2::MmapOptions::new().len(1).map_anon().unwrap();
       shard.readonly_metadata_for_test(); }
     let cursors = Arc::new(Cursors::default());
     let queued = scope.clone().run(async { input(&config) }).await;
@@ -112,6 +112,41 @@ async fn component_real_vector_write_failure_still_fences_after_partial_commit()
     assert!(scope.clone().run(index.commit()).await.is_err());
     assert!(component.read().await.failed);
     assert!(scope.io().is_ok());
+}
+
+#[tokio::test]
+async fn truncated_component_reads_fail_without_returning_partial_hits() {
+    use crate::{vector::SearchVectorSegment, vector_similarity::AnnMode};
+
+    let (_root, index, config, engine, _scope) = fixture().await;
+    let cursors = Arc::new(Cursors::default());
+    engine.append(input(&config), &cursors).await.unwrap();
+    let second = Input::vector(
+        &config, lexical::Identity { id: "second".into(), version: 1, revision: 1 }, 1,
+        &serde_json::from_value(serde_json::json!({"vector":[2.0,0.0],"number":42})).unwrap(),
+    ).unwrap();
+    engine.append(second, &cursors).await.unwrap();
+    index.commit().await.unwrap();
+    let root = index.read().await;
+    let component = root.segments[0].vector.clone();
+    let path = std::path::PathBuf::from(&root.index_path_string);
+    let first_row_bytes = component.read().await.facets_size_sum as u64;
+    drop(root);
+    let score = |filters| component.search_vector_segment(
+        Some((crate::vector::Embedding::F32(vec![1.0, 0.0]), 0.0, 0.0, 0, 0)),
+        2, true, None, AnnMode::All, Vec::new(), filters,
+    );
+    let filter: crate::search::FacetFilter = serde_json::from_value(serde_json::json!({
+        "Int": {"field":"number", "filter":{"start":42, "end":43}}
+    })).unwrap();
+    assert_eq!(score(vec![filter.clone()]).await.unwrap().results.len(), 2);
+    for (file, filters, length) in [
+        ("metadata.bin", vec![filter], first_row_bytes),
+        ("vectors.bin", Vec::new(), 1),
+    ] {
+        std::fs::OpenOptions::new().write(true).open(path.join(file)).unwrap().set_len(length).unwrap();
+        assert!(matches!(score(filters).await, Err(RecordError::Storage(_))), "{file}");
+    }
 }
 
 #[tokio::test(flavor="current_thread")]
@@ -291,7 +326,6 @@ async fn component_credit_checks_pending_aggregate_before_admission_and_keeps_io
     let credit={let shard=component.read().await;ComponentCredit::new(&shard,&document,"row").unwrap()};
     {
         let mut shard=component.write().await;
-        shard.facets_file_mmap=memmap2::MmapOptions::new().len(1).map_anon().unwrap();
         shard.readonly_metadata_for_test();
     }
     let queued=Input::vector_with_credit(&config,lexical::Identity{id:"row".into(),version:1,revision:1},0,&document,Some(credit)).unwrap();

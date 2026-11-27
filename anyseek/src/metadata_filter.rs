@@ -1,5 +1,6 @@
 //! Shared schema validation and per-shard metadata predicates for all search modes.
 use crate::{
+    component::FacetReader,
     index::{FieldType, SchemaField, VectorSegment},
     search::FacetFilter,
     utils::{read_f64, read_i64, read_u32},
@@ -135,15 +136,31 @@ pub(crate) fn compile_filters(
 
 // True means reject this document. Empty predicates accept every document.
 #[inline]
-pub(crate) fn is_facet_filter(shard: &VectorSegment, filters: &[FilterSparse], doc_id: usize) -> bool {
-    filters.iter().zip(&shard.facets).any(|(filter, field)| {
-        let address = shard.facets_size_sum * doc_id + field.offset;
+pub(crate) fn is_facet_filter(
+    reader: &mut FacetReader<'_>,
+    filters: &[FilterSparse],
+    doc_id: usize,
+) -> Result<bool, crate::record::RecordError> {
+    for (filter, field) in filters.iter().zip(&reader.segment.facets) {
         if matches!(filter, FilterSparse::None) {
-            return false;
+            continue;
         }
-        shard.facets_file_mmap[address + crate::component::field_width(&field.field_type) - 1] == 0
-            || rejects(filter, &shard.facets_file_mmap, address)
-    })
+        let bytes = reader.read(doc_id, field)?;
+        if bytes[crate::component::field_width(&field.field_type) - 1] == 0 {
+            return Ok(true);
+        }
+        if matches!(field.field_type, FieldType::String | FieldType::StringSet)
+            && read_u32(&bytes, 0) as usize >= field.values.len()
+        {
+            return Err(crate::record::RecordError::Storage(
+                "invalid metadata dictionary index".into(),
+            ));
+        }
+        if rejects(filter, &bytes, 0) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 #[inline]

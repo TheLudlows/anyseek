@@ -3,7 +3,7 @@
 use super::*;
 use std::cmp::Ordering;
 use crate::{
-    component::RetrievalSegment,
+    component::{FacetReader, RetrievalSegment},
     index::VectorIndexArc,
     min_heap::Result as SearchHit,
     search::{
@@ -195,12 +195,13 @@ pub(crate) async fn search(
         for (slot, (shard, active)) in shards.iter().zip(active_shards).enumerate() {
             let compiled = crate::metadata_filter::compile_filters(shard, &filters)
                 .map_err(RecordError::Rejected)?;
+            let mut facets = FacetReader::new(shard);
             for (local, key) in active.keys.iter().enumerate().filter(|(local, _)| active.is_live(*local)) {
                 let (version, revision) = active.revisions[local];
                 let identity = Identity { id: key.clone(), version, revision };
                 let row = VectorRow {
                     address: local * shards.len() + slot,
-                    passes_filter: !crate::metadata_filter::is_facet_filter(shard, &compiled, local),
+                    passes_filter: !crate::metadata_filter::is_facet_filter(&mut facets, &compiled, local)?,
                 };
                 if vectors.insert(identity, row).is_some() {
                     return Err(storage("duplicate live vector revision identity"));
@@ -231,7 +232,7 @@ pub(crate) async fn search(
     // Reserve its workspace before compiling the predicates.
     let mut compiled = Vec::new();
     let _filter_workspace = if aligned && !filters.is_empty() {
-        let mut bytes = 0u64;
+        let mut bytes = (shards.len() as u64) * (size_of::<FacetReader<'_>>() as u64);
         for shard in &shards {
             bytes = bytes.checked_add(crate::metadata_filter::workspace_bytes(shard, &filters)
                 .map_err(RecordError::Rejected)?)
@@ -254,11 +255,12 @@ pub(crate) async fn search(
         !hybrid && sort.iter().all(|s| matches!(s.field.as_str(), "_id" | "_score"))
     };
     let filtered = if detached && !compiled.is_empty() {
-        // Inspect metadata only for posting matches while the mmap is guarded,
+        // Inspect metadata only for posting matches while the component is guarded,
         // then release component guards before native scoring.
         let mut accepted = FilteredMatches::default();
+        let mut facets = shards.iter().map(|shard| FacetReader::new(shard)).collect::<Vec<_>>();
         corpus.as_ref().expect("aligned corpus").visit(plan.predicate.as_ref(), |slot, ordinal, _| {
-            if !crate::metadata_filter::is_facet_filter(&shards[slot], &compiled[slot], ordinal) {
+            if !crate::metadata_filter::is_facet_filter(&mut facets[slot], &compiled[slot], ordinal)? {
                 accepted.insert(ordinal * n + slot, scope.as_ref())?;
             }
             Ok(())
@@ -280,15 +282,20 @@ pub(crate) async fn search(
         // only when collecting hits.
         None => scoring::CorpusView::select_matching(&views, cut, |identity| vectors.contains_key(identity))?,
     };
+    let mut facets = if compiled.is_empty() || detached {
+        Vec::new()
+    } else {
+        shards.iter().map(|shard| FacetReader::new(shard)).collect()
+    };
     let accepts = |slot: usize, ordinal: usize, identity: &Identity| {
-        if !aligned {
+        Ok(if !aligned {
             vectors[identity].passes_filter
         } else if let Some(filtered) = &filtered {
             filtered.addresses.contains(&(ordinal * n + slot))
         } else {
             compiled.is_empty()
-                || !crate::metadata_filter::is_facet_filter(&shards[slot], &compiled[slot], ordinal)
-        }
+                || !crate::metadata_filter::is_facet_filter(&mut facets[slot], &compiled[slot], ordinal)?
+        })
     };
     let address = |slot: usize, ordinal: usize, identity: &Identity| {
         if aligned { ordinal * n + slot } else { vectors[identity].address }
@@ -299,12 +306,11 @@ pub(crate) async fn search(
         result.result_count_total = corpus.count_where(plan.predicate.as_ref(), accepts)?;
         return Ok(result);
     }
-    let guarded_order = |a, b| crate::min_heap::result_ordering_root(&shards, browse, &sorts, b, a);
-    let order = |a: SearchHit, a_key: &str, b: SearchHit, b_key: &str| {
+    let order = |a: &Candidate<'_>, b: &Candidate<'_>| {
         if detached {
-            captured_ordering(&sorts, b, b_key, a, a_key)
+            captured_ordering(&sorts, b.hit, b.key, a.hit, a.key)
         } else {
-            guarded_order(a, b)
+            crate::min_heap::result_ordering_root(&shards, browse, &sorts, b.hit, &b.metadata, a.hit, &a.metadata)
         }
     };
     // The same user ordering selects candidates and orders the final result.
@@ -342,7 +348,10 @@ pub(crate) async fn search(
                 ..Default::default()
             };
             let key = views[slot].identities[ordinal].id.as_str();
-            Candidate { hit, key, order: &order }.retain(&mut candidates, limit);
+            let metadata = if detached { Default::default() }
+                else { crate::min_heap::prepare_sort_key(&shards, &sorts, doc_id)? };
+            Candidate { hit, key, metadata, order: &order }.retain(&mut candidates, limit);
+            Ok(())
         },
     )?;
     let mut lexical = candidates.into_sorted_vec().into_iter()
@@ -394,8 +403,7 @@ pub(crate) async fn search(
             .zip(vector_counts).map(|(lexical, vector)| lexical.max(vector)).sum();
         result.observed_vector_count = vector_result.observed_vector_count;
         result.observed_cluster_count = vector_result.observed_cluster_count;
-        result.results = fused.into_values().collect();
-        result.results.sort_by(|a, b| guarded_order(*a, *b));
+        result.results = crate::min_heap::sort_results(&shards, browse, &sorts, fused.into_values().collect())?;
     } else {
         result.results = lexical;
     }
@@ -498,7 +506,7 @@ fn has_positive_terms(snapshots: &[&Snapshot], groups: &[query::ScoreGroup]) -> 
 }
 
 // Same greater-is-better contract as result_ordering_root, restricted to
-// Record's stable ID and score sorts. Facet comparators keep their mmap guards.
+// Record's stable ID and score sorts. Prepared facet keys require component guards.
 fn captured_ordering(
     sorts: &[ResultSortIndex],
     a: SearchHit,
@@ -556,11 +564,12 @@ fn validate_selection(
 // BinaryHeap keeps the worst retained candidate at the root. The ordering is
 // the existing final-result comparator (Less means better), including facets
 // and stable business IDs; no per-hit identity allocation is needed.
-type CandidateOrder<'a> = dyn Fn(SearchHit, &str, SearchHit, &str) -> Ordering + 'a;
+type CandidateOrder<'a> = dyn Fn(&Candidate<'a>, &Candidate<'a>) -> Ordering + 'a;
 
 struct Candidate<'a> {
     hit: SearchHit,
     key: &'a str,
+    metadata: crate::min_heap::SortKey<'a>,
     order: &'a CandidateOrder<'a>,
 }
 impl PartialEq for Candidate<'_> {
@@ -571,7 +580,7 @@ impl PartialOrd for Candidate<'_> {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> { Some(self.cmp(other)) }
 }
 impl Ord for Candidate<'_> {
-    fn cmp(&self, other: &Self) -> Ordering { (self.order)(self.hit, self.key, other.hit, other.key) }
+    fn cmp(&self, other: &Self) -> Ordering { (self.order)(self, other) }
 }
 
 impl<'a> Candidate<'a> {
@@ -660,7 +669,7 @@ mod candidate_tests {
                                 let b = crate::min_heap::Result { doc_id: b_id, score: b_score, ..Default::default() };
                                 for empty in [false, true] {
                                     assert_eq!(captured_ordering(&sorts, a, keys[&a_id], b, keys[&b_id]),
-                                        crate::min_heap::result_ordering_root(&shards, empty, &sorts, a, b),
+                                        crate::min_heap::result_ordering_root(&shards, empty, &sorts, a, &Default::default(), b, &Default::default()),
                                         "{ordering:?} descending={descending} a={a:?} b={b:?}");
                                 }
                             }
@@ -673,9 +682,10 @@ mod candidate_tests {
 
     #[test]
     fn bounded_candidates_match_full_sort() {
-        let order = |a: SearchHit, _: &str, b: SearchHit, _: &str| {
+        let rank = |a: SearchHit, b: SearchHit| {
             crate::min_heap::rank_ordering(b.score, b.doc_id, a.score, a.doc_id)
         };
+        let order = |a: &Candidate<'_>, b: &Candidate<'_>| rank(a.hit, b.hit);
         // Reverse identities force replacements at equal scores. Ascending scores
         // force replacements too; neither traversal may grow storage with hits.
         for tied in [false, true] {
@@ -684,11 +694,11 @@ mod candidate_tests {
                 ..Default::default()
             }).collect::<Vec<_>>();
             let mut expected = full.clone();
-            expected.sort_by(|a, b| order(*a, "", *b, ""));
+            expected.sort_by(|a, b| rank(*a, *b));
             for limit in [0, 1, 37] {
                 let mut heap = std::collections::BinaryHeap::new();
                 for hit in &full {
-                    Candidate { hit: *hit, key: "", order: &order }.retain(&mut heap, limit);
+                    Candidate { hit: *hit, key: "", metadata: Default::default(), order: &order }.retain(&mut heap, limit);
                     assert!(heap.len() <= limit);
                     assert!(heap.capacity() <= (2 * limit).max(4));
                 }

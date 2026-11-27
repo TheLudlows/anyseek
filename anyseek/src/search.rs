@@ -1,6 +1,6 @@
 //! Query configuration and Record's private vector-component execution.
 use crate::record::RecordError;
-use crate::{index::VectorIndexArc, min_heap::{Result, result_ordering_root},
+use crate::{index::VectorIndexArc, min_heap::Result,
     vector::{Embedding, Inference, Quantization, SearchVectorSegment},
     vector_similarity::{AnnMode, QuantizedVector, VectorSimilarity, normalize_f32, normalize_f32_simd,
         quantize_f32_to_i8, quantize_f32_to_i8_simd}};
@@ -513,7 +513,7 @@ pub(crate) async fn search_with_counts(
                 _ => *shards[0].facets_map.get(&sort.field)? }, order: sort.order.clone(),
         })).collect::<Vec<_>>();
         if !sorts.is_empty() {
-            result.results.sort_by(|a,b| result_ordering_root(&shards,false,&sorts,*b,*a));
+            result.results = crate::min_heap::sort_results(&shards, false, &sorts, result.results)?;
         }
         result.results = result.results.into_iter().skip(offset).take(length).collect();
         result.result_count = result.results.len();

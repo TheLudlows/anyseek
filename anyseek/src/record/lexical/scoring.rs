@@ -224,8 +224,8 @@ impl ActiveView<'_> {
         let statistics = QueryStatistics::build(std::slice::from_ref(self), groups, boosts.len(), normalization)?;
         let mut hits = Vec::new();
         let count = self.score_groups_in(
-            &statistics, query, groups, boosts, |_, identity| accepts(identity),
-            &mut |_, identity, score| hits.push(Hit { identity: identity.clone(), score }),
+            &statistics, query, groups, boosts, |_, identity| Ok(accepts(identity)),
+            &mut |_, identity, score| { hits.push(Hit { identity: identity.clone(), score }); Ok(()) },
         )?;
         sort_probe_hits(&mut hits, limit);
         Ok((count, hits))
@@ -237,8 +237,8 @@ impl ActiveView<'_> {
         query: &dyn Query,
         groups: &[super::query::ScoreGroup],
         boosts: &[f32],
-        accepts: impl Fn(usize, &Identity) -> bool,
-        collect: &mut impl FnMut(usize, &Identity, f32),
+        mut accepts: impl FnMut(usize, &Identity) -> Result<bool, RecordError>,
+        collect: &mut impl FnMut(usize, &Identity, f32) -> Result<(), RecordError>,
     ) -> Result<usize, RecordError> {
         if self.live.is_empty() {
             return Ok(0);
@@ -274,7 +274,7 @@ impl ActiveView<'_> {
                 let doc = scorer.doc();
                 let ordinal = self.snapshot.addresses[segment_id][doc as usize];
                 let identity = &self.snapshot.identities[ordinal];
-                if self.live.contains(&ordinal) && accepts(ordinal, identity) {
+                if self.live.contains(&ordinal) && accepts(ordinal, identity)? {
                     count += 1;
                     let mut score = 0.0f32;
                     for fields in &mut postings {
@@ -316,7 +316,7 @@ impl ActiveView<'_> {
                     if !score.is_finite() {
                         return Err(storage("nonfinite BM25F score"));
                     }
-                    collect(ordinal, identity, score);
+                    collect(ordinal, identity, score)?;
                 }
                 scorer.advance();
             }
@@ -325,7 +325,7 @@ impl ActiveView<'_> {
             let predicate=query.downcast_ref::<super::query::Compiled>().ok_or_else(||storage("visible delta requires shared query compiler"))?;
             for (ordinal,row) in &self.snapshot.overlay {
                 // Match before filter and scoring callbacks, just like the native scorer.
-                if !self.live.contains(ordinal) || !predicate.matches(row,&self.snapshot.fields) || !accepts(*ordinal, &row.identity){continue;}
+                if !self.live.contains(ordinal) || !predicate.matches(row,&self.snapshot.fields) || !accepts(*ordinal, &row.identity)?{continue;}
                 count+=1;let mut score=0.0f32;
                 for group in groups {
                     if !row.postings.iter().enumerate().any(|(field,terms)|
@@ -339,7 +339,7 @@ impl ActiveView<'_> {
                     }
                 }
                 if !score.is_finite(){return Err(storage("nonfinite delta BM25F score"));}
-                collect(*ordinal, &row.identity, score);
+                collect(*ordinal, &row.identity, score)?;
             }
         }
         Ok(count)
@@ -425,17 +425,17 @@ impl<'a> CorpusView<'a> {
         query: &dyn Query,
         accepts: impl Fn(&Identity) -> bool,
     ) -> Result<usize, RecordError> {
-        self.count_where(query, |_, _, identity| accepts(identity))
+        self.count_where(query, |_, _, identity| Ok(accepts(identity)))
     }
 
     pub(super) fn count_where(
         &self,
         query: &dyn Query,
-        accepts: impl Fn(usize, usize, &Identity) -> bool,
+        mut accepts: impl FnMut(usize, usize, &Identity) -> Result<bool, RecordError>,
     ) -> Result<usize, RecordError> {
         let mut count = 0;
         self.visit(query, |slot, ordinal, identity| {
-            count += usize::from(accepts(slot, ordinal, identity));
+            count += usize::from(accepts(slot, ordinal, identity)?);
             Ok(())
         })?;
         Ok(count)
@@ -484,8 +484,8 @@ impl<'a> CorpusView<'a> {
         groups: &[super::query::ScoreGroup],
         boosts: &[f32],
         normalization: FieldLengthNormalization,
-        accepts: impl Fn(usize, usize, &Identity) -> bool,
-        mut collect: impl FnMut(usize, usize, &Identity, f32),
+        mut accepts: impl FnMut(usize, usize, &Identity) -> Result<bool, RecordError>,
+        mut collect: impl FnMut(usize, usize, &Identity, f32) -> Result<(), RecordError>,
     ) -> Result<usize, RecordError> {
         let statistics = QueryStatistics::build(&self.views, groups, boosts.len(), normalization)?;
         let mut count = 0usize;
@@ -514,8 +514,8 @@ impl<'a> CorpusView<'a> {
         validate_bounds(groups, boosts, self.views[0].snapshot.fields.len())?;
         let mut hits = Vec::new();
         let count = self.collect_scores(query, groups, boosts, normalization,
-            |_, _, identity| accepts(identity),
-            |_, _, identity, score| hits.push(Hit { identity: identity.clone(), score }))?;
+            |_, _, identity| Ok(accepts(identity)),
+            |_, _, identity, score| { hits.push(Hit { identity: identity.clone(), score }); Ok(()) })?;
         sort_probe_hits(&mut hits, limit);
         Ok((count, hits))
     }
