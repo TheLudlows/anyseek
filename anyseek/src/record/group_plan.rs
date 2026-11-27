@@ -207,7 +207,7 @@ fn validate_decision(state: &State, d: &Decision) -> Result<(), RecordError> {
 pub(super) struct Prepared {
     pub(super) stored: StoredReceipt,
     pub(super) records: Vec<state_memory::Shared<Record>>,
-    previous: Vec<Option<state_values::PreviousRow>>,
+    replacements: Vec<(Option<state_values::PreviousRow>, Option<state_values::PreparedTtl>)>,
     pub(super) snapshot_bytes: usize,
     pub(super) reserve_bytes: usize,
     head: Head,
@@ -277,7 +277,7 @@ impl Prepared {
             let id = &record.record_id;
             let previous = state.records.find(id)?.map(|row| row.account(id)).transpose()?;
             let old = previous.map_or(0, |row| row.bytes);
-            replaced.push(previous);
+            replaced.push((previous, state_values::PreparedTtl::for_record(&record)?));
             if previous.is_none() {
                 snapshot_bytes = replace_bytes(snapshot_bytes, 0, map_key_bytes(id, has_records)?)?;
                 has_records = true;
@@ -297,7 +297,7 @@ impl Prepared {
         }
         let reserve_bytes = ttl.checked_mul(8192).ok_or_else(|| storage("group TTL budget overflow"))?;
         let container_bytes = replace_bytes(snapshot_bytes, values.checked_add(state.records.sealed_keys_bytes()).ok_or(RecordError::Busy)?, lookup_bytes)?;
-        Ok(Self { stored, records: prepared, previous: replaced, snapshot_bytes, reserve_bytes, head, lookup_bytes, container_bytes })
+        Ok(Self { stored, records: prepared, replacements: replaced, snapshot_bytes, reserve_bytes, head, lookup_bytes, container_bytes })
     }
 
     pub(super) fn admit_containers(&self, state: &mut State) -> Result<(), RecordError> {
@@ -307,15 +307,15 @@ impl Prepared {
     /// Install while holding the publication guard. No state read or response
     /// can observe a subset, and unexpected failure fences the live partition.
     pub(super) fn install(self, state: &mut State) -> Result<GroupReceipt, RecordError> {
-        let Self { stored, records, previous, head, lookup_bytes, .. } = self;
+        let Self { stored, records, replacements, head, lookup_bytes, .. } = self;
         let receipt = stored.receipt.clone();
         let groups = state.groups.get_or_insert_with(Groups::default);
-        for (record, previous) in records.into_iter().zip(previous) {
+        for (record, (previous, ttl)) in records.into_iter().zip(replacements) {
             let id = record.record_id.clone();
             if !groups.owners.contains_key(&id) {
                 groups.owners.insert(id.clone(), receipt.group_id.clone());
             }
-            state.records.replace_prepared(id, record, previous)?;
+            state.records.replace_prepared(id, record, previous, ttl)?;
         }
         groups.heads.insert(receipt.group_id.clone(), head);
         groups.publication_seq = receipt.seq;

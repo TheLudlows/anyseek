@@ -744,13 +744,12 @@ impl Inner {
     }
     fn statistics(&self) -> Result<RecordStatistics, RecordError> {
         let mut active_records = self.locations.len();
-        if self.state.records.may_have_due_ttl(self.evaluation_time_ms) {
-            active_records = 0;
-            self.state.records.scan(None, |id, row| {
-                active_records += usize::from(row.visible(self.evaluation_time_ms) && self.locations.contains_key(id));
-                Ok(true)
-            })?;
-        }
+        self.state.records.visit_due_ttl(self.evaluation_time_ms, |id, _| {
+            // locations includes the published live versions until TTL
+            // retirement. An unindexed expired version cannot reduce the count.
+            active_records -= usize::from(self.locations.contains_key(id));
+            Ok(())
+        })?;
         Ok(RecordStatistics {
             evaluation_time_ms: self.evaluation_time_ms,            visible_seq: self.state.seq,
             active_records,
@@ -1037,7 +1036,7 @@ fn apply_prepared(state: &mut State, applied: &Applied, prepared: Option<state_m
     {
         return Err(storage("inconsistent committed record operation"));
     }
-    state.records.replace_prepared(r.record_id.clone(),prepared.record,prepared.previous)?;
+    state.records.replace_prepared(r.record_id.clone(),prepared.record,prepared.previous,prepared.ttl)?;
     state.operations.push_shared(prepared.operation)?;
     state.seq = applied.receipt.seq;
     state.epoch_watermark = state.epoch_watermark.max(applied.observed_epoch);
@@ -2352,6 +2351,103 @@ mod tests {
         let p=RecordPartition::open(&root,config().max_journal_bytes).await.unwrap();
         assert_eq!(p.get("s").await.unwrap().unwrap().version,5);
         p.finish_service_shutdown().await.unwrap();drop(p);std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn ttl_statistics_follow_group_and_record_changes_through_recovery() {
+        async fn check(p: &RecordPartition, expected: usize, time: u64, seq: u64) {
+            let stats = p.statistics().await.unwrap();
+            let result = p.search("alpha".into(), None, SearchMode::Lexical, vec![], 1).await.unwrap();
+            assert_eq!((stats.active_records, stats.evaluation_time_ms, stats.visible_seq), (expected, time, seq));
+            assert_eq!(result.count_total, expected);
+            assert_eq!(result.hits.len(), 1);
+            assert_eq!(result.statistics.active_records, stats.active_records);
+            assert_eq!(result.evaluation_time_ms, time);
+            assert_eq!(result.visible_seq, seq);
+        }
+
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("records");
+        let settings = config();
+        let budget = settings.max_journal_bytes;
+        let p = RecordPartition::create(&root, settings).await.unwrap();
+        let (clock, now) = test_clock(&p).await;
+        let first = now + 100;
+        let last = now + 200;
+        let temporal = |expire_at_ms| Some(TemporalMetadata { expire_at_ms, ..Default::default() });
+        for id in ["move", "clear", "keep"] {
+            let mut request = write(id, id, "alpha", ExpectedVersion::Absent);
+            request.temporal = temporal((id != "keep").then_some(first));
+            p.write(request).await.unwrap();
+        }
+        let group = |nonce, expected_group_version, members: &[&str]| GroupReplace {
+            operation_id: OperationId::new(String::from(nonce)),
+            group_id: "ttl-group".into(),
+            expected_group_version,
+            records: members.iter().map(|id| GroupRecord {
+                record_id: (*id).into(),
+                document: write("unused", id, "alpha", ExpectedVersion::Any).document.unwrap(),
+                temporal: temporal(Some(first)),
+            }).collect(),
+        };
+        p.replace_group(group("initial-group", 0, &["gone", "due"])).await.unwrap();
+        let mut extension = write("extend", "move", "alpha", ExpectedVersion::Match(1));
+        extension.temporal = temporal(Some(last));
+        let extended = p.write(extension.clone()).await.unwrap();
+        let mut clear = write("remove-ttl", "clear", "alpha", ExpectedVersion::Match(1));
+        clear.temporal = temporal(None);
+        p.write(clear).await.unwrap();
+        let replacement = group("withdraw-member", 1, &["due"]);
+        let replaced = p.replace_group(replacement.clone()).await.unwrap();
+        check(&p, 4, now, replaced.seq).await;
+        wait_maintenance_idle(&p).await;
+        p.finish_service_shutdown().await.unwrap();
+        drop(p);
+
+        // Reopen the WAL, including both ordinary decisions and an atomic group.
+        let p = RecordPartition::open(&root, budget).await.unwrap();
+        p.inner.lock().await.clock = clock.clone();
+        assert_eq!(p.write(extension).await.unwrap(), extended);
+        assert_eq!(p.replace_group(replacement).await.unwrap(), replaced);
+        check(&p, 4, now, replaced.seq).await;
+        p.compact_journal().await.unwrap();
+        p.finish_service_shutdown().await.unwrap();
+        drop(p);
+
+        let p = RecordPartition::open(&root, budget).await.unwrap();
+        let writer = p.writer.lock().await;
+        {
+            let mut inner = p.inner.lock().await;
+            inner.clock = clock.clone();
+            assert!(inner.state.records.has_sealed_base());
+            assert_eq!(inner.state.records.recent_count(), 0);
+            assert_eq!(inner.state.records.live_ttl_count(), 2);
+        }
+        let cut = p.recovery_identity().await.unwrap();
+        clock.set(first - 1);
+        check(&p, 4, first - 1, replaced.seq).await;
+        clock.set(first);
+        check(&p, 3, first, replaced.seq).await;
+        {
+            let mut inner = p.inner.lock().await;
+            let row = inner.state.records.find("due").unwrap().unwrap();
+            assert_eq!(row.version(), 2);
+            assert!(row.live());
+            assert!(row.expired_at_ms().is_none());
+            // An expired record without a published location must not be
+            // subtracted from the count a second time.
+            let ordinal = inner.locations.remove("due").unwrap();
+            assert_eq!(inner.statistics().unwrap().active_records, 3);
+            inner.locations.insert("due".into(), ordinal);
+        }
+        clock.set(last);
+        check(&p, 2, last, replaced.seq).await;
+        assert_eq!(p.recovery_identity().await.unwrap(), cut);
+        drop(writer);
+        settle_maintenance(&p).await;
+        assert_eq!(p.statistics().await.unwrap().active_records, 2);
+        assert_eq!(p.inner.lock().await.state.records.live_ttl_count(), 0);
+        p.finish_service_shutdown().await.unwrap();
     }
 
     #[tokio::test]

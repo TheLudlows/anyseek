@@ -113,7 +113,7 @@ query/get/page/statistics 的 observe_time 仅修改 transient evaluation_time�
 2. mutation::prepare_input 对本次记录和最终 vector patch 文档验证字段、大小、向量数值、局部条件、时间、操作窗口、版本溢出及完整 checkpoint 字节预算。近期重试仍比较完整语义请求，不产生新决定。
 3. state_memory::Prepared 在分配前取得独立值租约；PlanningView 为本批 map、调用方为 canonical 容器高水位分别预留租约。生产 Shared 值不可变；提交复用已规划的 Record/Applied，不重新生成另一套决定。
 4. apply_prepared 检查连续 seq、非倒退提交时间、operation ID 唯一性及正文版本（向量后补保持正文版本）。记录 key 来自同一个 record_id；lookup 指向新追加 operation 的精确位置，lookup_bytes 用 checked_add 更新。
-5. Records::insert_shared 增量维护值字节、TTL 数量和保守期限下界；operation 追加增量维护字节。snapshot_after 的精确长度增量算法及 reserve/admit 检查保留。它们不是未经验证的外部缓存。
+5. Record 替换增量维护值字节和当前活记录的 TTL 期限索引；operation 追加增量维护字节。索引从已验证的行元数据重建，普通写入与组写在 WAL 前准入新增期限项。最终 `active_records` 只读取截至当次评估时间的到期前缀，核对版本和发布位置后精确扣减。统计和后台回收共用该索引，checkpoint 与 WAL 仍由原行和提交决定构建。
 6. history trim / expiry / GC / candidate install 继续在维护边界验证和安装；GC 重建 lookup，完整 proof 仍核对同 seq 元数据及容器一致性。
 
 同批对同 ID 的多次更新按顺序作用于唯一成功前缀视图。每个成功 Append 的 prior/next TTL（包括中间版本）都加入提交期限；无关过期正文不阻断本批。上传或规划期间时钟推进时重新观察时间，过期候选返回 Busy、保留已知重放和未尝试范围。
