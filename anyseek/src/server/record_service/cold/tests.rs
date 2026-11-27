@@ -506,10 +506,27 @@ async fn http_shutdown_drains_an_abandoned_cold_open() {
     let service = reopen(&root).await;
     let app = router(service.clone());
     let (opened, install) = service.cold.test.before_install.pause_next();
-    let leader = tokio::spawn(call(app.clone(), headers, "GET", "/api/v1/index/c", None));
-    reached(opened).await;
-    leader.abort();
-    assert!(leader.await.unwrap_err().is_cancelled());
+    let (reading, admitted) = oneshot::channel();
+    let (send_body, body_ready) = oneshot::channel();
+    let batch = json!({"writes": [{
+        "operation_id": OperationId::new("admitted-before-stop".into()),
+        "record_id": "fixture",
+        "expected": "Absent",
+        "document": {"body": "accepted"}
+    }]})
+    .to_string();
+    let body = Body::from_stream(futures::stream::once(async move {
+        reading.send(()).unwrap();
+        body_ready.await.unwrap();
+        Ok::<_, std::io::Error>(Bytes::from(batch))
+    }));
+    let mut request = axum::http::Request::builder()
+        .method("POST")
+        .uri("/api/v1/index/c/batch");
+    request.headers_mut().unwrap().extend(headers);
+    let leader = tokio::spawn(app.clone().oneshot(request.body(body).unwrap()));
+    reached(admitted).await;
+    assert_eq!(service.cold.test.attempts.get(), 0);
     let mut shutdown = service.shutdown();
     assert_eq!(
         call(app.clone(), HeaderMap::new(), "GET", "/api/v1/live", None)
@@ -517,6 +534,10 @@ async fn http_shutdown_drains_an_abandoned_cold_open() {
             .1["code"],
         "shutting_down"
     );
+    send_body.send(()).unwrap();
+    reached(opened).await;
+    leader.abort();
+    assert!(leader.await.unwrap_err().is_cancelled());
     drop(app);
     assert!(
         tokio::time::timeout(Duration::from_millis(20), shutdown.wait())
