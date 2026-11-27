@@ -86,7 +86,7 @@ async fn setup() -> (RecordPartition, HashSet<u64>, HashSet<u64>) {
         })
         .collect();
     records::insert(&index, docs).await.unwrap();
-    index.compact_journal().await.unwrap();
+    records::checkpoint(&index).await;
 
     let vx: Vec<u64> = set_x.iter().copied().collect();
     let overlap: Vec<u64> = set_x.intersection(&set_y).copied().collect();
@@ -99,7 +99,7 @@ async fn setup() -> (RecordPartition, HashSet<u64>, HashSet<u64>) {
         del.insert(overlap[i]);
     }
     records::delete(&index, del.iter().map(|id|*id as usize).collect()).await;
-    index.compact_journal().await.unwrap();
+    records::checkpoint(&index).await;
     (index, set_x, set_y)
 }
 

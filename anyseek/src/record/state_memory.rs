@@ -94,10 +94,12 @@ impl State {
     /// values own their full leases separately. Carrying the previous step's
     /// speculative 3x growth forward would mischarge old payload slack as live
     /// container metadata. The container lease itself remains a high-water mark.
-    pub(super) fn admit_replay_frame(&mut self, encoded_bytes:usize)->Result<(),RecordError> {
+    pub(super) fn admit_replay_frame(&mut self, encoded_bytes:usize)->Result<usize,RecordError> {
         let growth=encoded_bytes.checked_mul(3).ok_or_else(||storage("replay growth overflow"))?;
-        let size=state_proof::length(self)?.checked_add(growth).ok_or_else(||storage("replay size overflow"))?;
-        self.admit_bytes(size)
+        let before = state_proof::length(self)?;
+        let size=before.checked_add(growth).ok_or_else(||storage("replay size overflow"))?;
+        self.admit_bytes(size)?;
+        Ok(before)
     }
     pub(super) fn admit_bytes(&mut self, bytes: usize) -> Result<(), RecordError> {
         let needed = self.container_bytes(bytes)?;
@@ -163,6 +165,7 @@ impl State {
             records: self.records.clone(),
             operations: self.operations.clone(),
             operation_lookup: self.operation_lookup.clone(),
+            operation_epochs: self.operation_epochs.clone(),
             lookup_bytes: self.lookup_bytes,
             residency,
         })
@@ -203,7 +206,7 @@ impl Prepared {
         let values=state.value_bytes()?.checked_sub(old_bytes)
             .and_then(|n|n.checked_add(self.record.wire_bytes())).and_then(|n|n.checked_add(self.operation.wire_bytes()))
             .ok_or_else(||storage("prepared retained value size overflow"))?;
-        let lookup=state.lookup_bytes.checked_add(checkpoint_codec::json_length(&self.operation.request.operation_id)?).ok_or_else(||storage("prepared lookup size overflow"))?;
+        let lookup=state.lookup_bytes.checked_add(operation_lookup_bytes(&self.operation.request.operation_id)?).ok_or_else(||storage("prepared lookup size overflow"))?;
         let metadata=total.checked_sub(values).and_then(|n|n.checked_add(lookup)).ok_or_else(||storage("prepared metadata size overflow"))?;
         state.admit_containers(metadata)
     }

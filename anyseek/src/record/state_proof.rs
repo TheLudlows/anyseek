@@ -12,7 +12,7 @@ impl Serialize for Metadata<'_> {
         let State {residency:_,lineage,history,
             independent_snapshot,seq,epoch_watermark,time_watermark_ms,retired_operation_prefix,groups,expirations,
                         records:_,operations:_,
-            operation_lookup:_,lookup_bytes:_}=self.0;
+            operation_lookup:_,operation_epochs:_,lookup_bytes:_}=self.0;
         let mut s=serializer.serialize_struct("State",9+usize::from(retired_operation_prefix.is_some())+usize::from(groups.is_some()))?;
         macro_rules! field {($name:ident)=>{s.serialize_field(stringify!($name),$name)?};}
         field!(lineage);s.serialize_field("history",history)?;
@@ -41,12 +41,15 @@ pub(super) fn verify(config:&RecordConfig,expected:&State,replayed:&State)->Resu
     if length(expected)?!=length(replayed)?
         || checkpoint_codec::json_digest(&Metadata(expected))?!=checkpoint_codec::json_digest(&Metadata(replayed))?
         || !expected.records.same_values(&replayed.records)?
-        || !expected.operations.same_values(&replayed.operations)? {
+        || !expected.operations.same_values(&replayed.operations)?
+        || expected.operation_epochs != replayed.operation_epochs
+        || expected.groups.as_ref().map(|groups| groups.receipt_indexes())
+            != replayed.groups.as_ref().map(|groups| groups.receipt_indexes()) {
         return Err(storage("replayed State differs from live State"));
     }
     validate_restored_state(config,replayed)?;
     for state in [expected,replayed] {
-        let lookup_bytes=state.operations.iter().try_fold(0usize,|n,op|n.checked_add(checkpoint_codec::json_length(&op.request.operation_id)?).ok_or_else(||storage("lookup proof overflow")))?;
+        let lookup_bytes = retained_lookup_bytes(state)?;
         if state.lookup_bytes!=lookup_bytes {return Err(storage("replayed State lookup accounting mismatch"));}
         if state.operation_lookup.len()!=state.operations.len()
             || state.operations.iter().enumerate().any(|(i,op)|state.operation_lookup.get(&op.request.operation_id)!=Some(&i))

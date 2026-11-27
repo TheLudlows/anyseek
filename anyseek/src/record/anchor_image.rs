@@ -76,10 +76,10 @@ impl Image {
         delta.visit(path, pool, authority, |entry| {
             // Pre-admit metadata before replay. Actual immutable record/history
             // values obtain their own full leases in the existing apply path.
-            state.admit_replay_frame(checkpoint_codec::json_length(&entry)?)?;
+            let state_bytes = state.admit_replay_frame(checkpoint_codec::json_length(&entry)?)?;
             match entry {
                 Entry::Applied(applied) => apply(state, &applied),
-                Entry::GroupApplied(d) => group_plan::apply(state,&d),
+                Entry::GroupApplied(d) => group_plan::apply(state,d,state_bytes),
                 Entry::Expired(event) => temporal::apply(state, &event),
                 Entry::HistoryTrim(event) => history::apply_trim(state, &config.history, &event),
                 Entry::Anchor(_) | Entry::Checkpoint { .. } => Err(storage("authority in state delta")),

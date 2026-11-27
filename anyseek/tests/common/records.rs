@@ -1,6 +1,7 @@
 //! Test fixtures use only public Record operations; successful writes are visible.
 #![allow(dead_code)]
-use anyseek::{index::{Document, IndexMetaObject, SchemaField}, record::{RecordConfig, RecordPartition, RecordWrite, OperationId, ExpectedVersion}};
+use anyseek::{index::{Document, IndexMetaObject, SchemaField}, record::{RecordConfig, RecordError, RecordPartition, RecordWrite, OperationId, ExpectedVersion}};
+use std::time::{Duration, Instant};
 /// Retry only unaccepted Busy with the identical operation identity. Other
 /// errors (including OutcomeUnknown/DurablePending) are never replayed here.
 pub async fn write(partition:&RecordPartition,request:RecordWrite)->Result<anyseek::record::WriteReceipt,anyseek::record::RecordError> {
@@ -11,6 +12,38 @@ pub async fn write(partition:&RecordPartition,request:RecordWrite)->Result<anyse
         result=>return result,
     }}
 }
+/// Checkpoint a quiescent fixture at its complete visible sequence.
+pub async fn checkpoint(index: &RecordPartition) {
+    let expected_seq = index.statistics().await.unwrap().visible_seq;
+    let started = Instant::now();
+    let retry_window = Duration::from_secs(300);
+    let mut busy_retries = 0;
+    eprintln!("[lexical-progress] checkpoint begin seq={expected_seq}");
+    let seq = loop {
+        match index.compact_journal().await {
+            Ok(seq) => break seq,
+            // Automatic cache maintenance can still own the partition
+            // build slot after all fixture writes are visible.
+            Err(RecordError::Busy) if started.elapsed() < retry_window => {
+                if busy_retries == 0 {
+                    eprintln!("[lexical-progress] checkpoint Busy; retrying seq={expected_seq}");
+                }
+                busy_retries += 1;
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            Err(error) => panic!(
+                "checkpoint at seq {expected_seq} failed after {busy_retries} Busy retries ({:.3}s): {error:?}",
+                started.elapsed().as_secs_f64()
+            ),
+        }
+    };
+    assert_eq!(seq, expected_seq, "checkpoint must include all fixture writes");
+    eprintln!(
+        "[lexical-progress] checkpoint complete seq={seq} busy_retries={busy_retries} elapsed={:.3}s",
+        started.elapsed().as_secs_f64()
+    );
+}
+
 pub const JOURNAL_LIMIT: u64 = 64 * 1024 * 1024;
 pub async fn create(path: &std::path::Path, index: IndexMetaObject, schema: Vec<SchemaField>) -> RecordPartition {
     RecordPartition::create(path, RecordConfig {

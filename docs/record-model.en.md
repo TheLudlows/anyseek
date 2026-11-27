@@ -34,6 +34,12 @@ HTTP `/batch` validates the request and encodes per-item responses. Core `write_
 
 Advance after definitive refusal. For Busy, only items known not attempted use scalar admission. After scalar success, regroup the unattempted suffix. Do not retry unknown items in the batch. Fatal interruption preserves known receipts and stops subsequent attempts. Progress uses input slices and offsets without copying the remaining suffix. Measure each engine window once and subtract consumed bytes as the prefix advances. Clone only commands admitted to the planner inside its reserved window. Synchronous delivery still waits for both consumers, and asynchronous receipts confirm only the durable authoritative outcome.
 
+### Atomic group replacement
+
+`replace_group` reads the target head, the union of its old and requested members, and the exact receipt for the operation ID. It prepares the member values, ownership and receipt updates, checkpoint byte delta, TTL reserve, and derived index admission from those changes. An empty group retains its version and retired ownership.
+
+One `GroupApplied` WAL decision precedes whole-group publication. The partition writer and publication guard protect member installation and both index channels. A successful return confirms the commit and both visible watermarks. A failure after durability fences the partition for recovery. Replay reads the same decision, and the ordered receipt array and checkpoint format are unchanged. ID and expiry indexes are rebuilt from retained receipts on open and after maintenance collection.
+
 ## Search engine and application boundary
 
 Source versions, chunking, sections, evidence dependencies, and relationships belong to upstream applications and can be stored as ordinary document fields. AnySeek provides no source/derived write, historical text excerpt, locator verification, graph traversal, or graph fusion endpoints. General full-text/vector hybrid retrieval, conditional updates, and late vectors for exact text versions remain available.
@@ -125,10 +131,10 @@ Each successful Append updates global bytes as follows.
 
 ```text
 values_next = values_before - prior_record_wire + next_record_wire + applied_wire
-lookup_next = lookup_before + operation_id_wire
+lookup_next = lookup_before + operation_id_wire + epoch_index_allowance
 containers_next = snapshot_next - values_next + lookup_next
 ```
 
 snapshot_next retains the original incremental encoding formula for comma changes in globally empty/nonempty state, escaped keys, and changes in sequence/epoch/time digit lengths. Reserve each successful prefix's high-water containers in canonical State before persistence, rather than just final state or small-map sizes. Each map key/node obtains its own lease before insertion. Shared values retain Prepared ownership. All checks and reservations that can fail precede prefix mutation. Lower copying changes available headroom and does not guarantee the former refusal points under memory pressure.
 
-Receipt GC checks are still against the fixed canonical prefix. New batch operations have seq above fixed history.floor and cannot be collected in this round. Use the greater of current UTC epoch and the successful candidate epoch watermark, preserving a candidate's higher observed epoch near midnight. The GC prefix scan can still scale with history. Lookups retain tree-index cost, and persistence and async indexing have their own costs. This does not establish O(batch) for the complete write or guaranteed tail-latency or RSS gains.
+Receipt GC checks are still against the fixed canonical prefix. New batch operations have seq above fixed history.floor and cannot be collected in this round. Use the greater of current UTC epoch and the successful candidate epoch watermark, preserving a candidate's higher observed epoch near midnight. Per receipt stream, the prefix minimum operation epoch at or below the floor determines whether collection is due. Only maintenance selects and prunes individual receipts. Lookups retain tree-index cost, and persistence and async indexing have their own costs. This does not establish O(batch) for the complete write or guaranteed tail-latency or RSS gains.

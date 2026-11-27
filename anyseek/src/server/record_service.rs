@@ -2968,7 +2968,10 @@ mod tests {
         assert!(governor.admit("a".into(),anyseek::resources::Lane::Foreground,0).is_err());
         drop(bytes);
         assert!(governor.admit("a".into(),anyseek::resources::Lane::Foreground,0).is_ok());
-        drop(others); drop(service);std::fs::remove_dir_all(path).unwrap();
+        drop(others);
+        drop(p);
+        service.shutdown().wait().await.unwrap();
+        std::fs::remove_dir_all(path).unwrap();
     }
     #[tokio::test]
     async fn service_admission_wait_is_inside_request_deadline_and_never_reads_body() {

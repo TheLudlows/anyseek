@@ -15,7 +15,7 @@ use anyseek::record::{RecordPartition, RecordQuery};
 // at equal-score boundaries. The separate native scoring probes retain a
 // full-candidate sort oracle independent of the bounded collector.
 //
-// Self-contained (own index directories), deterministic, no sleeps.
+// Self-contained fixtures with deterministic ranking assertions.
 
 
 use anyseek::index::{
@@ -112,7 +112,7 @@ async fn scan32_topk_matches_global_ranking() {
         }
     }
     records::insert(&index, docs).await.unwrap();
-    index.compact_journal().await.unwrap();
+    records::checkpoint(&index).await;
 
     let query = words.join(" ");
     let total = search(&index, &query, 0, 1, ResultType::Count).await;
@@ -147,7 +147,7 @@ async fn scan32_sparse_uniform_fills_heap() {
     }
     let docs: Vec<anyseek::index::Document> = titles.iter().map(|t| doc(t)).collect();
     records::insert(&index, docs).await.unwrap();
-    index.compact_journal().await.unwrap();
+    records::checkpoint(&index).await;
 
     let query = (1..=20)
         .map(|i| format!("spar{i:02}"))
@@ -188,7 +188,7 @@ async fn scan32_score_gap_exact_selection() {
         docs.push(doc(&format!("{} {pad}rare{i} finite{i}", words.join(" "))));
     }
     records::insert(&index, docs).await.unwrap();
-    index.compact_journal().await.unwrap();
+    records::checkpoint(&index).await;
 
     let query = words.join(" ");
     let oracle = search(&index, &query, 0, 400, ResultType::Topk).await;
@@ -249,7 +249,7 @@ async fn scan32_topkcount_and_topk_agree() {
         docs.push(doc(&title));
     }
     records::insert(&index, docs).await.unwrap();
-    index.compact_journal().await.unwrap();
+    records::checkpoint(&index).await;
 
     let query = words.join(" ");
     let oracle = search(&index, &query, 0, 160, ResultType::Topk).await;
