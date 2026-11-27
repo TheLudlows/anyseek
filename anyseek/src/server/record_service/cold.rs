@@ -88,7 +88,17 @@ impl Service {
             if let Some(completion) = pending.get(&key) {
                 completion.clone()
             } else {
-                let activity = self.lifecycle.enter().ok_or_else(|| {
+                // A request already admitted by this service can still start
+                // a required child during shutdown. The opener retains that
+                // ticket, independently of the request's resource scope.
+                let activity = if anyseek::resources::Lifecycle::current()
+                    .is_some_and(|current| Arc::ptr_eq(&current, &self.lifecycle))
+                {
+                    anyseek::resources::Activity::current()
+                } else {
+                    self.lifecycle.enter()
+                };
+                let activity = activity.ok_or_else(|| {
                     Error(
                         StatusCode::SERVICE_UNAVAILABLE,
                         "shutting_down",
