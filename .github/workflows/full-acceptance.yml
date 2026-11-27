@@ -10,10 +10,6 @@ env:
 permissions:
   contents: read
 
-concurrency:
-  group: full-acceptance-${{ github.ref }}
-  cancel-in-progress: false
-
 jobs:
   build-and-smoke:
     # This job also installs the console's pinned Playwright 1.56.1 browsers.
@@ -36,31 +32,24 @@ jobs:
           lscpu
       - name: Verify standalone console boundary
         run: python3 scripts/check_console_boundary.py
+      - name: Verify S3 acceptance entry point
+        run: python3 scripts/test_s3_acceptance.py
       - name: Build retained workspace
         id: build
         run: cargo build --workspace
       - name: Verify retired dependencies removed
         run: python3 scripts/check_retired_dependencies.py
       - name: HTTP API smoke (no SDK)
-        run: python3 scripts/record_service_smoke.py --server target/debug/anyseek_server
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24
-          cache: npm
-          cache-dependency-path: console/package-lock.json
-      - name: Standalone console browser acceptance
-        working-directory: console
         run: |
-          npm ci
-          npm test
-          npm run build
-          npx playwright install --with-deps chromium
-          npm run test:browser
-      - uses: actions/upload-artifact@v4
-        if: always()
+          python3 scripts/record_service_smoke.py --server target/debug/anyseek_server --section startup
+          python3 scripts/record_service_smoke.py --server target/debug/anyseek_server
+      - name: Deleted collection reclamation (local and S3 fixture)
+        run: |
+          python3 scripts/record_reclamation_smoke.py --server target/debug/anyseek_server --backend local
+          python3 scripts/record_reclamation_smoke.py --server target/debug/anyseek_server --backend fixture
+      - uses: ./.github/actions/check-console
         with:
-          name: console-full-browser-results
-          path: console/test-results/
+          browser-artifact: console-full-browser-results
       - name: Existing module and service tests
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: cargo test --workspace --all-targets
@@ -94,6 +83,7 @@ jobs:
     timeout-minutes: 120
     env:
       ANYSEEK_TEST_ROOT: ${{ github.workspace }}/target/p1-native-data
+      SERVER_BINARY: ${{ matrix.os == 'windows-latest' && 'target/debug/anyseek_server.exe' || 'target/debug/anyseek_server' }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -111,6 +101,9 @@ jobs:
         run: |
           uname -a
           findmnt -T "$GITHUB_WORKSPACE" -o SOURCE,FSTYPE,TARGET
+      - name: Prepare isolated test root
+        shell: bash
+        run: mkdir -p "$ANYSEEK_TEST_ROOT"
       - name: Native default-feature unit contracts (Windows)
         if: runner.os == 'Windows'
         # Linux default-feature unit tests run in build-and-smoke. Libtest runs
@@ -124,7 +117,10 @@ jobs:
       - name: Native fault-feature module and service contracts
         if: runner.os != 'Windows'
         # Linux default-feature integration targets run in build-and-smoke.
-        run: cargo test -p anyseek --lib --bins --features fault-injection
+        run: cargo test -p anyseek --locked --lib --bins --features fault-injection
+      - name: Native isolated write budget (Linux)
+        if: runner.os == 'Linux'
+        run: python scripts/ci_write_path_cases.py --isolated-only
       - name: Native SDK, service and feature contracts without optional features
         run: |
           cargo test -p anyseek --no-default-features --bins --test local_sdk --test tokenizer_profiles --test text_normalization
@@ -139,41 +135,30 @@ jobs:
       - name: Native service HTTP and restart acceptance (Windows)
         # Linux normal HTTP is included in build-and-smoke; console browser checks run separately.
         if: runner.os == 'Windows'
-        run: python scripts/record_service_smoke.py --server target/debug/anyseek_server.exe
+        shell: bash
+        run: |
+          "$SERVER_BINARY" generate_openapi=true
+          python scripts/record_service_smoke.py --server "$SERVER_BINARY" --section startup
+          python scripts/record_service_smoke.py --server "$SERVER_BINARY"
+          python scripts/record_reclamation_smoke.py --server "$SERVER_BINARY" --backend local
+          python scripts/record_reclamation_smoke.py --server "$SERVER_BINARY" --backend fixture
       - name: Build explicit fault-injection service (not release binary)
         run: cargo build -p anyseek --features fault-injection
+      - name: Real SIGTERM drains owned work and releases the root
+        if: runner.os == 'Linux'
+        run: python scripts/record_shutdown_smoke.py --server target/debug/anyseek_server
       - name: Native real HTTP process fault and recovery matrix
         shell: bash
-        run: |
-          if [ "${{ runner.os }}" = "Windows" ]; then
-            python scripts/record_service_smoke.py --server target/debug/anyseek_server.exe --faults
-          else
-            python3 scripts/record_service_smoke.py --server target/debug/anyseek_server --faults
-          fi
+        run: python scripts/record_service_smoke.py --server "$SERVER_BINARY" --faults
       - name: Native concurrent Indexer HTTP authorization and restart
         shell: bash
-        run: |
-          if [ "${{ runner.os }}" = "Windows" ]; then
-            python scripts/record_service_smoke.py --server target/debug/anyseek_server.exe --faults --section indexer
-          else
-            python3 scripts/record_service_smoke.py --server target/debug/anyseek_server --faults --section indexer
-          fi
+        run: python scripts/record_service_smoke.py --server "$SERVER_BINARY" --faults --section indexer
       - name: Native S3 checkpoint retention and joint backup fault matrix
         shell: bash
-        run: |
-          if [ "${{ runner.os }}" = "Windows" ]; then
-            python scripts/s3_storage_smoke.py --server target/debug/anyseek_server.exe --faults
-          else
-            python3 scripts/s3_storage_smoke.py --server target/debug/anyseek_server --faults
-          fi
+        run: python scripts/s3_storage_smoke.py --server "$SERVER_BINARY" --faults
       - name: Native independent collection execution and scoped revocation HTTP
         shell: bash
-        run: |
-          if [ "${{ runner.os }}" = "Windows" ]; then
-            python scripts/record_service_smoke.py --server target/debug/anyseek_server.exe --faults --section authorization
-          else
-            python3 scripts/record_service_smoke.py --server target/debug/anyseek_server --faults --section authorization
-          fi
+        run: python scripts/record_service_smoke.py --server "$SERVER_BINARY" --faults --section authorization
 
   windows-fault-tests:
     name: Windows fault-injection (${{ matrix.suite }})
@@ -190,7 +175,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Native fault-feature module and service contracts
         if: matrix.suite == 'unit'
-        run: cargo test -p anyseek --lib --bins --features fault-injection
+        run: cargo test -p anyseek --locked --lib --bins --features fault-injection
+      - name: Native isolated write budget (Windows)
+        if: matrix.suite == 'unit'
+        run: python scripts/ci_write_path_cases.py --isolated-only
       - name: Verify Windows lexical partition
         if: matrix.suite == 'integration'
         run: python scripts/check_lexical_partition.py

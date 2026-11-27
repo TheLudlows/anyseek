@@ -60,5 +60,13 @@
   "record::committed::independent::tests::independent_busy_still_admits_later_delete_and_regroups_suffix",
   "record::committed::independent::tests::independent_cancel_retains_one_owner_through_all_100_inputs",
   "record::committed::independent::tests::independent_group_memory_pressure_keeps_scalar_replay_admissible",
-  "record::write::tests::bounded_input_windows_preserve_borrowed_storage_and_exact_byte_counts"
+  "record::write::tests::bounded_input_windows_preserve_borrowed_storage_and_exact_byte_counts",
+  "server::record_service::tests::service_data_fence_preserves_persistence_errors",
+  "server::record_service::tests::service_query_and_point_headers_and_body_wait_for_publication",
+  "server::record_service::tests::service_publication_waits_share_original_request_deadline",
+  "server::record_service::tests::shutdown_refuses_new_roots_but_finishes_admitted_ingest_and_consumers",
+  "server::record_service::tests::shutdown_keeps_cancelled_owned_write_and_allows_wait_retry",
+  "server::record_service::tests::shutdown_failed_owner_keeps_root_until_process_exit",
+  "server::record_service::tests::shutdown_waits_for_transport_owners_and_reuses_completion",
+  "server::record_service::tests::shutdown_waits_for_transport_frames_after_body_drop"
 ]

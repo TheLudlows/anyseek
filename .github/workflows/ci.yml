@@ -7,80 +7,102 @@ on:
   workflow_dispatch:
     inputs:
       full:
-        description: Run complete manual acceptance on the selected ref
+        description: Run only full acceptance on the selected ref
         type: boolean
         default: false
-
 
 permissions:
   contents: read
 
 concurrency:
-  group: pr-feedback-${{ github.ref }}-${{ inputs.full && 'full' || 'quick' }}
+  group: pr-feedback-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}
   cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
+
+env:
+  # Generic CPU makes target artifacts portable across runners of the same OS.
+  RUSTFLAGS: "-C target-cpu=x86-64"
+  RUSTDOCFLAGS: "-C target-cpu=x86-64"
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+  CARGO_INCREMENTAL: "0"
+  ANYSEEK_TEST_SCALE: small
 
 jobs:
   static:
+    if: github.event_name != 'workflow_dispatch' || !inputs.full
     runs-on: ubuntu-latest
     timeout-minutes: 20
     outputs:
-      code: ${{ steps.scope.outputs.code }}
+      backend: ${{ steps.scope.outputs.backend }}
+      console: ${{ steps.scope.outputs.console }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          prefix-key: ci-source-only
-          cache-targets: false
       - name: Determine validation scope
         id: scope
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
         run: |
           python3 - <<'PYCODE'
-          import os, subprocess
-          base = os.environ.get('BASE_SHA', '')
-          code = True
-          if base and set(base) != {'0'}:
-              files = subprocess.check_output(['git', 'diff', '--name-only', base, 'HEAD'], text=True).splitlines()
-              code = any(not (p.endswith('.md') or p.startswith('docs/')) for p in files)
-          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
-              output.write(f'code={str(code).lower()}\n')
-          PYCODE
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24
-          cache: npm
-          cache-dependency-path: console/package-lock.json
-      - name: Build standalone console and verify precise writes/retries
-        if: steps.scope.outputs.code == 'true'
-        run: |
-          npm ci --prefix console
-          npm test --prefix console
-          npm run build --prefix console
-      - uses: actions/upload-artifact@v4
-        if: steps.scope.outputs.code == 'true'
-        with:
-          name: anyseek-console
-          path: console/dist/
+          import os
+          import subprocess
 
+          base = os.environ.get('BASE_SHA', '')
+          backend = console = True
+          if base and set(base) != {'0'}:
+              try:
+                  diff = subprocess.check_output([
+                      'git', 'diff', '--no-renames', '--name-only', '-z', base, 'HEAD', '--'
+                  ])
+              except subprocess.CalledProcessError:
+                  print('::warning::Unable to determine changed paths. Running all quick checks.')
+              else:
+                  paths = [os.fsdecode(path) for path in diff.split(b'\0') if path]
+                  paths = [
+                      path for path in paths
+                      if not path.endswith('.md')
+                      and not path.startswith(('docs/', '.agents/', 'benchmarks/', 'miracl-corpus-v1.0-zh/'))
+                      and path != '.github/workflows/full-acceptance.yml'
+                  ]
+                  console = any(path.startswith('console/') for path in paths)
+                  backend = any(not path.startswith('console/') for path in paths)
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write(f'backend={str(backend).lower()}\n')
+              output.write(f'console={str(console).lower()}\n')
+          PYCODE
       - name: Verify standalone console boundary
-        if: steps.scope.outputs.code == 'true'
+        if: steps.scope.outputs.backend == 'true' || steps.scope.outputs.console == 'true'
         run: python3 scripts/check_console_boundary.py
       - name: Verify S3 semantic suite coverage
         run: python3 scripts/test_s3_acceptance.py
       - name: Verify full-size lexical partition remains complete
         run: python3 scripts/check_lexical_partition.py --source-only
-      - name: Verify retired dependencies removed
-        if: steps.scope.outputs.code == 'true'
-        run: python3 scripts/check_retired_dependencies.py
+
+  console:
+    name: Console feedback
+    needs: static
+    if: needs.static.outputs.console == 'true' && needs.static.outputs.backend == 'false'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: ci-generic-core-v1
+          shared-key: ubuntu-24.04-core
+          save-if: 'false'
+      - name: Build service for the browser suite
+        run: cargo build -p anyseek --locked --bin anyseek_server
+      - uses: ./.github/actions/check-console
+        with:
+          browser-artifact: console-browser-results
 
   core:
     name: Core feedback (${{ matrix.os }}, ${{ matrix.lane }})
     needs: static
-    if: needs.static.outputs.code == 'true'
+    if: needs.static.outputs.backend == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -92,23 +114,21 @@ jobs:
     # Keep the existing job budget; long-suffix recovery runs in manual acceptance.
     timeout-minutes: ${{ matrix.os == 'windows-latest' && matrix.lane == 'core' && 45 || 30 }}
     env:
-      # Generic CPU makes target artifacts portable across runners of this OS.
-      RUSTFLAGS: "-C target-cpu=x86-64"
-      RUSTDOCFLAGS: "-C target-cpu=x86-64"
-      CARGO_PROFILE_DEV_DEBUG: "0"
-      CARGO_PROFILE_TEST_DEBUG: "0"
-      CARGO_INCREMENTAL: "0"
-      ANYSEEK_TEST_SCALE: small
       ANYSEEK_TEST_ROOT: ${{ github.workspace }}/target/anyseek-ci-core
+      SERVER_BINARY: ${{ matrix.os == 'windows-latest' && 'target/debug/anyseek_server.exe' || 'target/debug/anyseek_server' }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
           prefix-key: ci-generic-core-v1
+          shared-key: ${{ matrix.os == 'ubuntu-latest' && matrix.lane == 'core' && 'ubuntu-24.04-core' || '' }}
       - name: Prepare isolated test root
         shell: bash
         run: mkdir -p "$ANYSEEK_TEST_ROOT"
+      - name: Verify retired dependencies removed
+        if: matrix.lane == 'core' && runner.os == 'Linux'
+        run: python scripts/check_retired_dependencies.py
       - name: Exact bounded core regressions (including WAL owner lock)
         if: matrix.lane == 'core'
         run: python scripts/ci_core_cases.py
@@ -124,14 +144,6 @@ jobs:
       - name: Small lexical membership and scoring oracles
         if: matrix.lane == 'lexical'
         run: cargo test -p anyseek --locked --test lexical_correctness
-      - name: Build service with the same feature set
-        if: matrix.lane == 'core'
-        run: cargo build -p anyseek --locked
-      - name: Committed asynchronous-index HTTP and authorization regressions
-        if: matrix.lane == 'core'
-        run: |
-          cargo test -p anyseek --locked --lib committed_ingest_
-          cargo test -p anyseek --locked --lib server::record_service::tests::synchronous_http_batch_keeps_100_limit_rejections_and_visibility -- --exact
       - name: Retrieval configuration and request diagnostics
         if: matrix.lane == 'core'
         run: cargo test -p anyseek --locked --lib server::record_service::diagnostic_tests -- --test-threads=1
@@ -140,66 +152,30 @@ jobs:
         run: |
           cargo test -p anyseek --locked --no-default-features --test local_sdk
           cargo test -p anyseek --locked --no-default-features --lib record::state_chunks::tests::chunks_preserve_records_receipts_opaque_json_and_owned_residency -- --exact
-      - name: Service persistence fences and shutdown ownership
+      - name: Build default-feature service for smoke tests
         if: matrix.lane == 'core'
-        shell: bash
-        run: |
-          cargo test -p anyseek --locked --features fault-injection --lib server::record_service::tests::service_data_fence_preserves_persistence_errors -- --exact
-          cargo test -p anyseek --locked --features fault-injection --lib server::record_service::tests::service_query_and_point_headers_and_body_wait_for_publication -- --exact
-          cargo test -p anyseek --locked --features fault-injection --lib server::record_service::tests::service_publication_waits_share_original_request_deadline -- --exact
-          cargo test -p anyseek --locked --features fault-injection --lib server::record_service::tests::shutdown_
-      - name: Real SIGTERM drains owned work and releases the root
-        if: matrix.lane == 'core' && runner.os == 'Linux'
-        run: |
-          cargo build -p anyseek --locked --features fault-injection --bin anyseek_server
-          python scripts/record_shutdown_smoke.py --server target/debug/anyseek_server
+        run: cargo build -p anyseek --locked --bin anyseek_server
       - name: Service configuration and OpenAPI smoke
         if: matrix.lane == 'core'
         shell: bash
         run: |
-          if [ "${{ runner.os }}" = "Windows" ]; then
-            target/debug/anyseek_server.exe generate_openapi=true
-            python scripts/record_service_smoke.py --server target/debug/anyseek_server.exe --section startup
-          else
-            target/debug/anyseek_server generate_openapi=true
-            python scripts/record_service_smoke.py --server target/debug/anyseek_server --section startup
-          fi
-      - uses: actions/setup-node@v4
-        if: matrix.lane == 'core' && runner.os == 'Linux'
-        with:
-          node-version: 24
-          cache: npm
-          cache-dependency-path: console/package-lock.json
-      - name: Standalone console against disposable real API
-        if: matrix.lane == 'core' && runner.os == 'Linux'
-        working-directory: console
-        run: |
-          npm ci
-          npx playwright install --with-deps chromium
-          npm run test:browser
-          npx playwright test --config playwright.bootstrap.config.ts
-      - uses: actions/upload-artifact@v4
-        if: always() && matrix.lane == 'core' && runner.os == 'Linux'
-        with:
-          name: console-browser-results
-          path: console/test-results/
-
+          "$SERVER_BINARY" generate_openapi=true
+          python scripts/record_service_smoke.py --server "$SERVER_BINARY" --section startup
       - name: Deleted collection reclamation (local and S3 fixture)
         if: matrix.lane == 'core'
         shell: bash
         run: |
-          cargo test -p anyseek --lib server::record_service::tests::reclamation_waits_for_service_backup_before_catalog_lifecycle -- --exact --nocapture
-          server_binary=target/debug/anyseek_server
-          if [ "${{ runner.os }}" = "Windows" ]; then
-            server_binary=target/debug/anyseek_server.exe
-          fi
-          python scripts/record_reclamation_smoke.py --server "$server_binary" --backend local
-          python scripts/record_reclamation_smoke.py --server "$server_binary" --backend fixture
+          python scripts/record_reclamation_smoke.py --server "$SERVER_BINARY" --backend local
+          python scripts/record_reclamation_smoke.py --server "$SERVER_BINARY" --backend fixture
+      - uses: ./.github/actions/check-console
+        if: matrix.lane == 'core' && runner.os == 'Linux'
+        with:
+          browser-artifact: console-browser-results
 
   write-path:
     name: Write path (${{ matrix.os }})
     needs: static
-    if: needs.static.outputs.code == 'true'
+    if: needs.static.outputs.backend == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -207,11 +183,6 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     env:
-      RUSTFLAGS: "-C target-cpu=x86-64"
-      CARGO_PROFILE_DEV_DEBUG: "0"
-      CARGO_PROFILE_TEST_DEBUG: "0"
-      CARGO_INCREMENTAL: "0"
-      ANYSEEK_TEST_SCALE: small
       ANYSEEK_TEST_ROOT: ${{ github.workspace }}/target/anyseek-ci-write-path
     steps:
       - uses: actions/checkout@v4
@@ -222,8 +193,13 @@ jobs:
       - name: Prepare isolated test root
         shell: bash
         run: mkdir -p "$ANYSEEK_TEST_ROOT"
-      - name: Exact visibility, memory admission, cancellation and recovery regressions
+      - name: Exact write, publication fence and shutdown regressions
         run: python scripts/ci_write_path_cases.py
+      - name: Real SIGTERM drains owned work and releases the root
+        if: runner.os == 'Linux'
+        run: |
+          cargo build -p anyseek --locked --features fault-injection --bin anyseek_server
+          python scripts/record_shutdown_smoke.py --server target/debug/anyseek_server
 
   full-acceptance:
     if: github.event_name == 'workflow_dispatch' && inputs.full

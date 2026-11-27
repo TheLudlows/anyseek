@@ -91,36 +91,39 @@ python3 scripts/s3_acceptance.py --backend real --suite all \
 | 通道 | 当前检查 |
 | --- | --- |
 | static（所有变更） | S3 验收入口单元检查、全文测试源分区检查 |
-| static（代码变更） | 控制台构建/单测、前后端边界、退役依赖检查 |
-| core（Linux/Windows） | 精确 core 清单、五个删除/排名集成 target、同步与异步 HTTP、故障 fence/关闭、服务配置与 OpenAPI、local/S3-fixture 旧代次回收 |
+| static（控制台或后端变更） | 前后端边界 |
+| Console feedback（仅控制台变更，Linux） | 构建默认服务，运行控制台单测、构建、真实 API 浏览器测试和 bootstrap，上传控制台产物 |
+| core（Linux/Windows） | 精确 core 清单、五个删除/排名集成 target、同步与异步 HTTP、服务配置与 OpenAPI、local/S3-fixture 旧代次回收 |
 | lexical（Linux/Windows） | 独立运行 lexical_correctness，小规模成员与评分 oracle |
-| write-path（Linux/Windows） | 精确 fault-injection 写入清单，每项隔离进程 |
+| write-path（Linux/Windows） | 精确 fault-injection 写入、发布 fence 与关闭清单，每项隔离进程。Linux 另跑真实 SIGTERM |
 
-Linux core 另跑真实 SIGTERM 与独立浏览器套件（含 bootstrap）。core 清单位于 `scripts/ci_core_cases.json`，写入清单位于 `scripts/ci_write_path_cases.json`；运行器都校验精确用例存在且执行成功。
+后端及混合变更运行两平台矩阵，Linux core 另外检查退役依赖并运行控制台验证。core 和写入清单分别位于 `scripts/ci_core_cases.json`、`scripts/ci_write_path_cases.json`，运行器都校验精确用例存在且执行成功。
 
-文档变更跳过编译矩阵、控制台构建、边界和依赖图检查，保留 static 的两项源检查；Markdown 文件链接与锚点需另外检查。快速通道使用通用 x86-64 CPU flags 以便同 OS 缓存产物，不能替代原生完整验收。
+仅涉及文档、项目技能、基准、语料或完整验收工作流的变更只运行两项静态检查。手工快速触发和无法取得差异基线的运行使用完整快速矩阵。Markdown 文件链接与锚点需另外检查。快速通道使用通用 x86-64 CPU flags。控制台单独运行时可以复用同一 runner 标签下的 Linux core 编译缓存。完整验收使用原生 CPU 配置。
 
 ## 完整验收
 
 手工对固定候选 ref 运行：
 
 ```sh
-gh workflow run ci.yml --ref YOUR_CANDIDATE_REF -F full=true
+gh workflow run full-acceptance.yml --ref YOUR_CANDIDATE_REF
 ```
 
-也可直接触发 `Full acceptance (manual)`。该命令会执行选中提交的 [.github/workflows/full-acceptance.yml](../.github/workflows/full-acceptance.yml)；查看配置不需要触发运行。使用结果前核对精确 head SHA，后续提交须重新验收。手工运行互不取消，也不由普通 PR feedback 取消。
+该命令会执行选中提交的 [.github/workflows/full-acceptance.yml](../.github/workflows/full-acceptance.yml)。兼容命令 `gh workflow run ci.yml --ref YOUR_CANDIDATE_REF -F full=true` 也只启动完整矩阵。使用结果前核对精确 head SHA，后续提交须重新验收。每次手工运行独立执行。
 
 完整工作流使用 `ANYSEEK_TEST_SCALE=full`、原生 CPU 配置与仅源码缓存，共 11 个展开后的 job：
 
 | 覆盖范围 | 所属 job |
 | --- | --- |
-| Linux 默认 feature 全部模块与集成测试、正常 HTTP/浏览器、release panic、OpenAPI | build-and-smoke |
+| Linux 默认 feature 全部模块与集成测试、正常 HTTP 和回收、浏览器与 bootstrap、release panic、OpenAPI | build-and-smoke |
 | Linux 的 fault-injection 持久化库/服务、两平台无默认 feature 的定向检查、默认/无默认 doctest，以及 Windows 默认 feature 的原生库检查 | persistence-native × 2 |
 | Windows fault-injection 库、二进制与集成测试 | windows-fault-tests × 2（库和二进制、其余集成用例）+ windows-lexical 四个独立用例 |
-| Windows 正常 HTTP；两平台 fault HTTP、Indexer/授权、存储故障与恢复 | persistence-native |
+| Windows 正常 HTTP、OpenAPI 和回收，两平台 fault HTTP、Indexer/授权、存储故障与恢复，Linux 真实 SIGTERM | persistence-native |
 | 两平台 S3 fixture 对象合同与六组无缓存语义 | s3-native-acceptance × 2 |
 
 S3 remote-checkpoint 单测在 Linux 的 `persistence-native` 和 Windows 的 `windows-fault-tests` 中以同一 feature 配置运行。S3 job 负责 fixture 对象合同与 HTTP 语义。Linux 默认 feature 的库与集成测试由 `build-and-smoke` 的 `--all-targets` 覆盖。Windows 默认 feature 的库测试用一次筛选运行覆盖原生检查。Windows 的故障注入库和二进制测试、集成测试与 `persistence-native` 中的 HTTP 崩溃恢复各自并行。
+
+两平台的 fault 库套件之后使用 `ci_write_path_cases.py --isolated-only` 运行需要独立预算环境的用例。其余普通写入用例由对应平台的 fault 库套件覆盖。
 
 无默认 feature 的步骤定向检查二进制、嵌入式 SDK、分词器和 OpenAPI、文本规范化、快照数据编码及请求诊断。
 

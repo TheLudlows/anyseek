@@ -1,0 +1,42 @@
+name: Check standalone console
+description: Build the console and run unit, API browser and bootstrap tests
+inputs:
+  browser-artifact:
+    description: Name of the artifact containing browser results
+    required: true
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-node@v4
+      with:
+        node-version: 24
+        cache: npm
+        cache-dependency-path: console/package-lock.json
+    - name: Install, test and build
+      shell: bash
+      working-directory: console
+      run: |
+        npm ci
+        npm test
+        npm run build
+    - uses: actions/upload-artifact@v4
+      with:
+        name: anyseek-console
+        path: console/dist/
+    - name: Install Chromium
+      shell: bash
+      working-directory: console
+      run: npx playwright install --with-deps chromium
+    - name: Test against the disposable API
+      shell: bash
+      working-directory: console
+      run: npm run test:browser -- --output=test-results/api
+    - name: Test console bootstrap
+      shell: bash
+      working-directory: console
+      run: npx playwright test --config playwright.bootstrap.config.ts --output=test-results/bootstrap
+    - uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: ${{ inputs.browser-artifact }}
+        path: console/test-results/

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Run exact write-path regressions in isolated processes, including fault cuts."""
+import argparse
 import json
 import os
 from pathlib import Path
@@ -7,10 +8,22 @@ import subprocess
 import tempfile
 
 
+ISOLATED_BUDGET_CASE = (
+    "record::lexical::runtime::live::tests::small_shared_budget_pending_rows_do_not_starve_their_own_materializer"
+)
+
+
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--isolated-only", action="store_true",
+                        help="Run the special-budget case after the full library suite")
+    args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
     names = json.loads((root / "scripts/ci_write_path_cases.json").read_text())
     assert names and len(names) == len(set(names))
+    assert ISOLATED_BUDGET_CASE in names
+    if args.isolated_only:
+        names = [ISOLATED_BUDGET_CASE]
     with tempfile.TemporaryFile(mode="w+t", encoding="utf-8") as output:
         build = subprocess.run(["cargo", "test", "-j", "1", "-p", "anyseek", "--lib", "--locked",
                         "--features", "fault-injection", "--no-run", "--message-format=json"],
@@ -39,7 +52,7 @@ def main():
     for name in names:
         print(f"START {name}", flush=True)
         env = os.environ.copy()
-        if "small_shared_budget" in name:
+        if name == ISOLATED_BUDGET_CASE:
             env.update(ANYSEEK_BUILD_MEMORY_BYTES="67108864",
                        ANYSEEK_BUILD_SHARED_MEMORY_BYTES="67108864")
         result = subprocess.run(
