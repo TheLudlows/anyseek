@@ -4,6 +4,13 @@ use anyseek::resources::Lane;
 use axum::{extract::{FromRequestParts, MatchedPath}, http::Method};
 use std::io::Write;
 
+#[derive(Clone)]
+pub(super) struct RoutedCollection {
+    pub tenant: String,
+    pub id: String,
+    pub generation: Option<u64>,
+}
+
 pub(super) struct OutputBytes {
     pub bytes: Bytes,
     pub _scope: ResourceScope,
@@ -68,10 +75,20 @@ pub(super) async fn request(service: &Service, request: axum::extract::Request) 
         let Path(params) = Path::<BTreeMap<String, String>>::from_request_parts(&mut parts, &()).await.map_err(bad)?;
         if let Some(id) = params.get("id") {
             anyseek::catalog::validate_name(id)?;
-            let id=format!("{}/{id}",tenant.as_deref().ok_or_else(||Error(StatusCode::FORBIDDEN,"unauthorized","X-AnySeek-Tenant required".into()))?);
-            // Axum performs exactly the same percent decoding used by handlers.
-            // Unknown/user supplied identities do not grow the resource registry.
-            if let Some((id, _)) = service.records.read().await.range(format!("{id}/")..format!("{id}0")).next_back() { subject = format!("collection:{id}"); }
+            let tenant = tenant.ok_or_else(||Error(StatusCode::FORBIDDEN,"unauthorized","X-AnySeek-Tenant required".into()))?;
+            // Admit a known cold collection under the same qualified subject
+            // as a resident one. Unknown IDs still share the service budget.
+            #[cfg(test)]
+            service.cold.test.preflight.wait().await;
+            let generation = match service.catalog.collection_entry(&tenant, id).await {
+                Ok(entry) => {
+                    subject = format!("collection:{}", entry.scope());
+                    Some(entry.generation)
+                }
+                Err(CatalogError::Unauthorized) => None,
+                Err(error) => return Err(error.into()),
+            };
+            parts.extensions.insert(RoutedCollection { tenant, id: id.clone(), generation });
         }
     }
     let scope = service.resources.admit(subject, lane, (MAX_BODY + MAX_RESPONSE) as u64)
