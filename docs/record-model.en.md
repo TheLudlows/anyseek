@@ -58,7 +58,7 @@ Accepted work and outputs retain their original tenant scope and lifecycle barri
 
 Standalone restore only recovers saved backup data. It does not catch up on later writes or deletes or provide cross-service active-active operation.
 
-Each collection has one partition. Cross-collection transactions, source dependencies, SQL/JOIN, full graph language, and legacy migration are unavailable. Linux/Windows process-fault regressions do not replace crash or power-loss tests.
+Each collection has one partition. Cross-collection transactions, source dependencies, SQL/JOIN, and full graph language are unavailable. Linux/Windows process-fault regressions do not replace crash or power-loss tests.
 
 ## Commit anchor for ordinary writes
 

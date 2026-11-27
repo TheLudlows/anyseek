@@ -4,20 +4,16 @@ import { Busy, Notice } from "./components.tsx";
 import { message } from "./api.ts";
 import {
   clearEmbeddingService, embedTexts, embeddingKey,
-  loadEmbeddingConfig, loadEmbeddingService, saveEmbeddingService,
+  loadEmbeddingService, saveEmbeddingService,
   sessionEmbeddingKey, validateEmbeddingService, type EmbeddingService,
 } from "./embeddings.ts";
-import type { Collection } from "./types.ts";
 
-export function EmbeddingSettings({ owner, collection }: { owner: string; collection?: Collection }) {
+export function EmbeddingSettings({ owner }: { owner: string }) {
   const [saved, setSaved] = useState(() => loadEmbeddingService(owner));
-  // Existing settings can be explicitly reused as the shared service while
-  // preserving each collection's vector space and pending requests.
-  const [initial] = useState(() => saved || (collection ? loadEmbeddingConfig(owner, collection.id) : null));
-  const [endpoint, setEndpoint] = useState(initial?.endpoint || "");
-  const [model, setModel] = useState(initial?.model || "");
-  const [key, setKey] = useState(() => initial ? embeddingKey(owner, collection?.id || "", initial) : "");
-  const [remember, setRemember] = useState(() => !!initial && sessionEmbeddingKey(owner, collection?.id || "", initial));
+  const [endpoint, setEndpoint] = useState(saved?.endpoint || "");
+  const [model, setModel] = useState(saved?.model || "");
+  const [key, setKey] = useState(() => saved ? embeddingKey(owner, saved) : "");
+  const [remember, setRemember] = useState(() => !!saved && sessionEmbeddingKey(owner, saved));
   const [busy, setBusy] = useState(false), [error, setError] = useState(""), [status, setStatus] = useState("");
   const request = useRef<AbortController | null>(null);
   useEffect(() => () => request.current?.abort(), []);

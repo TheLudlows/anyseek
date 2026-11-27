@@ -174,7 +174,6 @@ impl LocalEngine {
                             operation_id,
                             collection_id: collection,
                             config,
-                            capacity_profile: CapacityProfile::Standard10k,
                             embedding_space_id,
                         },
                     )

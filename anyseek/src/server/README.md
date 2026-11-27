@@ -32,7 +32,7 @@ target/debug/anyseek_server print_master_key=true
 
 Windows PowerShell 使用 `.\target\debug\anyseek_server.exe print_master_key=true`。此命令只向标准输出打印 `Base64(SHA-256(secret 的 UTF-8 字节))` 并退出，不打开数据目录、不启动服务；输出本身就是管理凭据，不要记录到共享日志。它不生成或轮换密钥。
 
-服务凭据通过 `apikey` 请求头用于 Origence／网关到 AnySeek 的全部受保护接口；数据接口另需 `X-AnySeek-Tenant`。`/api/v1/live` 保持公开；如果请求携带 `apikey`，则严格验证该服务凭据，支持宿主在无租户/集合时检查连接。用户认证与权限由上游完成，网关须校验用户对所选租户及服务管理操作的权限。AnySeek 不注册租户，不签发、保存或撤销租户 Key。集合列表为 GET `/api/v1/index`；`/api/v1/tenants` 和 `/api/v1/apikey` 已移除。租户命名空间须匹配 `^[a-z0-9][a-z0-9_-]{0,62}$`（支持数字开头的 UUID），集合名须匹配 `^[a-z][a-z0-9_-]{0,62}$`，不转换大小写。Origence 直接传业务 tenant UUID，并以 `ws_<workspace UUID 无连字符>` 作为集合名。默认数据目录位于可执行文件旁的 `anyseek_index`。首次 `index_path` 必须不存在且父目录存在；重启须指向可恢复的 Catalog 根。Catalog 7 仅支持新库，不迁移或覆盖旧格式。
+服务凭据通过 `apikey` 请求头用于 Origence／网关到 AnySeek 的全部受保护接口；数据接口另需 `X-AnySeek-Tenant`。`/api/v1/live` 保持公开；如果请求携带 `apikey`，则严格验证该服务凭据，支持宿主在无租户/集合时检查连接。用户认证与权限由上游完成，网关须校验用户对所选租户及服务管理操作的权限。AnySeek 不注册租户，不签发、保存或撤销租户 Key。使用 GET `/api/v1/index` 列出集合。租户命名空间须匹配 `^[a-z0-9][a-z0-9_-]{0,62}$`（支持数字开头的 UUID），集合名须匹配 `^[a-z][a-z0-9_-]{0,62}$`，不转换大小写。Origence 直接传业务 tenant UUID，并以 `ws_<workspace UUID 无连字符>` 作为集合名。默认数据目录位于可执行文件旁的 `anyseek_index`。首次 `index_path` 必须不存在且父目录存在；重启须指向可恢复的 Catalog 根。支持的格式见[存储协议](../../../docs/storage.md)。
 
 | 参数 | 默认值与约束 |
 | --- | --- |
@@ -74,7 +74,7 @@ PATCH collection 发布完整远端 checkpoint 后再回收已覆盖且无 pin �
 
 字段类型：String、StringSet、Int、Float、Text、Timestamp、Json、Binary。类型存在不代表支持全部索引方式。向量使用 Json/Binary 加 index_vector；已配置向量字段可缺席，缺向量记录不参与该字段召回；后补向量须使用精确版本条件。过滤字段需显式 filterable:true。不提供分面统计聚合、直方图或字段 extrema。
 
-Int 是有符号 64 位整数（-9223372036854775808 至 9223372036854775807），Float 是有限的 64 位浮点数。Int 不接受小数、数字字符串或越界的原 UInt64 值；不会截断或静默转换。Timestamp 同样使用有符号 64 位 Unix 秒。旧的带宽度类型名及 Bool 均不再接受，不提供旧 schema/磁盘格式迁移兼容；需用新 schema 重建数据。Json 内嵌 true/false 不受影响，向量 F32/I8 精度配置不变。
+Int 是有符号 64 位整数（-9223372036854775808 至 9223372036854775807），Float 是有限的 64 位浮点数。Int 要求整数且必须在范围内。Timestamp 使用有符号 64 位 Unix 秒。Json 字段支持布尔值。向量精度可配置为 F32 或 I8。
 
 String 使用完整字符串进行精确过滤；StringSet 是字符串集合，按任一成员精确匹配，去重并以 32 位字典 ID 存储。Text 保留分词全文检索。Int/Float/Timestamp 范围过滤为左闭右开。null 和缺失字段保留原始 payload 表示，不匹配元数据过滤，升序和降序排序均置于有值字段之后。
 
@@ -250,11 +250,11 @@ Collection backup 使用 POST `/api/v1/index/{id}/backup` 和 `{operation_id}`�
 
 master POST `/api/v1/service-backups`（`{operation_id}`）冻结 catalog、所有保留 collection 数据和未退役 collection backups。manifest 校验权威对象内容，外层发布有完成见证，不递归包含旧 service archives。
 
-可信服务 POST `/api/v1/service-restores`（`{operation_id,backup_id}`）返回**新的、未启动的 target_root**，不覆盖运行根。使用目标进程配置的 `MASTER_KEY_SECRET` 单独启动；凭据不存入归档，也不需要重签租户 Key。命名空间和备份归属保留，历史管理请求显式冲突；Record 数据版本和回执保留。来源备份及恢复 ID 必须使用返回的小写 hex。
+可信服务 POST `/api/v1/service-restores`（`{operation_id,backup_id}`）返回**新的、未启动的 target_root**，不覆盖运行根。使用目标进程配置的 `MASTER_KEY_SECRET` 单独启动；命名空间和备份归属保留，历史管理请求显式冲突；Record 数据版本和回执保留。来源备份及恢复 ID 必须使用返回的小写 hex。
 
 ## 当前资源和验收边界
 
-新建集合可省略 `capacity_profile`。服务仍接受旧的 `standard_10k` 和 `bounded_100k` 以兼容既有请求及重试，两者使用同样的资源预算。集合统计继续返回已保留的身份和回执数，`limits` 返回日志字节和查询候选限制。
+集合使用统一的资源预算。集合统计返回已保留的身份和回执数，`limits` 返回日志字节和查询候选限制。
 
 | 边界 | 当前行为 |
 | --- | --- |

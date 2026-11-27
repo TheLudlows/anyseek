@@ -80,7 +80,7 @@ export function Search({
     validateEmbeddingConfig(modelConfig, collection);
     if (currentPreview) return currentPreview.vector;
     setPhase(t("正在生成查询向量"));
-    const [embedding] = await embedTexts(modelConfig, embeddingKey(owner, collection.id, modelConfig), [query], collection.vector_dimensions!, signal);
+    const [embedding] = await embedTexts(modelConfig, embeddingKey(owner, modelConfig), [query], collection.vector_dimensions!, signal);
     signal.throwIfAborted();
     setPreview({ text: query, vector: embedding });
     return embedding;

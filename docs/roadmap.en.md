@@ -16,9 +16,9 @@ Based on the master `bb53b80`. Collections, backup ownership, and management rec
 
 - Catalog 7 keeps only four tables: `catalog_meta`, `catalog_collections`, `catalog_backups` and `catalog_operations`. Collection changes and management receipts commit in the same short transaction. Backup ownership, generation reclamation, historical management ID isolation and full service restore are preserved. Catalog no longer maintains a native log or stores master credential verification material.
 - The data interface requires `apikey` service credentials and `X-AnySeek-Tenant`; tenants do not need to register. `/api/v1/tenants` and `/api/v1/apikey` are removed, and collection lists are unified as `GET /api/v1/index`. When querying management receipts, searches are performed by namespace if there is a tenant header, with the default used for service-level operations. Incorrect credentials, missing, or duplicate tenant headers are rejected before the body.
-- The console selects only the tenant and accesses the gateway through an upstream login session. The service credential stays in the gateway or local Vite proxy. Connection fingerprints for pending operations are isolated by origin and namespace. Remove the old key initialization flow and keep Record retry data.
+- The console selects only the tenant and accesses the gateway through an upstream login session. The service credential stays in the gateway or local Vite proxy. Connection fingerprints for pending operations are isolated by origin and namespace.
 - S3 authority schema 3 and backup snapshot 2 retain their protocol and share `metadata.sqlite` with Catalog. Storage contracts, strict reopening of existing databases, the reduction in duplicate SQL for upload reservation and registration, and retirement rechecks after I/O are retained.
-- Only creation of a new Catalog 7 root is supported. There is no automatic migration, conversion, or overwrite for old SQLite Catalog 5, native Catalog 6 or old backups. The master credential is not stored in the database. The restore target uses its own process configuration.
+- The restore target uses its own master credential configuration. See the [storage protocol](storage.en.md) for supported formats.
 
 Linux / Rust 1.99.1 verification:
 
@@ -60,7 +60,7 @@ Analysis baseline: Code integrated from #204 (main branch `a810b19`, cleanup com
 
 The user has confirmed that only three items will be advanced this round: treating individual items as a batch, ensuring persistence and searchability upon successful synchronization; unifying the budget entry point to reduce nested applications and quota transfers; maintaining two backends, local and S3, and organizing the boundaries. Further options for W4 and W5 are pending confirmation; no expansion of changes is currently planned. Whether to change `/ingest` to synchronization has been separately questioned, and no confirmation has been given for the current asynchronous contracts.
 
-Common constraints: Retaining WAL persistence, operation_id idempotency, version conditions, single writer for partitions, ownership of tasks after cancellation, and isolation for recovery in case of uncertain persistence results. Existing HTTP contracts remain compatible; clear migration plans must be provided for removed public capabilities.
+Common constraints: Retaining WAL persistence, operation_id idempotency, version conditions, single writer for partitions, ownership of tasks after cancellation, and isolation for recovery in case of uncertain persistence results.
 
 | Number | Original Problem vs. Goal | Actual Progress and Remaining Work | Status |
 | --- | --- | --- | --- |

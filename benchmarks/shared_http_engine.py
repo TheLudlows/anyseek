@@ -27,7 +27,11 @@ class Engine:
         if not getattr(self.local,'conn',None):self.local.conn=http.client.HTTPConnection('127.0.0.1',self.port,timeout=35)
         payload=None if body is None else json.dumps(body,ensure_ascii=False,separators=(',',':')).encode()
         headers={'Content-Type':'application/json'}
-        headers.update({'apikey':base64.b64encode(hashlib.sha256(SECRET.encode()).digest()).decode()} if self.name=='anyseek' else {'Authorization':'Bearer '+MEILI_KEY})
+        if self.name == 'anyseek':
+            headers['apikey'] = base64.b64encode(hashlib.sha256(SECRET.encode()).digest()).decode()
+            headers['X-AnySeek-Tenant'] = 'bench'
+        else:
+            headers['Authorization'] = 'Bearer ' + MEILI_KEY
         start=time.perf_counter()
         try:
             self.local.conn.request(method,path,payload,headers);r=self.local.conn.getresponse();raw=r.read();code=r.status;data=json.loads(raw) if raw else {}

@@ -4,14 +4,13 @@
 
 本文集中说明本地 WAL/Segment 与 SQLite/S3 的持久化、checkpoint、备份和回收协议。请求语义见[Record 契约](record-model.md)，配置见[服务指南](../anyseek/src/server/README.md)，实现与剩余验收见[路线](roadmap.md)。
 
-Catalog 格式为 7，使用 SQLite；S3 authority schema 为 3，authority 备份快照为 2。
-本地和 S3 模式都创建 `metadata.sqlite`。仅支持新建根目录，旧 SQLite Catalog 5、原生
-Catalog 6 和旧数据库格式不迁移、不自动转换或覆盖。
+本地和 S3 模式都使用 `metadata.sqlite` 中的 Catalog 7。S3 authority 使用 schema 3 和备份快照格式 2。打开已有根目录时校验格式及所需元数据，遇到不支持的格式即拒绝打开。
+
 ## 本地 Segment 与共同视图
 
-每个向量/元数据组件记录包必须完整保存与 keys 一一对应的 revisions 和 fingerprint（SHA-256）。加载时统一检查数量及活动身份；缺失字段、空 fingerprint 或不一致的身份数量直接拒绝，不保留旧包等待 checkpoint 补全的分支。空组件也显式保存空身份数组。
+每个向量/元数据组件记录包必须完整保存与 keys 一一对应的 revisions 和 fingerprint（SHA-256）。加载时统一检查数量及活动身份；缺失字段、空 fingerprint 或身份数量不一致均会导致加载失败。空组件也显式保存空身份数组。
 
-`record/anchor.rs` 认证不可变 anchor、Segment 和 payload 闭包。完整原始 Document（含输入向量）保存在规范 payload pool；记录与操作回执通过引用共享。派生 Segment 不再存一份完整搜索正文，量化向量不能替代原始输入。全文使用锁定的 Tantivy 0.27.0 原生包，向量/元数据使用独立组件；旧低层 Index API 已移除，数据访问统一使用 RecordPartition。仅支持新库的 RecordCheckpointV19、完整/增量 state descriptor 6/7、私有向量/metadata descriptor 3、anchor manifest 9 / 检索 package manifest 3，不读取旧格式、迁移或双写。
+`record/anchor.rs` 认证不可变 anchor、Segment 和 payload 闭包。完整原始 Document（含输入向量）保存在规范 payload pool；记录与操作回执通过引用共享。派生 Segment 不再存一份完整搜索正文，量化向量不能替代原始输入。全文使用锁定的 Tantivy 0.27.0 原生包，向量和元数据使用独立组件。数据访问统一使用 RecordPartition。当前持久化格式为 RecordCheckpointV19、完整和增量 state descriptor 6/7（包含分组状态时为 8/9）、私有向量和元数据 descriptor 3、anchor manifest 9、检索 package manifest 3。
 
 `record/view.rs` 在 partition guard 下捕获冻结段与可变 tail 的派生拓扑，在 guard 外评分，最终回到当前权威状态重验版本、删除及 TTL。全文按选中的活动身份构建跨段 N/df/字段长度上下文，每个通道先形成全局排名再融合。异步消费者可处于不同进度，不能将权威 visible_seq 当作完整索引水位，也不能承诺查询、回表及返回统计来自同一不可变业务快照；最终重验可能缩短结果页。
 

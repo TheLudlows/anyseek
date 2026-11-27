@@ -147,7 +147,7 @@ fn analysis_digest_tracks_configuration_and_redacts_custom_dictionaries() {
         serde_json::from_value::<CreateIndexRequest>(json!({"index_name":"test","schema":[]}))
             .unwrap()
     };
-    let mut config = record_config(request(), None, CapacityProfile::default()).unwrap();
+    let mut config = record_config(request(), None).unwrap();
     let first = config.analysis_contract().unwrap();
     assert_eq!(first.fingerprint.len(), 64);
     config.index.stop_words = anyseek::index::StopwordType::Custom {

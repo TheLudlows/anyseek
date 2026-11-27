@@ -46,7 +46,7 @@ export async function generatePendingEmbeddings(pending: PendingWrites, owner: s
   for (let offset = 0; offset < remaining.length; offset += EMBEDDING_BATCH_SIZE) {
     signal?.throwIfAborted();
     const batch = remaining.slice(offset, offset + EMBEDDING_BATCH_SIZE);
-    const vectors = await embedTexts(config, embeddingKey(owner, collection.id, config), batch.map((request) => inputText(JSON.parse(request.body).document, config.textFields)), dimensions, signal);
+    const vectors = await embedTexts(config, embeddingKey(owner, config), batch.map((request) => inputText(JSON.parse(request.body).document, config.textFields)), dimensions, signal);
     signal?.throwIfAborted();
     batch.forEach((request, i) => {
       request.body = withVector(request.body, config.vectorField, vectors[i]);

@@ -734,15 +734,6 @@ impl std::ops::Deref for CollectionRecord {
     fn deref(&self) -> &RecordPartition { &self.partition }
 }
 
-#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, utoipa::ToSchema)]
-#[serde(rename_all="snake_case")]
-enum CapacityProfile {
-    #[default]
-    #[serde(rename="standard_10k")]
-    Standard10k,
-    #[serde(rename="bounded_100k")]
-    Bounded100k,
-}
 #[derive(Deserialize, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 struct CollectionCreate {
@@ -751,11 +742,6 @@ struct CollectionCreate {
     #[schema(pattern = "^[a-z][a-z0-9_-]{0,62}$", min_length = 1, max_length = 63)]
     collection_id: String,
     config: CreateIndexRequest,
-    /// Legacy input retained for retries of existing collection-create requests.
-    /// Both values use the same resource-based admission.
-    #[serde(default)]
-    #[schema(default = CapacityProfile::default)]
-    capacity_profile: CapacityProfile,
     #[serde(default)]
     embedding_space_id: Option<String>,
 }
@@ -766,13 +752,10 @@ fn operation_id_schema() -> utoipa::openapi::Ref {
 fn record_config(
     request: CreateIndexRequest,
     embedding_space_id: Option<String>,
-    capacity: CapacityProfile,
 ) -> Result<RecordConfig, Error> {
     if request.index_name.trim().is_empty() {
         return Err(bad("index_name must not be empty"));
     }
-    // Preserve serialized config and catalog request identity for old retries.
-    let legacy_count=match capacity {CapacityProfile::Standard10k=>10_000,CapacityProfile::Bounded100k=>100_000};
     let schema = request.schema.into_iter().map(Into::into).collect();
     let inference = request.vector.map(Inference::from).unwrap_or_default();
     Ok(RecordConfig {
@@ -791,9 +774,9 @@ fn record_config(
         },
         schema,
         embedding_space_id,
-        max_records: legacy_count,
+        max_records: 10_000,
         max_record_bytes: 1024 * 1024,
-        max_operations: legacy_count,
+        max_operations: 10_000,
         max_journal_bytes: 256 * 1024 * 1024,
         max_candidates: 10_000,
     })
@@ -831,7 +814,7 @@ async fn create_collection_locked(
 ) -> Result<Value, Error> {
     let operation_id = request.operation_id.clone();
     let id = request.collection_id.clone();
-    let config = record_config(request.config, request.embedding_space_id, request.capacity_profile)
+    let config = record_config(request.config, request.embedding_space_id)
         .map_err(|e| Error(e.0, "creation_rejected", e.2))?;
     anyseek::record::validate_config(&config)
         .map_err(|e| Error(StatusCode::BAD_REQUEST, "creation_rejected", e.to_string()))?;
@@ -2120,7 +2103,7 @@ mod tests {
             let first = runtime();
             first.block_on(async {
                 let service = Service::open_http(&path,std::num::NonZeroUsize::new(200).unwrap(), "anyseek-unit-test-secret").await.unwrap();
-                let config = record_config(serde_json::from_value(json!({"index_name":"test","schema":[{"field":"body","field_type":"Text"}]})).unwrap(),None,CapacityProfile::default()).unwrap();
+                let config = record_config(serde_json::from_value(json!({"index_name":"test","schema":[{"field":"body","field_type":"Text"}]})).unwrap(),None).unwrap();
                 let partition = RecordPartition::create(&path.join("held-partition"),config).await.unwrap();
                 service.records.write().await.insert("held".into(),partition.clone());
                 let mut shutdown = service.shutdown();
@@ -2376,18 +2359,14 @@ mod tests {
         std::fs::remove_dir_all(path).unwrap();
     }
     #[tokio::test]
-    async fn collection_create_schema_matches_http_profiles_and_optional_fields() {
+    async fn collection_create_schema_matches_http() {
         let doc = openapi_document();
         let schemas = &doc["components"]["schemas"];
         let schema = &schemas["CollectionCreate"];
         assert_eq!(schema["additionalProperties"], false);
         assert_eq!(schema["required"], json!(["operation_id", "collection_id", "config"]));
         assert_eq!(schema["properties"]["embedding_space_id"]["type"], json!(["string", "null"]));
-        assert_eq!(schema["properties"]["capacity_profile"]["default"],
-            serde_json::to_value(CapacityProfile::default()).unwrap());
-        assert_eq!(schemas["CapacityProfile"]["enum"], json!(["standard_10k", "bounded_100k"]));
-        assert_eq!(schemas["CapacityProfile"]["type"], "string");
-        assert_eq!(schema["properties"]["capacity_profile"]["$ref"], "#/components/schemas/CapacityProfile");
+        assert_eq!(schema["properties"].as_object().unwrap().len(), 4);
         assert_eq!(schema["properties"]["collection_id"]["pattern"], "^[a-z][a-z0-9_-]{0,62}$");
         assert_eq!(schema["properties"]["collection_id"]["minLength"], 1);
         assert_eq!(schema["properties"]["collection_id"]["maxLength"], 63);
@@ -2399,36 +2378,18 @@ mod tests {
         let key = headers["apikey"].to_str().unwrap();
         let request = |id: &str| json!({"operation_id":OperationId::new(format!("schema-{id}")),
             "collection_id":id,"config":{"index_name":"schema","schema":[{"field":"body","field_type":"Text"}]}});
-        let omitted = request("omitted");
-        assert_eq!(tenant_api(&app,"POST","/api/v1/index",key,Some(omitted.clone())).await.0, StatusCode::OK);
-        let default = service.record("tenant", "omitted").await.unwrap().configuration().await.unwrap();
-        assert_eq!((default.max_records, default.max_operations), (10_000, 10_000));
-        let (status, details) = tenant_api(&app, "GET", "/api/v1/index/omitted", key, None).await;
+        let created = tenant_api(&app, "POST", "/api/v1/index", key, Some(request("docs"))).await;
+        assert_eq!(created.0, StatusCode::OK);
+        let mut retry = request("docs");
+        retry["embedding_space_id"] = Value::Null;
+        assert_eq!(tenant_api(&app, "POST", "/api/v1/index", key, Some(retry)).await, created);
+        let (status, details) = tenant_api(&app, "GET", "/api/v1/index/docs", key, None).await;
         assert_eq!(status, StatusCode::OK);
-        let limits = json!({"max_journal_bytes": 256 * 1024 * 1024, "max_candidates": 10_000});
-        assert_eq!(details["limits"], limits);
-        // Drive accepted requests from the generated enum, not another request definition.
-        for (i, profile) in schemas["CapacityProfile"]["enum"].as_array().unwrap().iter().enumerate() {
-            let id = format!("profile-{i}");
-            let mut body = request(&id);
-            body["capacity_profile"] = profile.clone();
-            body["embedding_space_id"] = Value::Null;
-            let created = tenant_api(&app,"POST","/api/v1/index",key,Some(body.clone())).await;
-            assert_eq!(created.0, StatusCode::OK);
-            assert_eq!(tenant_api(&app,"POST","/api/v1/index",key,Some(body)).await, created);
-            let (status, details) = tenant_api(&app,"GET",&format!("/api/v1/index/{id}"),key,None).await;
-            assert_eq!(status, StatusCode::OK);
-            assert_eq!(details["limits"], limits);
-            let config = service.record("tenant", &id).await.unwrap().configuration().await.unwrap();
-            let legacy_count = [10_000, 100_000][i];
-            assert_eq!((config.max_records, config.max_operations), (legacy_count, legacy_count));
-        }
-        for invalid in [json!("unlimited"), Value::Null] {
-            let mut body = request("invalid"); body["capacity_profile"] = invalid;
-            assert_eq!(tenant_api(&app,"POST","/api/v1/index",key,Some(body)).await.0, StatusCode::BAD_REQUEST);
-        }
-        let mut unknown = request("unknown"); unknown["unknown"] = json!(true);
-        assert_eq!(tenant_api(&app,"POST","/api/v1/index",key,Some(unknown)).await.0, StatusCode::BAD_REQUEST);
+        assert_eq!(details["limits"], json!({"max_journal_bytes": 256 * 1024 * 1024, "max_candidates": 10_000}));
+
+        let mut retired = request("retired");
+        retired["capacity_profile"] = json!("bounded_100k");
+        assert_eq!(tenant_api(&app, "POST", "/api/v1/index", key, Some(retired)).await.0, StatusCode::BAD_REQUEST);
         for required in schema["required"].as_array().unwrap() {
             let mut body = request("missing"); body.as_object_mut().unwrap().remove(required.as_str().unwrap());
             assert_eq!(tenant_api(&app,"POST","/api/v1/index",key,Some(body)).await.0, StatusCode::BAD_REQUEST);

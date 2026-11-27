@@ -202,12 +202,14 @@ test("failure to persist the identity prevents dispatch; other connections canno
   assert.equal(calls, 0);
 });
 
-test("saved /doc prefix and unresolved flags from before per-request outcomes retain original identities", async () => {
+test("saved batch outcomes retain original identities and skip confirmed requests", async () => {
   const { loadPendingWrites } = await import("../src/pending-writes.ts");
-  const legacy = pending('[{"body":"confirmed"},{"body":"unknown"},{"body":"unsent"}]');
-  legacy.completed = 1;
-  legacy.unresolved = true;
-  storage.set("pendingWrites", legacy);
+  const task = pending('[{"body":"confirmed"},{"body":"unknown"},{"body":"unsent"}]');
+  task.requests[0].outcome = "committed";
+  task.requests[1].outcome = "unknown";
+  task.completed = 1;
+  task.unresolved = true;
+  storage.set("pendingWrites", task);
   let restored = loadPendingWrites()!;
   const sent: string[] = [];
   globalThis.fetch = async (_url, options) => {
@@ -224,7 +226,7 @@ test("saved /doc prefix and unresolved flags from before per-request outcomes re
     return new Response('{"results":[{"code":"applied","receipt":{"record_id":"r"}}]}');
   };
   await sendWrites(restored, "key", "owner");
-  assert.deepEqual(sent, [legacy.requests[1].body, legacy.requests[1].body, legacy.requests[2].body].map(body => '{"writes":[' + body + "]}"));
+  assert.deepEqual(sent, [task.requests[1].body, task.requests[1].body, task.requests[2].body].map(body => '{"writes":[' + body + "]}"));
   assert.equal(loadPendingWrites(), null);
 });
 

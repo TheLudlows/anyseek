@@ -153,7 +153,7 @@ async fn t2s_phrases_original_utf8_ngram_and_reopen() {
     }
 }
 #[tokio::test]
-async fn none_default_and_persisted_rule_are_explicit() {
+async fn persisted_normalization_requires_explicit_values() {
     let (index, path) = fresh("default", TextNormalization::None, 0).await;
     add(&index, &["臺灣", "台湾"]).await;
     index.compact_journal().await.unwrap();
@@ -162,13 +162,18 @@ async fn none_default_and_persisted_rule_are_explicit() {
         ids(&index, "台湾").await
     );
     let mut value = serde_json::to_value(index.configuration().await.unwrap().index.clone()).unwrap();
-    value.as_object_mut().unwrap().remove("text_normalization");
     assert_eq!(
         serde_json::from_value::<IndexMetaObject>(value.clone())
             .unwrap()
             .text_normalization,
         TextNormalization::None
     );
+    for field in ["text_normalization", "field_length_normalization"] {
+        let mut incomplete = value.clone();
+        incomplete.as_object_mut().unwrap().remove(field);
+        let error = serde_json::from_value::<IndexMetaObject>(incomplete).unwrap_err();
+        assert!(error.to_string().contains(&format!("missing field `{field}`")), "{error}");
+    }
     value["text_normalization"] = json!("OpenCcLatest");
     assert!(serde_json::from_value::<IndexMetaObject>(value).is_err());
 

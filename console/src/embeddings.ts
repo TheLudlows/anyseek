@@ -16,9 +16,6 @@ function scope(owner: string, collection: string) {
   // local/sessionStorage are already isolated by the console's origin.
   return prefix + JSON.stringify([owner, collection]);
 }
-function legacyKeyScope(owner: string, collection: string, config: EmbeddingService) {
-  return scope(owner, collection) + ".key." + JSON.stringify([config.endpoint, config.model]);
-}
 function serviceScope(owner: string) {
   return prefix + JSON.stringify([owner]) + ".service";
 }
@@ -43,18 +40,12 @@ export function loadEmbeddingConfig(owner: string, collection: string): Embeddin
     && value.textFields.every((f: unknown) => typeof f === "string")
     && "vectorField" in value && typeof value.vectorField === "string" ? value as EmbeddingConfig : null;
 }
-export function embeddingKey(owner: string, collection: string, config: EmbeddingService) {
-  for (const name of [keyScope(owner, config), legacyKeyScope(owner, collection, config)]) {
-    const key = memoryKeys.get(name) || sessionStorage.getItem(name);
-    if (key) return key;
-  }
-  return "";
-}
-export function sessionEmbeddingKey(owner: string, collection: string, config: EmbeddingService) {
+export function embeddingKey(owner: string, config: EmbeddingService) {
   const name = keyScope(owner, config);
-  if (memoryKeys.has(name) || sessionStorage.getItem(name) !== null)
-    return sessionStorage.getItem(name) !== null;
-  return sessionStorage.getItem(legacyKeyScope(owner, collection, config)) !== null;
+  return memoryKeys.get(name) || sessionStorage.getItem(name) || "";
+}
+export function sessionEmbeddingKey(owner: string, config: EmbeddingService) {
+  return sessionStorage.getItem(keyScope(owner, config)) !== null;
 }
 export function validateEmbeddingService(config: EmbeddingService) {
   let url: URL;
@@ -75,7 +66,7 @@ export function validateEmbeddingConfig(config: EmbeddingConfig, collection: Col
   if (!collection.schema.some((f) => f.field === config.vectorField && f.index_vector && f.field_type === "Json"))
     throw new Error(t("请选择 Json 类型的向量目标字段。"));
   if (!Number.isInteger(collection.vector_dimensions) || collection.vector_dimensions! < 1)
-    throw new Error(t("服务未返回集合向量维度，请更新 API 服务后再使用自动嵌入。"));
+    throw new Error(t("集合缺少有效的向量维度，无法自动生成嵌入。"));
 }
 export function saveEmbeddingService(owner: string, config: EmbeddingService, key: string, remember: boolean) {
   validateEmbeddingService(config);
@@ -105,19 +96,12 @@ export function saveEmbeddingMapping(owner: string, collection: Collection, conf
   localStorage.setItem(scope(owner, collection.id), JSON.stringify(clean));
   return clean;
 }
-export function saveEmbeddingConfig(owner: string, collection: Collection, config: EmbeddingConfig, key: string, remember: boolean) {
-  validateEmbeddingConfig(config, collection);
-  const service = saveEmbeddingService(owner, config, key, remember);
-  return saveEmbeddingMapping(owner, collection, { ...config, ...service });
-}
-export function clearEmbeddingKeys(owner: string, collection?: string) {
-  const matches = (key: string) => key.startsWith(prefix) && (collection === undefined
-    ? key.startsWith(prefix + JSON.stringify([owner]).slice(0, -1) + ",") || key.startsWith(serviceScope(owner) + ".key.")
-    : key.startsWith(scope(owner, collection) + ".key."));
-  for (const key of memoryKeys.keys()) if (matches(key)) memoryKeys.delete(key);
+export function clearEmbeddingKeys(owner: string) {
+  const keyPrefix = serviceScope(owner) + ".key.";
+  for (const key of memoryKeys.keys()) if (key.startsWith(keyPrefix)) memoryKeys.delete(key);
   for (let i = sessionStorage.length - 1; i >= 0; i--) {
     const key = sessionStorage.key(i);
-    if (key && matches(key)) sessionStorage.removeItem(key);
+    if (key?.startsWith(keyPrefix)) sessionStorage.removeItem(key);
   }
 }
 export function clearEmbeddingService(owner: string) {
@@ -125,7 +109,6 @@ export function clearEmbeddingService(owner: string) {
   localStorage.removeItem(serviceScope(owner));
 }
 export function clearEmbeddingConfig(owner: string, collection: string) {
-  clearEmbeddingKeys(owner, collection);
   localStorage.removeItem(scope(owner, collection));
 }
 export function validateVector(value: unknown, dimensions: number): asserts value is number[] {

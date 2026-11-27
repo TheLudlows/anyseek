@@ -14,17 +14,6 @@ export type PendingWrites = {
   rejected?: boolean;
 };
 
-// Existing /doc tasks store a confirmed prefix and the next request's state,
-// rather than per-request outcomes. Keep those identities and confirmations.
-export function restoreWriteOutcomes(pending: PendingWrites) {
-  if (pending.delivery === "ingest") return;
-  pending.requests.forEach((request, i) => {
-    request.outcome ??= i < pending.completed ? "committed"
-      : i === pending.completed && pending.unresolved ? "unknown"
-      : i === pending.completed && pending.rejected ? "rejected" : "not_attempted";
-  });
-}
-
 export function loadPendingWrites() {
   return storage.get<PendingWrites>("pendingWrites");
 }
