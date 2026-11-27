@@ -7,6 +7,7 @@
 use std::{collections::BTreeMap, future::Future, sync::{Arc, Condvar, LazyLock, Mutex, atomic::{AtomicBool, Ordering}}};
 pub(crate) mod lifecycle;
 mod memory;
+pub(crate) mod residency;
 pub(crate) use memory::{MemoryError, MemoryReservation};
 pub use lifecycle::{Activity, Lifecycle, Task};
 

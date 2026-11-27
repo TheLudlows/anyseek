@@ -65,6 +65,7 @@ mod anchor;
 mod anchor_image;
 mod package_pins;
 mod reclamation;
+mod residency;
 mod remote_checkpoint;
 pub(crate) mod build_budget;
 mod view;
