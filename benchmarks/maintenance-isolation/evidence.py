@@ -5,6 +5,7 @@ import http.client
 import os
 from pathlib import Path
 import re
+import select
 import signal
 import socket
 import subprocess
@@ -53,11 +54,36 @@ def server_pids(binary, data):
     return matches[0]
 
 
+@contextmanager
+def defer_sigint():
+    """Keep ownership bookkeeping and bounded cleanup intact on Ctrl-C."""
+    interrupted = False
+
+    def defer(_signum, _frame):
+        nonlocal interrupted
+        interrupted = True
+
+    previous = signal.signal(signal.SIGINT, defer)
+    try:
+        yield lambda: interrupted
+    finally:
+        signal.signal(signal.SIGINT, previous)
+    if interrupted:
+        raise KeyboardInterrupt
+
+
 class TracedServer(LocalServer):
     tenant = TENANT
 
     def __init__(self, binary, folder, cpus):
+        self.binary, self.folder, self.cpus = binary, folder, cpus
         self.local = threading.local()
+        self.p = None
+        self.proc_pid = None
+        self.server_fd = None
+
+    def __enter__(self):
+        binary, folder, cpus = self.binary, self.folder, self.cpus
         temporary = folder / "tmp"
         temporary.mkdir(exist_ok=True)
         env = {name: os.environ[name] for name in ("PATH", "LANG", "TZ") if name in os.environ}
@@ -67,15 +93,14 @@ class TracedServer(LocalServer):
         with socket.socket() as sock:
             sock.bind(("127.0.0.1", 0))
             self.port = sock.getsockname()[1]
-        self.proc_pid = self.signal_pid = None
-        with (folder / "server.log").open("ab") as log:
-            self.p = subprocess.Popen(
-                ["strace", "--kill-on-exit", "-ff", "-ttt", "-T", "-yy", "-s", "768",
-                 "-e", "trace=write,writev,rename,renameat,renameat2,unlink,unlinkat,rmdir",
-                 "-o", str(folder / "syscalls"), "taskset", "-c", cpus, str(binary),
-                 f"index_path={folder / 'live'}", f"local_port={self.port}", "local_ip=127.0.0.1"],
-                env=env, stdout=log, stderr=log, start_new_session=True)
         try:
+            with (folder / "server.log").open("ab") as log, defer_sigint():
+                self.p = subprocess.Popen(
+                    ["strace", "--kill-on-exit", "-ff", "-ttt", "-T", "-yy", "-s", "768",
+                     "-e", "trace=write,writev,rename,renameat,renameat2,unlink,unlinkat,rmdir",
+                     "-o", str(folder / "syscalls"), "taskset", "-c", cpus, str(binary),
+                     f"index_path={folder / 'live'}", f"local_port={self.port}", "local_ip=127.0.0.1"],
+                    env=env, stdout=log, stderr=log, start_new_session=True)
             deadline = time.monotonic() + 30
             while time.monotonic() < deadline and self.p.poll() is None:
                 try:
@@ -83,28 +108,73 @@ class TracedServer(LocalServer):
                 except (OSError, http.client.HTTPException):
                     time.sleep(.05)
                 else:
-                    self.proc_pid, self.signal_pid = server_pids(binary, folder / "live")
-                    return
+                    self.proc_pid, pid = server_pids(binary, folder / "live")
+                    with defer_sigint():
+                        fd = os.pidfd_open(pid)
+                        try:
+                            if os.getpgid(pid) != self.p.pid or select.select([fd], [], [], 0)[0]:
+                                raise RuntimeError("live server is outside the owned trace process group")
+                        except BaseException:
+                            os.close(fd)
+                            raise
+                        self.server_fd = fd
+                    return self
             raise RuntimeError(f"traced server did not start; see {folder / 'server.log'}")
         except BaseException:
-            self.close()
+            self.close(abort=True)
             raise
 
-    def close(self, crash=False):
-        if self.p.poll() is None:
-            if self.signal_pid is None:
-                os.killpg(self.p.pid, signal.SIGKILL)
-            else:
-                os.kill(self.signal_pid, signal.SIGKILL if crash else signal.SIGTERM)
+    def __exit__(self, exc_type, _exception, _traceback):
+        self.close(abort=exc_type is not None)
+
+    def close(self, crash=False, *, abort=False):
+        if self.p is None:
+            return
+        with defer_sigint() as interrupted:
+            tracer = self.p
+            fd = self.server_fd
+            timed_out = False
             try:
-                self.p.wait(timeout=20)
-            except subprocess.TimeoutExpired:
-                os.killpg(self.p.pid, signal.SIGKILL)
-                self.p.wait(timeout=5)
-                raise
-        expected = -signal.SIGKILL if crash else 0
-        if self.signal_pid is not None and self.p.returncode != expected:
-            raise RuntimeError(f"traced server exited {self.p.returncode}, expected {expected}")
+                if not abort and fd is not None and tracer.poll() is None:
+                    try:
+                        signal.pidfd_send_signal(fd, signal.SIGKILL if crash else signal.SIGTERM)
+                    except ProcessLookupError:
+                        pass
+                    deadline = time.monotonic() + 20
+                    while tracer.poll() is None and not interrupted():
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            timed_out = True
+                            break
+                        time.sleep(min(.05, remaining))
+            finally:
+                # Popen still owns the unreaped session leader here. Use its
+                # private group even when startup failed before finding the server.
+                if tracer.poll() is None:
+                    try:
+                        os.killpg(tracer.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                if fd is not None and not select.select([fd], [], [], 0)[0]:
+                    try:
+                        signal.pidfd_send_signal(fd, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                deadline = time.monotonic() + 5
+                try:
+                    tracer.wait(timeout=5)
+                    if fd is not None and not select.select([fd], [], [], max(0, deadline - time.monotonic()))[0]:
+                        raise TimeoutError("owned traced server remained alive after shutdown")
+                finally:
+                    self.p = None
+                    if fd is not None:
+                        os.close(fd)
+                        self.server_fd = None
+            if timed_out:
+                raise TimeoutError("owned tracer exceeded its 20-second shutdown deadline")
+            expected = -signal.SIGKILL if crash else 0
+            if not abort and not interrupted() and tracer.returncode != expected:
+                raise RuntimeError(f"traced server exited {tracer.returncode}, expected {expected}")
 
 
 @contextmanager

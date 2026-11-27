@@ -13,6 +13,7 @@ from pathlib import Path
 import platform
 import subprocess
 import sys
+import threading
 import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -124,10 +125,13 @@ def offered_load():
     return lanes
 
 
-def invoke(server, method, path, body, start_at_ns, offset_ms, collection, operation, number):
+def invoke(server, method, path, body, start_at_ns, offset_ms, collection, operation, number, stop=None):
     planned = start_at_ns + offset_ms * NS_PER_MS
     delay = (planned - time.monotonic_ns()) / 1e9
-    if delay > 0:
+    if stop is not None:
+        if stop.wait(max(0, delay)):
+            return None, None
+    elif delay > 0:
         time.sleep(delay)
     actual = time.monotonic_ns()
     start = time.time_ns()
@@ -158,7 +162,7 @@ def invoke(server, method, path, body, start_at_ns, offset_ms, collection, opera
     return record, response
 
 
-def run_lane(server, epoch, plan, start_at_ns):
+def run_lane(server, epoch, plan, start_at_ns, stop):
     records = []
     for offset, collection, operation, number in plan:
         path = endpoint(collection)
@@ -171,7 +175,9 @@ def run_lane(server, epoch, plan, start_at_ns):
             writes = [write_command(epoch, collection, f"append-{number:03d}-{i}", "append")
                       for i in range(count)]
             method, path, body = "POST", path + "/batch", {"writes": writes}
-        row, response = invoke(server, method, path, body, start_at_ns, offset, collection, operation, number)
+        row, response = invoke(server, method, path, body, start_at_ns, offset, collection, operation, number, stop)
+        if row is None:
+            break
         if row["success"] and operation == "point":
             verify_point(response)
         elif row["success"] and operation == "lexical":
@@ -294,31 +300,39 @@ def verify_post_run(server, rows):
 
 def run_case(binary, folder, cpus, epoch, case, lanes):
     folder.mkdir()
-    server = TracedServer(binary, folder, cpus)
+    stop = threading.Event()
+    pool = ThreadPoolExecutor(max_workers=len(lanes) + 1)
     action = None
     try:
-        old, current, backup, _, _ = setup(server, folder, epoch, case)
-        with resources(server, folder) as samples, ThreadPoolExecutor(max_workers=len(lanes) + 1) as pool:
-            after_ns = time.time_ns()
-            after_mono = time.monotonic_ns()
-            start_at_ns = after_mono + 300 * NS_PER_MS
-            future = [pool.submit(run_lane, server, epoch, lane, start_at_ns) for lane in lanes]
-            if case == "index_build":
-                action, _ = invoke(server, "PATCH", endpoint(HOT), None, start_at_ns, 505, HOT, "build", 0)
-            if case == "reclamation":
-                action, _ = invoke(server, "DELETE", f"{API}/backups/{backup}",
-                                   {"operation_id": oid(epoch, "unpin")}, start_at_ns, 505, HOT, "unpin", 0)
-            rows = [row for lane in future for row in lane.result()]
-            clock_delta_ms = max(abs(offset - (after_ns - after_mono)) for row in rows + ([action] if action else [])
-                                 for offset in row["wall_minus_mono_ns"]) / NS_PER_MS
-            gone = wait_retired(old, 15) if case == "reclamation" else retired_absent(old)
-        witness_error = None
-        try:
-            verify_post_run(server, rows)
-        except (RuntimeError, OSError, http.client.HTTPException, ValueError) as exc:
-            witness_error = str(exc)
+        with TracedServer(binary, folder, cpus) as server:
+            old, current, backup, _, _ = setup(server, folder, epoch, case)
+            with resources(server, folder) as samples:
+                try:
+                    after_ns = time.time_ns()
+                    after_mono = time.monotonic_ns()
+                    start_at_ns = after_mono + 300 * NS_PER_MS
+                    future = [pool.submit(run_lane, server, epoch, lane, start_at_ns, stop) for lane in lanes]
+                    if case == "index_build":
+                        action, _ = invoke(server, "PATCH", endpoint(HOT), None, start_at_ns, 505, HOT, "build", 0)
+                    if case == "reclamation":
+                        action, _ = invoke(server, "DELETE", f"{API}/backups/{backup}",
+                                           {"operation_id": oid(epoch, "unpin")}, start_at_ns, 505, HOT, "unpin", 0)
+                    rows = [row for lane in future for row in lane.result()]
+                    clock_delta_ms = max(abs(offset - (after_ns - after_mono))
+                                         for row in rows + ([action] if action else [])
+                                         for offset in row["wall_minus_mono_ns"]) / NS_PER_MS
+                    gone = wait_retired(old, 15) if case == "reclamation" else retired_absent(old)
+                finally:
+                    stop.set()
+            witness_error = None
+            try:
+                verify_post_run(server, rows)
+            except (RuntimeError, OSError, http.client.HTTPException, ValueError) as exc:
+                witness_error = str(exc)
     finally:
-        server.close()
+        # The private server must already be closed so blocked HTTP reads can
+        # unwind without waiting for their client timeout.
+        pool.shutdown(wait=False, cancel_futures=True)
     events = read_trace(folder, old.name, current, after_ns)
     windows, maintenance = check_windows(case, events, action, gone)
     overlap_rows = [row for row in rows if overlap(row, windows)]
@@ -376,20 +390,15 @@ def control_cohort(out, cases):
 
 def crash_while_pinned(binary, folder, cpus, epoch):
     folder.mkdir()
-    server = TracedServer(binary, folder, cpus)
-    try:
+    with TracedServer(binary, folder, cpus) as server:
         old, _, backup, delete, old_receipt = setup(server, folder, epoch, "control")
         witness = write_command(epoch, NEIGHBOR, "crash-witness", "durable")
         applied, = batch_checked(call(server, "POST", endpoint(NEIGHBOR) + "/batch",
                                       {"writes": [witness]}), [witness])
         checked(applied["code"] == "applied", "neighbor witness not acknowledged", applied)
-    except BaseException:
-        server.close()
-        raise
-    server.close(crash=True)
+        server.close(crash=True)
 
-    server = TracedServer(binary, folder, cpus)
-    try:
+    with TracedServer(binary, folder, cpus) as server:
         checked(old.exists(), "restart lost protected old incarnation", old)
         checked(call(server, "DELETE", endpoint(HOT), delete) == old_receipt,
                 "replay changed the old deletion receipt", old_receipt)
@@ -402,8 +411,6 @@ def crash_while_pinned(binary, folder, cpus, epoch):
         checked(wait_retired(old, 15), "unpin after restart did not reclaim old incarnation", old)
         verify_point(call(server, "GET", endpoint(HOT) + "/doc/current-0000"))
         verify_point(call(server, "GET", endpoint(NEIGHBOR) + "/doc/crash-witness"), "crash-witness", "durable")
-    finally:
-        server.close()
     result = {"signal": "SIGKILL", "cut": "old hot deleted and protected by backup, neighbor write acknowledged",
               "old_generation": old.name, "old_delete_receipt": old_receipt, "neighbor_receipt": applied["receipt"],
               "unpin_response": unpinned, "verified_reclaimed": True}

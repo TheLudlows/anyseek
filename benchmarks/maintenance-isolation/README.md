@@ -13,8 +13,8 @@ lateness when a preceding request delays its lane.
 
 ## Run
 
-Use Linux with Python 3.11+, `taskset` and `strace` with `--kill-on-exit`
-and permission to trace its own child. Choose two available CPUs and a new
+Use Linux with pidfd support, Python 3.11+, `taskset`, and `strace` with
+`--kill-on-exit` and permission to trace its own child. Choose two available CPUs and a new
 output path with at least 1 GiB free. The traced run keeps its disposable data
 roots and raw syscall logs. Build the default-feature Release binary from the
 pinned engine checkout and run the following command from the harness checkout.
@@ -33,6 +33,13 @@ checkpoints the hot derived view in the control, index and reclamation cases.
 The compaction case retains mutable components so the common appends can
 trigger the production merge. Compare runs using the recorded harness and
 binary hashes, engine SHA, plan hash, CPU affinity, filesystem and tracer version.
+
+Run the focused shutdown regression against the same Release binary.
+
+```bash
+python3 benchmarks/maintenance-isolation/check_shutdown.py \
+  --server /path/to/pinned-engine/target/release/anyseek_server --cpus 0,1
+```
 
 ## Required evidence
 
@@ -69,14 +76,14 @@ version and document or body assertions through the live service.
   evidence lives in `requests.jsonl.gz`, `events.json`, `server.log` and
   `syscalls.*`. Reasons come only from explicit server evidence. A generic
   Busy response alone leaves budget, file I/O and publication revalidation
-  undetermined. The existing [#238 diagnosis](https://github.com/TheLudlows/anyseek/issues/238)
-  covers request-level Busy causes.
+  undetermined. The [#237 diagnosis and proposed fixes](https://github.com/TheLudlows/anyseek/issues/237#issuecomment-7223083173)
+  cover the observed file I/O and publication revalidation cases.
 - Read `resources.json` for sampled process RSS/high-water RSS and allocated
   blocks under the live root and `TMPDIR`. These are periodic samples
   with per-path disk accounting. They can miss short disk peaks.
-- Exit zero means the traced scenario coverage and fixture assertions held.
-  Inspect counters and sample sizes before making any latency or availability
-  judgment. This is a small, traced regression fixture. Payload-journal
+- Exit zero means the traced scenario coverage, fixture checks and shutdown
+  succeeded. A successful run can include HTTP 429 and 503. Check their
+  counters and the sample sizes when interpreting latency and availability. This is a small, traced regression fixture. Payload-journal
   repacking, untraced throughput, sustained saturation, production SLA and
   the dedicated-NVMe matrix remain outside its evidence.
 

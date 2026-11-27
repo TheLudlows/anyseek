@@ -10,7 +10,7 @@
 
 ## 运行
 
-使用 Linux、Python 3.11+、`taskset` 和支持 `--kill-on-exit` 的 `strace`。
+使用支持 pidfd 的 Linux、Python 3.11+、`taskset` 和支持 `--kill-on-exit` 的 `strace`。
 需要能够跟踪本次启动的子进程。选两个可用 CPU，并为新输出目录保留至少 1 GiB。
 运行保留可丢弃库及原始系统调用日志。在固定引擎检出中编译默认特性的 Release 二进制，
 从夹具检出目录运行下列命令。
@@ -27,6 +27,13 @@ python3 benchmarks/maintenance-isolation/measure.py \
 对照、索引和回收场景在装载后对热点派生视图建立 checkpoint。压实场景保留可变组件，
 由相同的追加流量触发生产合并。复跑时核对夹具及二进制哈希、引擎 SHA、请求计划哈希、
 CPU 绑定、文件系统和跟踪器版本。
+
+用同一个 Release 二进制运行关闭回归。
+
+```bash
+python3 benchmarks/maintenance-isolation/check_shutdown.py \
+  --server /path/to/pinned-engine/target/release/anyseek_server --cpus 0,1
+```
 
 ## 覆盖证据
 
@@ -54,10 +61,11 @@ CPU 绑定、文件系统和跟踪器版本。
   解除 pin 到首次删除的等待。缺少服务调度事件时，调度到捕获的字段留空。原始证据位于
   `requests.jsonl.gz`、`events.json`、`server.log` 和 `syscalls.*`。
   原因以服务的显式证据为准。普通 Busy 响应不能区分预算、文件 I/O 或发布重验。
-  请求级原因由现有的 [#238 诊断](https://github.com/TheLudlows/anyseek/issues/238)覆盖。
+  已观测的文件 I/O 和发布重验见 [#237 的诊断与修复计划](https://github.com/TheLudlows/anyseek/issues/237#issuecomment-7223083173)。
 - `resources.json` 保存进程 RSS/高水位和库目录、`TMPDIR` 的已分配块采样。
   磁盘按路径统计，周期采样可能错过短时峰值。
-- 退出码零表示场景覆盖及夹具断言成立。延迟与可用性判断另看计数及样本数。
+- 退出码零表示场景覆盖、夹具检查和关闭均成功。报告仍可能记录 HTTP 429 和 503。
+  评估延迟与可用性时查看这些计数及样本数。
   这是小样本跟踪回归。正文日志重打包、无跟踪吞吐、持续饱和、生产 SLA 及独享 NVMe
   矩阵超出本夹具证据范围。
 
