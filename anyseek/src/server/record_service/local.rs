@@ -255,6 +255,7 @@ impl LocalEngine {
         tokio::time::timeout_at(deadline, self.run(tenant, collection, Lane::Background,
             async move |service, tenant, collection| {
                 build_event_time_collection(&service, tenant, collection, deadline).await
+                    .map(|(sequence, _pin)| sequence)
             })).await.map_err(|_| LocalError::unavailable("busy"))?
     }
 

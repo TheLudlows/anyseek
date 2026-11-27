@@ -56,16 +56,22 @@ tokio::task_local! { static ROUTED_COLLECTION: Option<admission::RoutedCollectio
 struct Principal(String);
 
 const TENANT_HEADER: &str = "x-anyseek-tenant";
+const ERROR_CODE_HEADER: &str = "x-anyseek-error-code";
 const EVENT_TIME_QUERY_PATH: &str = "/api/v1/index/{id}/event-time/query";
 
 const MAX_BODY: usize = 2 * 1024 * 1024;
 const MAX_RESPONSE: usize = 16 * 1024 * 1024;
 #[derive(Clone, Debug)]
 struct Error(StatusCode, &'static str, String);
+impl Error {
+    fn body(&self) -> Value {
+        json!({"code":self.1,"message":self.2})
+    }
+}
 impl IntoResponse for Error {
     fn into_response(self) -> Response {
-        let mut response = (self.0, Json(json!({"code":self.1,"message":self.2}))).into_response();
-        response.headers_mut().insert("x-anyseek-error-code", self.1.parse().expect("static error code"));
+        let mut response = (self.0, Json(self.body())).into_response();
+        response.headers_mut().insert(ERROR_CODE_HEADER, header::HeaderValue::from_static(self.1));
         response
     }
 }
@@ -292,14 +298,9 @@ fn encode_data_response<T: Serialize>(
             Ok((status, bytes))
         }
     });
-    let (status, bytes) = match encoded {
-        Ok(value) => value,
-        Err(error) => (
-            error.0,
-            json!({"code":error.1,"message":error.2})
-                .to_string()
-                .into_bytes(),
-        ),
+    let (status, bytes, code) = match encoded {
+        Ok((status, bytes)) => (status, bytes, None),
+        Err(error) => (error.0, error.body().to_string().into_bytes(), Some(error.1)),
     };
     // The response may be produced by an owned task after the HTTP waiter has
     // gone away. Charge its bytes immediately, before the task-local is dropped.
@@ -323,6 +324,9 @@ fn encode_data_response<T: Serialize>(
             deadline: REQUEST_DEADLINE.try_with(|deadline| *deadline).ok(),
         }))
         .unwrap();
+    if let Some(code) = code {
+        response.headers_mut().insert(ERROR_CODE_HEADER, header::HeaderValue::from_static(code));
+    }
     if let Some(data) = data { response.extensions_mut().insert(data); }
     Ok(response)
 }
@@ -1733,13 +1737,13 @@ async fn event_time_checkpoint(
     s.admin(&headers).await?;
     let request: EventTimeCheckpointRequest = parse(&bytes)?;
     let deadline = REQUEST_DEADLINE.with(|deadline| *deadline);
-    let seq = build_event_time_collection(&s, request.tenant_id, request.collection_id, deadline).await?;
-    response(json!({"indexed_seq":seq}))
+    let (seq, pin) = build_event_time_collection(&s, request.tenant_id, request.collection_id, deadline).await?;
+    protected_data(Ok(json!({"indexed_seq":seq})), Some(DataOutputPermit::residency_only(pin)))
 }
 
 async fn build_event_time_collection(
     s: &Arc<Service>, tenant: String, id: String, deadline: tokio::time::Instant,
-) -> Result<u64, Error> {
+) -> Result<(u64, ResidencyPin), Error> {
     anyseek::catalog::validate_tenant(&tenant)?;
     anyseek::catalog::validate_name(&id)?;
     let p = s.record(&tenant, &id).await?;
@@ -1753,7 +1757,8 @@ async fn build_event_time_collection(
         partition.start_event_time_checkpoint(remaining)
     }).await??;
     let seq = job.finish().await?;
-    Ok(s.catalog.authorized_generation(tenant, id, generation, move |_| async move { seq }).await?)
+    let seq = s.catalog.authorized_generation(tenant, id, generation, move |_| async move { seq }).await?;
+    Ok((seq, p.residency))
 }
 
 async fn event_time_query(
@@ -2279,15 +2284,19 @@ mod tests {
         let value=serde_json::from_slice(&axum::body::to_bytes(response.into_body(),MAX_RESPONSE).await.unwrap()).unwrap();(status,value)
     }
     pub(super) async fn namespace_api(app:&Router, method:&str, path:&str, tenant:&str, value:Option<Value>) -> (StatusCode, Value) {
+        let response = namespace_response(app, method, path, tenant, value).await;
+        let code=response.status();
+        let raw=axum::body::to_bytes(response.into_body(),MAX_RESPONSE).await.unwrap();
+        (code,serde_json::from_slice(&raw).unwrap())
+    }
+    pub(super) async fn namespace_response(app:&Router, method:&str, path:&str, tenant:&str, value:Option<Value>) -> Response {
         use tower::ServiceExt;
         let master=master_headers();
         let body=value.map(|v|serde_json::to_vec(&v).unwrap()).unwrap_or_default();
         let request=axum::http::Request::builder().method(method).uri(path)
             .header("apikey",master["apikey"].clone()).header(TENANT_HEADER,tenant)
             .header("content-type","application/json").body(Body::from(body)).unwrap();
-        let response=app.clone().oneshot(request).await.unwrap();let code=response.status();
-        let raw=axum::body::to_bytes(response.into_body(),MAX_RESPONSE).await.unwrap();
-        (code,serde_json::from_slice(&raw).unwrap())
+        app.clone().oneshot(request).await.unwrap()
     }
     #[tokio::test]
     async fn group_http_replaces_replays_clears_and_preserves_independent_routes() {
@@ -2795,6 +2804,7 @@ mod tests {
         for error in [RecordError::DurablePending(1 + count as u64),RecordError::OutcomeUnknown("injected".into())] {
             let response=protected_data::<Value>(Err(error.clone().into()),Some(data.clone())).unwrap();
             assert_eq!(response.status(),StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(response.headers()[ERROR_CODE_HEADER], Error::from(error.clone()).1);
             let value:Value=serde_json::from_slice(&axum::body::to_bytes(response.into_body(),4096).await.unwrap()).unwrap();
             assert_eq!(value["code"],Error::from(error.clone()).1); assert_eq!(value.as_object().unwrap().len(),2);
             let mut body=protected_data::<Value>(Err(error.into()),Some(data.clone())).unwrap().into_body();
