@@ -1,9 +1,11 @@
 //! Record-only query execution: native lexical postings, existing vector/metadata
 //! component, possibly lagging native prefixes, and one global rank fusion.
 use super::*;
+use std::cmp::Ordering;
 use crate::{
     component::RetrievalSegment,
     index::VectorIndexArc,
+    min_heap::Result as SearchHit,
     search::{
         ChannelExplanation, FacetFilter, QueryType, ResultObject, ResultSort, ResultSortIndex,
         ResultType, RrfOptions, SearchMode, SortOrder, rrf_contribution,
@@ -137,6 +139,13 @@ pub(crate) async fn search(
         .iter()
         .map(|f| if indexed_fields == 1 { 1.0 } else { f.boost })
         .collect::<Vec<_>>();
+    let browse = text.is_empty();
+    let mut result = ResultObject {
+        original_query: text.clone(),
+        query: text,
+        query_terms: plan.query_terms,
+        ..Default::default()
+    };
 
     let shards = futures::future::join_all(root.segments.iter().map(|segment| segment.vector.read())).await;
     if shards.iter().any(|shard| shard.failed) {
@@ -155,21 +164,14 @@ pub(crate) async fn search(
         snapshots.push(segment.lexical.snapshot().await?);
     }
     let views = snapshots.iter().map(Arc::as_ref).collect::<Vec<_>>();
-    if !hybrid && !text.is_empty() {
-        super::scoring::validate_bounds(&plan.scores, &boosts, native_fields.len())?;
-        if !has_positive_terms(&views, &plan.scores)? {
-            super::scoring::CorpusView::validate_snapshots(&views, cut)?;
-            for shard in &shards {
-                crate::metadata_filter::validate_filters(&shard.schema_map, &filters)
-                    .map_err(RecordError::Rejected)?;
-            }
-            return Ok(ResultObject {
-                original_query: text.clone(),
-                query: text,
-                query_terms: plan.query_terms,
-                ..Default::default()
-            });
+    scoring::validate_bounds(&plan.scores, &boosts, native_fields.len())?;
+    if !hybrid && !browse && !has_positive_terms(&views, &plan.scores)? {
+        scoring::CorpusView::validate_snapshots(&views, cut)?;
+        for shard in &shards {
+            crate::metadata_filter::validate_filters(&shard.schema_map, &filters)
+                .map_err(RecordError::Rejected)?;
         }
+        return Ok(result);
     }
 
     let selections = capture_aligned(&root.segments, &snapshots, &active_shards);
@@ -196,8 +198,11 @@ pub(crate) async fn search(
             for (local, key) in active.keys.iter().enumerate().filter(|(local, _)| active.is_live(*local)) {
                 let (version, revision) = active.revisions[local];
                 let identity = Identity { id: key.clone(), version, revision };
-                if vectors.insert(identity, (local * shards.len() + slot,
-                    !crate::metadata_filter::is_facet_filter(shard, &compiled, local))).is_some() {
+                let row = VectorRow {
+                    address: local * shards.len() + slot,
+                    passes_filter: !crate::metadata_filter::is_facet_filter(shard, &compiled, local),
+                };
+                if vectors.insert(identity, row).is_some() {
                     return Err(storage("duplicate live vector revision identity"));
                 }
             }
@@ -206,7 +211,7 @@ pub(crate) async fn search(
     };
     let n = shards.len();
     let corpus = if let Some(selections) = selections {
-        Some(super::scoring::CorpusView::from_selections(&views, selections, cut)?)
+        Some(scoring::CorpusView::from_selections(&views, selections, cut)?)
     } else {
         None
     };
@@ -262,12 +267,6 @@ pub(crate) async fn search(
     } else {
         None
     };
-    let keys = if detached && !aligned && result_type != ResultType::Count {
-        vectors.iter().map(|(identity, (address, _))| (*address, identity.id.as_str()))
-            .collect::<BTreeMap<_, _>>()
-    } else {
-        BTreeMap::new()
-    };
     let shards = if detached { drop(shards); Vec::new() } else { shards };
     #[cfg(test)]
     if detached {
@@ -275,24 +274,15 @@ pub(crate) async fn search(
             super::super::query::pause(path, ".test-lexical-capture-pause").await?;
         }
     }
-    let mut locations = BTreeMap::new();
     let corpus = match corpus {
         Some(corpus) => corpus,
-        None => super::scoring::CorpusView::select_matching(&views, cut, |identity| {
-            if let Some(&(address, accepts)) = vectors.get(identity) {
-                // Filtering changes hits, while BM25 uses every joined revision.
-                if accepts {
-                    locations.insert(identity, address);
-                }
-                true
-            } else {
-                false
-            }
-        })?,
+        // BM25 uses every joined revision. Check the cached facet predicate
+        // only when collecting hits.
+        None => scoring::CorpusView::select_matching(&views, cut, |identity| vectors.contains_key(identity))?,
     };
     let accepts = |slot: usize, ordinal: usize, identity: &Identity| {
         if !aligned {
-            locations.contains_key(identity)
+            vectors[identity].passes_filter
         } else if let Some(filtered) = &filtered {
             filtered.addresses.contains(&(ordinal * n + slot))
         } else {
@@ -301,31 +291,21 @@ pub(crate) async fn search(
         }
     };
     let address = |slot: usize, ordinal: usize, identity: &Identity| {
-        if aligned { ordinal * n + slot } else { locations[identity] }
+        if aligned { ordinal * n + slot } else { vectors[identity].address }
     };
     // Lexical (including browse) has no score threshold. Hybrid/ANN retains
     // its channel counts, threshold evaluation and existing fusion contract.
     if count_only {
-        super::scoring::validate_bounds(&plan.scores, &boosts, snapshots[0].fields.len())?;
-        let count = corpus.count_where(plan.predicate.as_ref(), accepts)?;
-        return Ok(ResultObject {
-            original_query: text.clone(),
-            query: text,
-            query_terms: plan.query_terms,
-            result_count_total: count,
-            ..Default::default()
-        });
+        result.result_count_total = corpus.count_where(plan.predicate.as_ref(), accepts)?;
+        return Ok(result);
     }
-    let key = |address: usize| {
-        if aligned {
-            views[address % n].identities[address / n].id.as_str()
+    let guarded_order = |a, b| crate::min_heap::result_ordering_root(&shards, browse, &sorts, b, a);
+    let order = |a: SearchHit, a_key: &str, b: SearchHit, b_key: &str| {
+        if detached {
+            captured_ordering(&sorts, b, b_key, a, a_key)
         } else {
-            keys[&address]
+            guarded_order(a, b)
         }
-    };
-    let order = |a: crate::min_heap::Result, b: crate::min_heap::Result| {
-        if detached { captured_ordering(key, &sorts, b, a) }
-        else { crate::min_heap::result_ordering_root(&shards, text.is_empty(), &sorts, b, a) }
     };
     // The same user ordering selects candidates and orders the final result.
     // Hybrid reranks this bounded lexical set by score only before global RRF.
@@ -342,22 +322,18 @@ pub(crate) async fn search(
         None
     };
     let mut candidates = std::collections::BinaryHeap::new();
-    let lexical_counts = std::cell::RefCell::new(vec![0usize; n]);
-    let lex_count = corpus.collect_scores(
+    let mut lexical_counts = if hybrid { vec![0usize; n] } else { Vec::new() };
+    result.result_count_total = corpus.collect_scores(
         plan.predicate.as_ref(), &plan.scores, &boosts,
         config.index.field_length_normalization.clone(),
-        |slot, ordinal, identity| {
-            if !accepts(slot, ordinal, identity) {
-                return false;
-            }
-            if hybrid {
-                lexical_counts.borrow_mut()[address(slot, ordinal, identity) % n] += 1;
-            }
-            true
-        },
+        accepts,
         |slot, ordinal, identity, score| {
-            let hit = crate::min_heap::Result {
-                doc_id: address(slot, ordinal, identity),
+            let doc_id = address(slot, ordinal, identity);
+            if hybrid {
+                lexical_counts[doc_id % n] += 1;
+            }
+            let hit = SearchHit {
+                doc_id,
                 score,
                 #[cfg(feature = "vb")]
                 lexical_score: score,
@@ -365,18 +341,12 @@ pub(crate) async fn search(
                 source: crate::vector::ResultSource::Lexical,
                 ..Default::default()
             };
-            Candidate { hit, order: &order }.retain(&mut candidates, limit);
+            let key = views[slot].identities[ordinal].id.as_str();
+            Candidate { hit, key, order: &order }.retain(&mut candidates, limit);
         },
     )?;
     let mut lexical = candidates.into_sorted_vec().into_iter()
         .map(|candidate| candidate.hit).collect::<Vec<_>>();
-    let mut result = ResultObject {
-        original_query: text.clone(),
-        query: text.clone(),
-        query_terms: plan.query_terms,
-        result_count_total: lex_count,
-        ..Default::default()
-    };
     if hybrid {
         let mut fused = BTreeMap::<usize, crate::min_heap::Result>::new();
         lexical.sort_by(|a, b| {
@@ -420,12 +390,12 @@ pub(crate) async fn search(
             }
         }
         if vector_counts.len() != n { return Err(storage("vector count topology mismatch")); }
-        result.result_count_total = lexical_counts.into_inner().into_iter()
+        result.result_count_total = lexical_counts.into_iter()
             .zip(vector_counts).map(|(lexical, vector)| lexical.max(vector)).sum();
         result.observed_vector_count = vector_result.observed_vector_count;
         result.observed_cluster_count = vector_result.observed_cluster_count;
         result.results = fused.into_values().collect();
-        result.results.sort_by(|a, b| order(*a, *b));
+        result.results.sort_by(|a, b| guarded_order(*a, *b));
     } else {
         result.results = lexical;
     }
@@ -439,10 +409,17 @@ pub(crate) async fn search(
             .take(length)
             .collect()
     };
-    let returned = result.results.iter().map(|hit| hit.doc_id).collect::<BTreeSet<_>>();
-    result.explanations.retain(|id, _| returned.contains(id));
+    if !result.explanations.is_empty() {
+        let returned = result.results.iter().map(|hit| hit.doc_id).collect::<BTreeSet<_>>();
+        result.explanations.retain(|id, _| returned.contains(id));
+    }
     result.result_count = result.results.len();
     Ok(result)
+}
+
+struct VectorRow {
+    address: usize,
+    passes_filter: bool,
 }
 
 // Each frozen pair was verified at publication. Check each bounded
@@ -522,14 +499,13 @@ fn has_positive_terms(snapshots: &[&Snapshot], groups: &[query::ScoreGroup]) -> 
 
 // Same greater-is-better contract as result_ordering_root, restricted to
 // Record's stable ID and score sorts. Facet comparators keep their mmap guards.
-fn captured_ordering<'a>(
-    key: impl Fn(usize) -> &'a str,
+fn captured_ordering(
     sorts: &[ResultSortIndex],
-    a: crate::min_heap::Result,
-    b: crate::min_heap::Result,
-) -> std::cmp::Ordering {
-    let a_key = key(a.doc_id);
-    let b_key = key(b.doc_id);
+    a: SearchHit,
+    a_key: &str,
+    b: SearchHit,
+    b_key: &str,
+) -> Ordering {
     for sort in sorts {
         if sort.idx == usize::MAX {
             return if sort.order == SortOrder::Descending { a_key.cmp(b_key) }
@@ -580,19 +556,22 @@ fn validate_selection(
 // BinaryHeap keeps the worst retained candidate at the root. The ordering is
 // the existing final-result comparator (Less means better), including facets
 // and stable business IDs; no per-hit identity allocation is needed.
+type CandidateOrder<'a> = dyn Fn(SearchHit, &str, SearchHit, &str) -> Ordering + 'a;
+
 struct Candidate<'a> {
-    hit: crate::min_heap::Result,
-    order: &'a dyn Fn(crate::min_heap::Result, crate::min_heap::Result) -> std::cmp::Ordering,
+    hit: SearchHit,
+    key: &'a str,
+    order: &'a CandidateOrder<'a>,
 }
 impl PartialEq for Candidate<'_> {
     fn eq(&self, other: &Self) -> bool { self.cmp(other).is_eq() }
 }
 impl Eq for Candidate<'_> {}
 impl PartialOrd for Candidate<'_> {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> { Some(self.cmp(other)) }
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> { Some(self.cmp(other)) }
 }
 impl Ord for Candidate<'_> {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering { (self.order)(self.hit, other.hit) }
+    fn cmp(&self, other: &Self) -> Ordering { (self.order)(self.hit, self.key, other.hit, other.key) }
 }
 
 impl<'a> Candidate<'a> {
@@ -680,7 +659,7 @@ mod candidate_tests {
                                 let a = crate::min_heap::Result { doc_id: a_id, score: a_score, ..Default::default() };
                                 let b = crate::min_heap::Result { doc_id: b_id, score: b_score, ..Default::default() };
                                 for empty in [false, true] {
-                                    assert_eq!(captured_ordering(|addr| keys[&addr], &sorts, a, b),
+                                    assert_eq!(captured_ordering(&sorts, a, keys[&a_id], b, keys[&b_id]),
                                         crate::min_heap::result_ordering_root(&shards, empty, &sorts, a, b),
                                         "{ordering:?} descending={descending} a={a:?} b={b:?}");
                                 }
@@ -694,7 +673,7 @@ mod candidate_tests {
 
     #[test]
     fn bounded_candidates_match_full_sort() {
-        let order = |a: crate::min_heap::Result, b: crate::min_heap::Result| {
+        let order = |a: SearchHit, _: &str, b: SearchHit, _: &str| {
             crate::min_heap::rank_ordering(b.score, b.doc_id, a.score, a.doc_id)
         };
         // Reverse identities force replacements at equal scores. Ascending scores
@@ -705,11 +684,11 @@ mod candidate_tests {
                 ..Default::default()
             }).collect::<Vec<_>>();
             let mut expected = full.clone();
-            expected.sort_by(|a, b| order(*a, *b));
+            expected.sort_by(|a, b| order(*a, "", *b, ""));
             for limit in [0, 1, 37] {
                 let mut heap = std::collections::BinaryHeap::new();
                 for hit in &full {
-                    Candidate { hit: *hit, order: &order }.retain(&mut heap, limit);
+                    Candidate { hit: *hit, key: "", order: &order }.retain(&mut heap, limit);
                     assert!(heap.len() <= limit);
                     assert!(heap.capacity() <= (2 * limit).max(4));
                 }

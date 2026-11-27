@@ -697,8 +697,7 @@ impl Runtime {
         if *searcher.schema() != expected {
             return Err(storage("native runtime schema mismatch"));
         }
-        let identity_id_bytes=manifest.identities.iter().try_fold(0u64,|n,id|n.checked_add(id.id.len() as u64))
-            .ok_or_else(||storage("native identity bytes overflow"))?;
+        let identity_id_bytes = manifest.identity_bytes()?;
         let estimate = (manifest.identities.len() as u64)
             .checked_mul(128 + fields.len() as u64 * 32)
             .and_then(|n|n.checked_add(identity_id_bytes))
@@ -707,56 +706,7 @@ impl Runtime {
         let charge=match prepared {Some(charge)=>{
             if charge.bytes()<estimate {return Err(storage("native snapshot workspace mismatch"));}charge
         },None=>retained_memory(estimate)?};
-        let mut seen = BTreeSet::new();
-        let mut addresses = Vec::new();
-        let mut lengths = vec![Vec::new(); manifest.identities.len()];
-        let mut field_totals = vec![scoring::FieldLengths::default(); fields.len()];
-        for segment in searcher.segment_readers() {
-            if segment.num_docs() != segment.max_doc() {
-                return Err(storage("native physical deletion unsupported"));
-            }
-            let column = segment.fast_fields().u64("identity").map_err(storage)?;
-            let columns = (0..fields.len())
-                .map(|i| segment.fast_fields().u64(&format!("length_{i}")))
-                .collect::<tantivy::Result<Vec<_>>>()
-                .map_err(storage)?;
-            let mut mapping = Vec::new();
-            for doc in 0..segment.max_doc() {
-                let ids = column.values_for_doc(doc).collect::<Vec<_>>();
-                if ids.len() != 1 || ids[0] >= manifest.identities.len() as u64 || !seen.insert(ids[0])
-                {
-                    return Err(storage("native runtime identity mismatch"));
-                }
-                mapping.push(ids[0] as usize);
-                let mut row = Vec::new();
-                for column in &columns {
-                    let values = column.values_for_doc(doc).collect::<Vec<_>>();
-                    if values.len() != 1 || values[0] > MAX_TOKENS as u64 {
-                        return Err(storage("native runtime length mismatch"));
-                    }
-                    row.push(values[0]);
-                }
-                scoring::FieldLengths::add_document(&mut field_totals, &row);
-                lengths[ids[0] as usize] = row;
-            }
-            addresses.push(mapping);
-        }
-        if seen.len() != manifest.identities.len() {
-            return Err(storage("native runtime incomplete commit"));
-        }
-        Ok(Snapshot {
-            searcher,
-            fields:Arc::new(fields),
-            names: Arc::new(manifest.fields.clone()),
-            cut: manifest.cut,
-            identities: Arc::new(manifest.identities.clone().into()),identity_id_bytes,overlay:Vec::new(),
-            addresses:Arc::new(addresses),
-            lengths:Arc::new(lengths),
-            field_totals: Arc::new(field_totals),
-            _memory:Arc::new(charge),
-            _pin: None,
-            _directory_owner: None,
-        })
+        Snapshot::from_searcher(searcher, manifest, fields, identity_id_bytes, charge)
     }
 
     #[cfg(test)]

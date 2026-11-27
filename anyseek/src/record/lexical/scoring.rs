@@ -28,7 +28,6 @@ impl FieldLengths {
             total.nonempty -= u64::from(length > 0);
         }
     }
-
 }
 
 // Owned by one query over one selected corpus; never cached across views.
@@ -41,8 +40,8 @@ struct QueryStatistics<'a> {
 
 impl<'a> QueryStatistics<'a> {
     fn build(
-        corpus: &[&ActiveView<'_>],
-        groups: &'a [super::query::ScoreGroup],
+        corpus: &[ActiveView<'_>],
+        groups: &'a [query::ScoreGroup],
         field_count: usize,
         normalization: FieldLengthNormalization,
     ) -> Result<Self, RecordError> {
@@ -127,7 +126,7 @@ impl<'a> QueryStatistics<'a> {
 }
 
 pub(super) fn validate_bounds(
-    groups: &[super::query::ScoreGroup],
+    groups: &[query::ScoreGroup],
     boosts: &[f32],
     field_count: usize,
 ) -> Result<(), RecordError> {
@@ -222,7 +221,7 @@ impl ActiveView<'_> {
         accepts: impl Fn(&Identity) -> bool,
     ) -> Result<(usize, Vec<Hit>), RecordError> {
         validate_bounds(groups, boosts, self.snapshot.fields.len())?;
-        let statistics = QueryStatistics::build(&[self], groups, boosts.len(), normalization)?;
+        let statistics = QueryStatistics::build(std::slice::from_ref(self), groups, boosts.len(), normalization)?;
         let mut hits = Vec::new();
         let count = self.score_groups_in(
             &statistics, query, groups, boosts, |_, identity| accepts(identity),
@@ -325,8 +324,7 @@ impl ActiveView<'_> {
         if !self.snapshot.overlay.is_empty() {
             let predicate=query.downcast_ref::<super::query::Compiled>().ok_or_else(||storage("visible delta requires shared query compiler"))?;
             for (ordinal,row) in &self.snapshot.overlay {
-                // Match before admission callbacks, just like the native scorer.
-                // Hybrid channel accounting happens in accepts and must not see nonmatches.
+                // Match before filter and scoring callbacks, just like the native scorer.
                 if !self.live.contains(ordinal) || !predicate.matches(row,&self.snapshot.fields) || !accepts(*ordinal, &row.identity){continue;}
                 count+=1;let mut score=0.0f32;
                 for group in groups {
@@ -392,7 +390,7 @@ impl<'a> CorpusView<'a> {
                 }
                 live.insert(ordinal);
             }
-            views.push(snapshot.with_live(live));
+            views.push(ActiveView { snapshot, live: LiveSelection::Ordinals(live) });
         }
         Ok(Self { views })
     }
@@ -403,12 +401,7 @@ impl<'a> CorpusView<'a> {
     ) -> Result<Self, RecordError> {
         Self::validate_snapshots(snapshots, cut)?;
         debug_assert_eq!(snapshots.len(), selections.len());
-        let views = snapshots.iter().zip(selections).map(|(snapshot, live)| ActiveView {
-            snapshot,
-            live,
-            #[cfg(test)]
-            field_tokens: Default::default(),
-        }).collect();
+        let views = snapshots.iter().zip(selections).map(|(snapshot, live)| ActiveView { snapshot, live }).collect();
         Ok(Self { views })
     }
 
@@ -494,9 +487,7 @@ impl<'a> CorpusView<'a> {
         accepts: impl Fn(usize, usize, &Identity) -> bool,
         mut collect: impl FnMut(usize, usize, &Identity, f32),
     ) -> Result<usize, RecordError> {
-        validate_bounds(groups, boosts, self.views[0].snapshot.fields.len())?;
-        let references: Vec<_> = self.views.iter().collect();
-        let statistics = QueryStatistics::build(&references, groups, boosts.len(), normalization)?;
+        let statistics = QueryStatistics::build(&self.views, groups, boosts.len(), normalization)?;
         let mut count = 0usize;
         for (slot, view) in self.views.iter().enumerate() {
             let matched = view.score_groups_in(
@@ -520,6 +511,7 @@ impl<'a> CorpusView<'a> {
         limit: usize,
         accepts: impl Fn(&Identity) -> bool,
     ) -> Result<(usize, Vec<Hit>), RecordError> {
+        validate_bounds(groups, boosts, self.views[0].snapshot.fields.len())?;
         let mut hits = Vec::new();
         let count = self.collect_scores(query, groups, boosts, normalization,
             |_, _, identity| accepts(identity),

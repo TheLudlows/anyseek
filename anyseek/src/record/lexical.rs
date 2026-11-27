@@ -88,6 +88,14 @@ struct Manifest {
     identities: Vec<Identity>,
 }
 
+impl Manifest {
+    fn identity_bytes(&self) -> Result<u64, RecordError> {
+        self.identities.iter().try_fold(0u64, |bytes, identity| {
+            bytes.checked_add(identity.id.len() as u64)
+        }).ok_or_else(|| storage("native identity bytes overflow"))
+    }
+}
+
 /// The outer authority must authenticate this entire closure before selecting
 /// it. In particular, discovering a newer meta.json does not select a view.
 #[cfg(test)]
@@ -363,62 +371,7 @@ impl Candidate {
             .reload_policy(ReloadPolicy::Manual)
             .try_into()
             .map_err(storage)?;
-        let searcher = reader.searcher();
-        let mut addresses = Vec::new();
-        let mut lengths = vec![Vec::new(); manifest.identities.len()];
-        let mut field_totals = vec![scoring::FieldLengths::default(); fields.len()];
-        let mut seen = BTreeSet::new();
-        let mut identity_id_bytes=0u64;
-        for segment in searcher.segment_readers() {
-            if segment.num_docs() != segment.max_doc() {
-                return Err(storage("unexpected native deletion"));
-            }
-            let identity = segment.fast_fields().u64("identity").map_err(storage)?;
-            let columns = (0..fields.len())
-                .map(|i| segment.fast_fields().u64(&format!("length_{i}")))
-                .collect::<tantivy::Result<Vec<_>>>()
-                .map_err(storage)?;
-            let mut mapping = Vec::new();
-            for doc in 0..segment.max_doc() {
-                let values = identity.values_for_doc(doc).collect::<Vec<_>>();
-                if values.len() != 1
-                    || values[0] >= manifest.identities.len() as u64
-                    || !seen.insert(values[0])
-                {
-                    return Err(storage("lexical address mapping mismatch"));
-                }
-                identity_id_bytes=identity_id_bytes.checked_add(manifest.identities[values[0] as usize].id.len() as u64)
-                    .ok_or_else(||storage("lexical identity bytes overflow"))?;
-                mapping.push(values[0] as usize);
-                let mut row = Vec::new();
-                for column in &columns {
-                    let values = column.values_for_doc(doc).collect::<Vec<_>>();
-                    if values.len() != 1 || values[0] > MAX_TOKENS as u64 {
-                        return Err(storage("invalid exact field length"));
-                    }
-                    row.push(values[0]);
-                }
-                scoring::FieldLengths::add_document(&mut field_totals, &row);
-                lengths[values[0] as usize] = row;
-            }
-            addresses.push(mapping);
-        }
-        if seen.len() != manifest.identities.len() {
-            return Err(storage("incomplete lexical address mapping"));
-        }
-        Ok(Snapshot {
-            searcher,
-            fields:Arc::new(fields),
-            cut,
-            names: Arc::new(manifest.fields),
-            identities: Arc::new(manifest.identities.into()),identity_id_bytes,overlay:Vec::new(),
-            addresses:Arc::new(addresses),
-            lengths:Arc::new(lengths),
-            field_totals: Arc::new(field_totals),
-            _memory:Arc::new(memory),
-            _pin: None,
-            _directory_owner: None,
-        })
+        Snapshot::from_searcher(reader.searcher(), &manifest, fields, manifest.identity_bytes()?, memory)
     }
 }
 
@@ -468,11 +421,70 @@ impl LiveSelection {
 pub(super) struct ActiveView<'a> {
     snapshot: &'a Snapshot,
     live: LiveSelection,
-    #[cfg(test)]
-    field_tokens: BTreeMap<Field, u64>,
 }
 
 impl Snapshot {
+    fn from_searcher(
+        searcher: Searcher,
+        manifest: &Manifest,
+        fields: Vec<Field>,
+        identity_id_bytes: u64,
+        memory: crate::resources::MemoryReservation,
+    ) -> Result<Self, RecordError> {
+        let mut seen = BTreeSet::new();
+        let mut addresses = Vec::new();
+        let mut lengths = vec![Vec::new(); manifest.identities.len()];
+        let mut field_totals = vec![scoring::FieldLengths::default(); fields.len()];
+        for segment in searcher.segment_readers() {
+            if segment.num_docs() != segment.max_doc() {
+                return Err(storage("native physical deletion unsupported"));
+            }
+            let column = segment.fast_fields().u64("identity").map_err(storage)?;
+            let columns = (0..fields.len())
+                .map(|i| segment.fast_fields().u64(&format!("length_{i}")))
+                .collect::<tantivy::Result<Vec<_>>>()
+                .map_err(storage)?;
+            let mut mapping = Vec::new();
+            for doc in 0..segment.max_doc() {
+                let ids = column.values_for_doc(doc).collect::<Vec<_>>();
+                if ids.len() != 1 || ids[0] >= manifest.identities.len() as u64 || !seen.insert(ids[0]) {
+                    return Err(storage("native runtime identity mismatch"));
+                }
+                let ordinal = ids[0] as usize;
+                mapping.push(ordinal);
+                let mut row = Vec::new();
+                for column in &columns {
+                    let values = column.values_for_doc(doc).collect::<Vec<_>>();
+                    if values.len() != 1 || values[0] > MAX_TOKENS as u64 {
+                        return Err(storage("native runtime length mismatch"));
+                    }
+                    row.push(values[0]);
+                }
+                scoring::FieldLengths::add_document(&mut field_totals, &row);
+                lengths[ordinal] = row;
+            }
+            addresses.push(mapping);
+        }
+        if seen.len() != manifest.identities.len() {
+            return Err(storage("native runtime incomplete commit"));
+        }
+        Ok(Self {
+            searcher,
+            fields: Arc::new(fields),
+            names: Arc::new(manifest.fields.clone()),
+            cut: manifest.cut,
+            identities: Arc::new(manifest.identities.clone().into()),
+            identity_id_bytes,
+            overlay: Vec::new(),
+            addresses: Arc::new(addresses),
+            lengths: Arc::new(lengths),
+            field_totals: Arc::new(field_totals),
+            _memory: Arc::new(memory),
+            _pin: None,
+            _directory_owner: None,
+        })
+    }
+
     fn lengths_for(&self, ordinal: usize) -> &[u64] {
         if let Some(lengths) = self.lengths.get(ordinal) {
             lengths
@@ -507,35 +519,21 @@ impl Snapshot {
         if live.len() != identities.len() {
             return Err(storage("active identity absent from lexical package"));
         }
-        Ok(self.with_live(live))
+        Ok(ActiveView { snapshot: self, live: LiveSelection::Ordinals(live) })
     }
-
-    // Ordinals have already been validated against this fixed snapshot.
-    fn with_live(&self, live: BTreeSet<usize>) -> ActiveView<'_> {
-        #[cfg(test)]
-        let field_tokens = {
-            let mut field_tokens = BTreeMap::new();
-            for &ordinal in &live {
-                for (field, length) in self.fields.iter().zip(self.lengths_for(ordinal)) {
-                    *field_tokens.entry(*field).or_default() += length;
-                }
-            }
-            field_tokens
-        };
-        ActiveView {
-            snapshot: self,
-            live: LiveSelection::Ordinals(live),
-            #[cfg(test)]
-            field_tokens,
-        }
-    }
-
 }
 
 #[cfg(test)]
 impl Bm25StatisticsProvider for ActiveView<'_> {
     fn total_num_tokens(&self, field: Field) -> tantivy::Result<u64> {
-        Ok(self.field_tokens.get(&field).copied().unwrap_or(0).max(1))
+        let Some(position) = self.snapshot.fields.iter().position(|candidate| *candidate == field) else {
+            return Ok(1);
+        };
+        let tokens = (0..self.snapshot.identities.len())
+            .filter(|ordinal| self.live.contains(ordinal))
+            .map(|ordinal| self.snapshot.lengths_for(ordinal)[position])
+            .sum::<u64>();
+        Ok(tokens.max(1))
     }
     fn total_num_docs(&self) -> tantivy::Result<u64> {
         Ok(self.live.len() as u64)

@@ -75,7 +75,7 @@ def seed(base, builder, directory, size):
     with (directory / "fixture.log").open("w") as log:
         subprocess.run([
             "taskset", "-c", ",".join(map(str, SERVER_CPUS)), str(builder),
-            "record::capacity::tests::prepare_lexical_scale_fixture", "--ignored", "--exact", "--nocapture",
+            "record::lexical::visibility::tests::prepare_lexical_scale_fixture", "--ignored", "--exact", "--nocapture",
         ], env=env, stdout=log, stderr=subprocess.STDOUT, check=True)
     assert "1 passed" in (directory / "fixture.log").read_text()
     return data
