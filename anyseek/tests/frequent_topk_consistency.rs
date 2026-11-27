@@ -59,7 +59,7 @@ async fn frequent_terms_topk_returns_results() {
         docs.push(doc);
     }
     records::insert(&index_arc, docs).await.unwrap();
-    index_arc.compact_journal().await.unwrap();
+    records::checkpoint(&index_arc).await;
 
     // Intersection Topk must not come back empty despite many matches.
     let rlo = search(

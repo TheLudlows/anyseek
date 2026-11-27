@@ -148,18 +148,19 @@ pub(super) fn write_estimate(
     write_estimate_for(state.records.get(&applied.request.record_id), config, applied)
 }
 pub(super) fn write_estimate_for(previous: Option<&Record>, config: &RecordConfig, applied: &Applied) -> Result<(u64, usize), RecordError> {
-    let estimate = |doc: &Document, id: &str| {
-        document_estimate(doc, &config.schema)?
-            .checked_add(65536)
-            .and_then(|n|n.checked_add(identity_estimate(id).ok()?))
-            .ok_or_else(|| storage("write estimate overflow"))
-    };
-    match enrichment::document(
-            previous, &applied.request,
-        )? {
-            Some(document) => Ok((estimate(&document,&applied.request.record_id)?,1)),
-            None => Ok((0,0)),
-    }
+    let document = enrichment::document(previous, &applied.request)?;
+    document_write_estimate(config, &applied.request.record_id, document.as_ref())
+}
+
+pub(super) fn document_write_estimate(
+    config: &RecordConfig, id: &str, document: Option<&Document>,
+) -> Result<(u64, usize), RecordError> {
+    let Some(document) = document else { return Ok((0, 0)); };
+    let bytes = document_estimate(document, &config.schema)?
+        .checked_add(65536)
+        .and_then(|n| n.checked_add(identity_estimate(id).ok()?))
+        .ok_or_else(|| storage("write estimate overflow"))?;
+    Ok((bytes, 1))
 }
 
 #[cfg(test)]

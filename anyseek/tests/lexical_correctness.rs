@@ -43,16 +43,6 @@ impl Progress {
     }
 }
 
-async fn checkpoint(index: &RecordPartition) {
-    let started = Instant::now();
-    eprintln!("[lexical-progress] checkpoint begin");
-    index.compact_journal().await.unwrap();
-    eprintln!(
-        "[lexical-progress] checkpoint complete elapsed={:.3}s",
-        started.elapsed().as_secs_f64()
-    );
-}
-
 async fn reopen(path: &Path) -> RecordPartition {
     let started = Instant::now();
     eprintln!("[lexical-progress] reopen begin");
@@ -218,7 +208,7 @@ async fn mixed_term_membership_scores_and_query_order_case(policy: FieldLengthNo
         / population as f64;
     for stage in 0..3 {
         if stage == 1 {
-            checkpoint(&index).await;
+            records::checkpoint(&index).await;
         }
         if stage == 2 {
             drop(index);
@@ -273,9 +263,9 @@ async fn appended_documents_preserve_scores_and_top1() {
             _ => json!({"title":"","text":"neutral ".repeat(if i<512 {1}else{5})}),
         };
         add(&index, 0, 512, &progress, doc).await;
-        checkpoint(&index).await;
+        records::checkpoint(&index).await;
         add(&index, 512, 576, &progress, doc).await;
-        checkpoint(&index).await;
+        records::checkpoint(&index).await;
         for reopened in [false, true] {
             if reopened {
                 drop(index);
@@ -339,7 +329,7 @@ async fn late_matching_document_remains_in_top2() {
             "alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta", "iota",
         ];
         add(&index,0,522,&progress,|i|json!({"title":"","text":if i==0 {terms.join(" ")}else if i<512 {"neutral ".repeat(10)}else if i<521 {terms[i-512].into()}else{"theta iota".into()}})).await;
-        checkpoint(&index).await;
+        records::checkpoint(&index).await;
         let q = terms.join(" ");
         let all = search(&index, &q, false, 523, false).await;
         assert_eq!(all.len(), 11);
@@ -399,7 +389,7 @@ async fn five_term_union_scores_and_topk_prefix_case(policy: FieldLengthNormaliz
         term_document(&terms, &sets, i)
     })
     .await;
-    checkpoint(&index).await;
+    records::checkpoint(&index).await;
     let avg = (0..population)
         .map(|i| sets.iter().filter(|s| s.contains(&i)).count().max(1))
         .sum::<usize>() as f64

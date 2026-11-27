@@ -46,49 +46,49 @@ impl RecordPartition {
         let inner=guard.as_mut().unwrap();
         if !inner.healthy{return Err(RecordError::RecoveryRequired);}
         inner.observe_time()?;
-        let replay=inner.state.groups.as_ref().is_some_and(|g|g.receipts.iter().any(|r|r.operation_id==request.operation_id));
-        if !replay && maintenance::has_expired_operations(&inner.state,current_epoch())? {return Err(inner.request_checkpoint("expired_group_receipts"));}
-        let empty=group_plan::Groups::default();
-        let decision=match group_plan::prepare(&inner.state,inner.state.groups.as_ref().unwrap_or(&empty),&inner.config,request,current_epoch(),inner.evaluation_time_ms)? {
+        let replay=inner.state.groups.as_ref().is_some_and(|g|g.receipt(&request.operation_id).is_some());
+        if !replay && maintenance::has_expired_operations(&inner.state,current_epoch()) {return Err(inner.request_checkpoint("expired_group_receipts"));}
+        let decision=match group_plan::prepare(&inner.state,&inner.config,request,current_epoch(),inner.evaluation_time_ms)? {
             group_plan::Plan::Replay(r)=>return Ok(r),group_plan::Plan::Replace(d)=>d,
         };
         if inner.maintenance_requested.is_some(){return Err(RecordError::Busy);}
-        let mut candidate=inner.state.try_clone_with_growth(checkpoint_codec::json_length(&decision)?)?;
-        group_plan::apply(&mut candidate,&decision)?;
-        let snapshot=checkpoint_codec::length(&inner.config,&candidate)?;
-        let reserve=mutation::reserve_bytes(&candidate);
-        checkpoint_codec::validate_size(snapshot,reserve,inner.config.max_journal_bytes).map_err(|_|RecordError::Rejected("group checkpoint budget exceeded".into()))?;
-        let payload=encode_entry(&Entry::GroupApplied(decision.clone()))?;
-        inner.ensure_journal_room(payload.len(),reserve).await?;
+        let entry = Entry::GroupApplied(decision);
+        let payload = encode_entry(&entry)?;
+        let Entry::GroupApplied(decision) = entry else { unreachable!() };
+        let prepared = group_plan::Prepared::new(&inner.state, decision, inner.snapshot_bytes)?;
+        let seq = prepared.stored.receipt.seq;
+        checkpoint_codec::validate_size(prepared.snapshot_bytes, prepared.reserve_bytes, inner.config.max_journal_bytes)
+            .map_err(|_| RecordError::Rejected("group checkpoint budget exceeded".into()))?;
+        inner.ensure_journal_room(payload.len(), prepared.reserve_bytes).await?;
         inner.index.attach_cursors(self.indexes.clone());inner.index.drain_indexes().await?;
-        let mut growth=0u64;let mut updates=0usize;
-        for r in &decision.records {let a=member_applied(&decision,r);let (g,u)=build_budget::write_estimate_for(inner.state.records.get(&r.record_id),&inner.config,&a)?;growth=growth.checked_add(g).ok_or(RecordError::Busy)?;updates=updates.checked_add(u).ok_or(RecordError::Busy)?;}
+        let (growth, updates) = group_index_growth(&prepared, &inner.config)?;
         if !inner.index.can_admit(growth,updates).await {inner.maintain_index_tail().await?;}
         if !inner.index.can_admit(growth,updates).await{return Err(RecordError::Busy);}
         let mut credits=Vec::new();
-        for r in &decision.records {
+        for r in &prepared.records {
             let credit=if let Some(document)=&r.document {
                 Some((lexical::memory::Admission::Visible(inner.index.reserve_visible(document,&inner.config,&r.record_id,inner.journal.owner_guard()).await?),inner.index.reserve_component(r,&inner.config).await?))
             }else{None};credits.push(credit);
         }
         // Recheck deadlines after every fallible/awaiting admission, before authority.
         inner.observe_time()?;
-        if decision.records.iter().any(|r|r.document.is_some()&&r.temporal.expire_at_ms.is_some_and(|t|t<=inner.evaluation_time_ms)) {return Err(RecordError::Rejected("group deadline elapsed before commit".into()));}
-        let deadline=decision.records.iter().flat_map(|r|[
+        if prepared.records.iter().any(|r|r.document.is_some()&&r.temporal.expire_at_ms.is_some_and(|t|t<=inner.evaluation_time_ms)) {return Err(RecordError::Rejected("group deadline elapsed before commit".into()));}
+        let deadline=prepared.records.iter().flat_map(|r|[
             r.document.as_ref().and(r.temporal.expire_at_ms),
-            inner.state.records.get(&r.record_id).filter(|r|temporal::visible(r,decision.observed_time_ms)).and_then(|r|r.temporal.expire_at_ms)
+            inner.state.records.get(&r.record_id).filter(|r|temporal::visible(r,prepared.stored.observed_time_ms)).and_then(|r|r.temporal.expire_at_ms)
         ]).flatten().min();
         if deadline.is_some_and(|t|t<=inner.evaluation_time_ms){return Err(RecordError::Busy);}
+        prepared.admit_containers(&mut inner.state)?;
         if let Some(remote)=inner.remote.as_ref() {
-            let id=format!("{}:{}",decision.operation_id.epoch,decision.operation_id.nonce);
-            if remote.batch_tail_needs_checkpoint(&[(decision.receipt.seq,id.clone(),&payload)]).await? {return Err(inner.request_checkpoint("group_remote_tail_room"));}
-            let upload=remote.prepare_upload(decision.receipt.seq-1,inner.journal.root()).await?;
+            let id=format!("{}:{}",prepared.stored.operation_id.epoch,prepared.stored.operation_id.nonce);
+            if remote.batch_tail_needs_checkpoint(&[(seq,id.clone(),&payload)]).await? {return Err(inner.request_checkpoint("group_remote_tail_room"));}
+            let upload=remote.prepare_upload(seq-1,inner.journal.root()).await?;
             drop(guard.take());
-            let uploaded=upload.upload_group(decision.receipt.seq,id,&payload).await;
+            let uploaded=upload.upload_group(seq,id,&payload).await;
             *guard=Some(self.inner.lock().await);
             let inner=guard.as_mut().unwrap();
             let uploaded=uploaded?;
-            if !inner.healthy || inner.state.seq.checked_add(1)!=Some(decision.receipt.seq) {return Err(RecordError::RecoveryRequired);}
+            if !inner.healthy || inner.state.seq.checked_add(1)!=Some(seq) {return Err(RecordError::RecoveryRequired);}
             inner.observe_time()?;
             if deadline.is_some_and(|t|t<=inner.evaluation_time_ms){return Err(RecordError::Busy);}
             let clock=inner.clock.clone();
@@ -100,29 +100,34 @@ impl RecordPartition {
             }).await?;
         }
         let inner=guard.as_mut().unwrap();
-        inner.append_operation(&payload,decision.receipt.seq).await?;
+        inner.append_operation(&payload,seq).await?;
         #[cfg(test)] if std::env::var("ANYSEEK_GROUP_CRASH_ROOT").ok().as_deref()==inner.journal.root().to_str(){std::process::exit(72);}
-        #[cfg(test)] if inner.fail_after_durable {return Err(RecordError::DurablePending(decision.receipt.seq));}
+        #[cfg(test)] if inner.fail_after_durable {return Err(RecordError::DurablePending(seq));}
         let publication=async{
             inner.index.begin_batch(self.indexes.clone(),Arc::downgrade(&self.inner)).await?;
-            for (record,credit) in decision.records.iter().zip(credits){
+            for (record,credit) in prepared.records.iter().zip(credits){
                 let (native,component)=credit.map_or((None,None),|(a,b)|(Some(a),Some(b)));
-                inner.replay_context().publish_group_member(record,decision.receipt.seq,native,component,true).await?;
+                inner.replay_context().publish_group_member(record,seq,native,component,true).await?;
             }
-            inner.index.finish_batch(decision.receipt.seq,self.indexes.clone()).await?;
+            inner.index.finish_batch(seq,self.indexes.clone()).await?;
             inner.index.drain_indexes().await?;
-            Ok::<_,RecordError>(())
+            let snapshot_bytes = prepared.snapshot_bytes;
+            let receipt = prepared.install(&mut inner.state)?;
+            inner.snapshot_bytes = snapshot_bytes;
+            self.indexes.immediate(seq);
+            Ok::<_, RecordError>(receipt)
         }.await;
-        if publication.is_err(){return Err(RecordError::DurablePending(decision.receipt.seq));}
-        inner.state=candidate;inner.snapshot_bytes=snapshot;
-        self.indexes.immediate(decision.receipt.seq);
-        Ok(decision.receipt)
+        publication.map_err(|_| RecordError::DurablePending(seq))
     }
 }
-fn member_applied(d:&group_plan::Decision,r:&Record)->Applied {
-    Applied{request:RecordWrite{operation_id:d.operation_id.clone(),record_id:r.record_id.clone(),expected:ExpectedVersion::Any,
-        document:r.document.clone(),vector_patch:None,temporal:r.document.as_ref().map(|_|r.temporal.clone())},
-        receipt:WriteReceipt{seq:d.receipt.seq,version:r.version,record_id:r.record_id.clone()},observed_epoch:d.observed_epoch,observed_time_ms:d.observed_time_ms}
+fn group_index_growth(
+    prepared: &group_plan::Prepared, config: &RecordConfig,
+) -> Result<(u64, usize), RecordError> {
+    prepared.records.iter().try_fold((0u64, 0usize), |(bytes, updates), record| {
+        let (growth, count) = build_budget::document_write_estimate(config, &record.record_id, record.document.as_ref())?;
+        Ok((bytes.checked_add(growth).ok_or(RecordError::Busy)?,
+            updates.checked_add(count).ok_or(RecordError::Busy)?))
+    })
 }
 impl replay::Context<'_>{
     pub(super) async fn publish_group_member(&mut self,r:&Record,seq:u64,native:Option<lexical::memory::Admission>,component:Option<index_consumers::ComponentCredit>,publish_native:bool)->Result<(),RecordError>{
@@ -136,15 +141,18 @@ impl replay::Context<'_>{
         Ok(())
     }
     pub(super) async fn replay_group(&mut self,d:group_plan::Decision,publish_native:bool)->Result<(),RecordError>{
-        let mut next=self.state.try_clone_with_growth(checkpoint_codec::json_length(&d)?)?;
-        group_plan::apply(&mut next,&d)?;
-        let(mut growth,mut updates)=(0u64,0usize);
-        for r in &d.records {let a=member_applied(&d,r);let(g,u)=build_budget::write_estimate_for(self.state.records.get(&r.record_id),self.config,&a)?;
-            growth=growth.checked_add(g).ok_or_else(||storage("group replay growth overflow"))?;updates=updates.checked_add(u).ok_or_else(||storage("group replay update overflow"))?;}
+        let prepared = group_plan::Prepared::new(self.state, d, *self.snapshot_bytes)?;
+        let seq = prepared.stored.receipt.seq;
+        let (growth, updates) = group_index_growth(&prepared, self.config)?;
         if growth>0&&!self.index.can_admit(growth,updates).await {if !publish_native{self.index.flush_replayed_native().await?;}self.stage_stable_tail().await?;}
         if growth>0&&!self.index.can_admit(growth,updates).await{return Err(storage("durable group exceeds replay tail capacity"));}
-        for r in &d.records {self.publish_group_member(r,d.receipt.seq,None,None,publish_native).await?;}
-        *self.state=next;*self.snapshot_bytes=checkpoint_codec::length(self.config,self.state)?;
+        prepared.admit_containers(self.state)?;
+        for record in &prepared.records {
+            self.publish_group_member(record, seq, None, None, publish_native).await?;
+        }
+        let snapshot_bytes = prepared.snapshot_bytes;
+        prepared.install(self.state)?;
+        *self.snapshot_bytes = snapshot_bytes;
         Ok(())
     }
 }

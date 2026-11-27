@@ -177,10 +177,10 @@ impl RemotePersistence {
         for entry in tail {
             if <[u8;32]>::from(Sha256::digest(&entry.payload))!=entry.request_sha256 {return Err(storage("index-only WAL digest mismatch"));}
             let _decode=crate::storage::build_budget::reserve_memory((entry.payload.len() as u64).checked_mul(32).ok_or_else(||storage("index replay decode overflow"))?).map_err(storage)?;
-            state.admit_replay_frame(entry.payload.len())?;
+            let state_bytes = state.admit_replay_frame(entry.payload.len())?;
             match serde_json::from_slice::<Entry>(&entry.payload).map_err(storage)? {
                 Entry::Applied(op)=>apply(&mut state,&op)?,
-                Entry::GroupApplied(d)=>group_plan::apply(&mut state,&d)?,
+                Entry::GroupApplied(d)=>group_plan::apply(&mut state,d,state_bytes)?,
                 Entry::Expired(event)=>temporal::apply(&mut state,&event)?,
                 _=>return Err(storage("unexpected authority or same-sequence event in index suffix")),
             }
