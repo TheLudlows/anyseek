@@ -83,6 +83,8 @@ impl Service {
         let queued = Instant::now();
         let retirement_deadline = residency::pressure_deadline(self.residency_deadline());
         let mut changes = self.records.changes();
+        #[cfg(test)]
+        let mut waited_for_retirement = false;
         loop {
             let next = self
                 .records
@@ -129,7 +131,10 @@ impl Service {
                 Next::Ready(record) => return Ok(record),
                 Next::Retiring => {
                     #[cfg(test)]
-                    self.cold.test.retirement_waiters.increment();
+                    if !waited_for_retirement {
+                        waited_for_retirement = true;
+                        self.cold.test.retirement_waiters.increment();
+                    }
                     if !Residency::<RecordPartition>::wait_for_change(
                         &mut changes,
                         retirement_deadline,
