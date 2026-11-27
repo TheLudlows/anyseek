@@ -33,35 +33,38 @@ async fn local_sdk_owns_publishes_isolates_and_recovers() {
     let root = directory.path().join("catalog");
     let engine = LocalEngine::open(&root, true).await.unwrap();
     assert!(LocalEngine::open(&root, false).await.is_err());
-    engine
-        .create_collection(
-            "1-tenant",
-            "policy",
-            OperationId::new("create-policy".into()),
-            serde_json::from_value(json!({
-                "index_name":"policy","tokenizer":"TantivySimpleV1","vector":{"dimensions":2},
-                "schema":[
-                    {"field":"terms","field_type":"Text","store":true,"index_lexical":true},
-                    {"field":"vector","field_type":"Json","index_vector":true},
-                ]
-            }))
-            .unwrap(),
-            Some("fixture-f32-cosine".into()),
-        )
-        .await
-        .unwrap();
-    assert_eq!(
+    for tenant in ["1-tenant", "2-tenant"] {
         engine
-            .collection_info("2-tenant", "policy")
+            .create_collection(
+                tenant,
+                "policy",
+                OperationId::new(format!("create-policy-{tenant}")),
+                serde_json::from_value(json!({
+                    "index_name":"policy","tokenizer":"TantivySimpleV1","vector":{"dimensions":2},
+                    "schema":[
+                        {"field":"terms","field_type":"Text","store":true,"index_lexical":true},
+                        {"field":"vector","field_type":"Json","index_vector":true},
+                        {"field":"entity_ids","field_type":"StringSet","store":true},
+                        {"field":"relations","field_type":"Json","store":true}
+                    ]
+                }))
+                .unwrap(),
+                Some("fixture-f32-cosine".into()),
+            )
             .await
-            .unwrap_err()
-            .kind(),
-        LocalErrorKind::NotFound
-    );
-    let group = |nonce: &str, version: u64, ids: &[&str], terms: &str| {
+            .unwrap();
+    }
+    let document = |terms: &str, entity: &str| {
+        json!({
+            "terms":terms,"vector":[1,0],"entity_ids":["app:policy",entity],
+            "relations":{"edges":[{"from":"app:policy","type":"depends_on","to":entity}],
+                "source":{"confirmed":true,"annotation":null}}
+        })
+    };
+    let group = |nonce: &str, version: u64, ids: &[&str], document: &Value| {
         let records: Vec<Value> = ids
             .iter()
-            .map(|id| json!({"record_id":id,"document":{"terms":terms,"vector":[1,0]}}))
+            .map(|id| json!({"record_id":id,"document":document}))
             .collect();
         serde_json::from_value::<anyseek::record::GroupReplace>(json!({
             "operation_id":OperationId::new(nonce.into()),
@@ -70,7 +73,18 @@ async fn local_sdk_owns_publishes_isolates_and_recovers() {
         .unwrap()
     };
 
-    let initial = group("publish-policy", 0, &["p1", "p2"], "connection timeout");
+    let assert_payload = async |engine: &LocalEngine, tenant: &str, version, expected: &Value| {
+        let record = engine.get(tenant, "policy", "p1").await.unwrap().unwrap();
+        assert_eq!(record.version, version, "{tenant}/policy/p1");
+        assert_eq!(
+            &serde_json::to_value(record.document.unwrap()).unwrap(),
+            expected,
+            "{tenant}/policy/p1"
+        );
+    };
+
+    let initial_payload = document("connection timeout", "app:connection");
+    let initial = group("publish-policy", 0, &["p1", "p2"], &initial_payload);
     let first = engine
         .replace_group("1-tenant", "policy", initial.clone())
         .await
@@ -81,7 +95,16 @@ async fn local_sdk_owns_publishes_isolates_and_recovers() {
     );
     group_view(&engine, "connection", &["p1", "p2"], 1).await;
 
-    let replacement = group("replace-policy", 1, &["p1", "p3"], "subscription timeout");
+    let other_payload = document("billing inquiry", "app:billing");
+    let other = group("publish-other-policy", 0, &["p1"], &other_payload);
+    engine
+        .replace_group("2-tenant", "policy", other)
+        .await
+        .unwrap();
+    assert_payload(&engine, "1-tenant", 1, &initial_payload).await;
+
+    let replacement_payload = document("subscription timeout", "app:subscription");
+    let replacement = group("replace-policy", 1, &["p1", "p3"], &replacement_payload);
     // Discard the committed outcome and recover using the original operation ID.
     let _ = engine
         .replace_group("1-tenant", "policy", replacement.clone())
@@ -121,13 +144,7 @@ async fn local_sdk_owns_publishes_isolates_and_recovers() {
     }));
 
     let reopened = LocalEngine::open(&root, false).await.unwrap();
-    let record = reopened
-        .get("1-tenant", "policy", "p1")
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(record.version, 2);
-    assert_eq!(record.document.unwrap()["terms"], "subscription timeout");
+    assert_payload(&reopened, "1-tenant", 2, &replacement_payload).await;
     assert!(
         reopened
             .get("1-tenant", "policy", "p2")
@@ -168,7 +185,7 @@ async fn local_sdk_owns_publishes_isolates_and_recovers() {
         .unwrap();
     assert_eq!(stale.count_total(), Some(0));
 
-    let withdrawal = group("withdraw-policy", 2, &[], "");
+    let withdrawal = group("withdraw-policy", 2, &[], &Value::Null);
     let third = reopened
         .replace_group("1-tenant", "policy", withdrawal.clone())
         .await
@@ -187,6 +204,7 @@ async fn local_sdk_owns_publishes_isolates_and_recovers() {
             .unwrap()
             .is_none()
     );
+    assert_payload(&reopened, "2-tenant", 1, &other_payload).await;
     assert_eq!(
         reopened
             .replace_group("1-tenant", "policy", withdrawal)
