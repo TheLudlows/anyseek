@@ -23,6 +23,8 @@ pub struct DataOutputPermit {
 #[derive(Clone)]
 pub(crate) struct ReadTimeFence {
     pub(super) clock: Arc<dyn super::temporal::Clock>,
+    pub(super) observed: super::temporal::ObservedTime,
+    pub(super) certified_floor: u64,
     pub(super) deadline: tokio::time::Instant,
     pub(super) expires: Option<u64>,
     pub(super) monotonic_expiry: Option<tokio::time::Instant>,
@@ -34,8 +36,14 @@ impl ReadTimeFence {
         if now >= self.deadline || self.monotonic_expiry.is_some_and(|expiry| now >= expiry) {
             return Err(RecordError::Busy);
         }
-        if let Some(expiry) = self.expires && self.clock.now_ms()? >= expiry {
-            return Err(RecordError::Busy);
+        if let Some(expiry) = self.expires {
+            if self.observed.get() >= expiry {
+                return Err(RecordError::Busy);
+            }
+            let time = super::temporal::checked_time(self.clock.as_ref(), self.certified_floor)?;
+            if self.observed.advance(time) >= expiry {
+                return Err(RecordError::Busy);
+            }
         }
         Ok(())
     }

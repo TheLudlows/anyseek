@@ -761,6 +761,7 @@ async fn event_time_vector_budget_counts_filtered_work_across_selected_shards() 
     assert_eq!(exact, spent);
     eprintln!("four filtered vectors across two nonempty shards: {spent} shared work units");
 
+    let permits = p.admission.available_permits();
     let held = components[0].write().await;
     let deadline = NativeDeadline::now() + std::time::Duration::from_millis(25);
     assert!(matches!(
@@ -775,7 +776,15 @@ async fn event_time_vector_budget_counts_filtered_work_across_selected_shards() 
         .unwrap();
     assert_eq!(after_deadline, spent);
 
-    let permits = p.admission.available_permits();
+    // The caller timeout can precede the first worker's final release.
+    // Wait for that worker before measuring the next request's admission.
+    tokio::time::timeout_at(native_deadline(), async {
+        while p.admission.available_permits() != permits {
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .unwrap();
     let worker_gate = root.join(".test-event-time-vector-worker-pause");
     std::fs::write(&worker_gate, b"pause").unwrap();
     let reader = p.clone();

@@ -52,6 +52,7 @@ use tokio::sync::{Mutex, RwLock, Semaphore};
 
 tokio::task_local! { static AUTHENTICATED: String; }
 tokio::task_local! { static REQUEST_DEADLINE: tokio::time::Instant; }
+tokio::task_local! { static EVENT_TIME_READ: Arc<std::sync::atomic::AtomicBool>; }
 tokio::task_local! { static ROUTED_COLLECTION: Option<admission::RoutedCollection>; }
 #[derive(Clone)]
 struct Principal(String);
@@ -1855,6 +1856,12 @@ async fn query_event_time_collection(
         p.query_event_time(request.temporal, request.facet_filter, fields, request.length, deadline)
             .await.map_err(Error::from)
     }).await?;
+    let data = match &result {
+        Ok(output) => data.with_time_fence(output.delivery_time.clone()),
+        Err(_) => data,
+    };
+    #[cfg(test)]
+    if result.is_ok() { pause_event_read_handoff(s, deadline).await; }
     Ok((result, data))
 }
 
@@ -1880,6 +1887,7 @@ async fn query(
     if dispatch.recall.is_some() {
         let request = parse::<TimeVectorRequest>(&bytes)?;
         let tenant = s.authenticate(&headers).await?;
+        let _ = EVENT_TIME_READ.try_with(|read| read.store(true, std::sync::atomic::Ordering::Release));
         let deadline = REQUEST_DEADLINE.with(|deadline| *deadline);
         let (result, data) = query_time_vector_collection(&s, tenant, id, request, deadline).await?;
         return protected_after_publication(result, data).await;
@@ -1912,7 +1920,20 @@ async fn query_time_vector_collection(
         Ok(output) => data.with_time_fence(output.delivery_time.clone()),
         Err(_) => data,
     };
+    #[cfg(test)]
+    if result.is_ok() { pause_event_read_handoff(s, deadline).await; }
     Ok((result, data))
+}
+
+#[cfg(test)]
+async fn pause_event_read_handoff(s: &Service, deadline: tokio::time::Instant) {
+    let gate = s.root.join(".test-event-read-handoff-pause");
+    if gate.exists() {
+        std::fs::write(s.root.join(".test-event-read-handoff-started"), b"ready").unwrap();
+        while gate.exists() && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
+    }
 }
 
 async fn query_collection(
@@ -2049,6 +2070,9 @@ async fn request_admitted(
         && request.extensions().get::<axum::extract::MatchedPath>()
             .is_some_and(|path| path.as_str() == EVENT_TIME_CHECKPOINT_PATH))
         .then(EventTimeCheckpointWait::default);
+    let event_time_read = request.extensions().get::<axum::extract::MatchedPath>()
+        .is_some_and(|path| path.as_str() == EVENT_TIME_QUERY_PATH);
+    let read_timeout = || Error(StatusCode::TOO_MANY_REQUESTS, "busy", "event-time query deadline exceeded".into());
     let (mut request, scope) = match tokio::time::timeout_at(deadline, admission::request(&service, request)).await {
         Ok(Ok(value)) => value,
         Ok(Err(error)) => {
@@ -2060,6 +2084,8 @@ async fn request_admitted(
         Err(_) => {
             let error = if let Some(wait) = &checkpoint {
                 event_time_checkpoint_error(wait.timeout_error())
+            } else if event_time_read {
+                read_timeout()
             } else {
                 Error(StatusCode::TOO_MANY_REQUESTS, "busy", "admission deadline exceeded; retry the original operation identity".into())
             };
@@ -2076,8 +2102,7 @@ async fn request_admitted(
     }
     let principal = request.extensions().get::<Principal>().cloned();
     let collection = request.extensions().get::<admission::RoutedCollection>().cloned();
-    let event_time_read = request.extensions().get::<axum::extract::MatchedPath>()
-        .is_some_and(|path| path.as_str() == EVENT_TIME_QUERY_PATH);
+    let read = Arc::new(std::sync::atomic::AtomicBool::new(event_time_read));
     let run = async move {
         match principal {
             Some(principal) => AUTHENTICATED.scope(principal.0, next.run(request)).await,
@@ -2086,10 +2111,9 @@ async fn request_admitted(
     };
     let response =
         match tokio::time::timeout_at(deadline, scope.clone().run(
-            REQUEST_DEADLINE.scope(deadline, ROUTED_COLLECTION.scope(collection, run)))).await {
+            REQUEST_DEADLINE.scope(deadline, EVENT_TIME_READ.scope(read.clone(), ROUTED_COLLECTION.scope(collection, run))))).await {
             Ok(response) => response,
-            Err(_) if event_time_read => Error(StatusCode::TOO_MANY_REQUESTS, "busy",
-                "event-time query deadline exceeded".into()).into_response(),
+            Err(_) if read.load(std::sync::atomic::Ordering::Acquire) => read_timeout().into_response(),
             Err(_) => {
                 let error = if let Some(wait) = &checkpoint {
                     event_time_checkpoint_error(wait.timeout_error())

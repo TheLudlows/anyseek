@@ -99,20 +99,241 @@ fn event_time_vector_openapi_keeps_ordinary_and_mixed_query_shapes() {
     );
 }
 
+async fn create_mixed_collection(app: &Router) {
+    let (status, created) = namespace_api(app, "POST", "/api/v1/index", "tenant", Some(json!({
+        "operation_id":OperationId::new("create-mixed".into()),"collection_id":"window",
+        "embedding_space_id":"fixture", "config":{"index_name":"window","vector":{"dimensions":2},"schema":[
+            {"field":"body","field_type":"Text","store":true}, {"field":"private","field_type":"Text","store":false},
+            {"field":"vector","field_type":"Json","index_vector":true},
+            {"field":"tags","field_type":"StringSet","filterable":true}
+        ]}
+    }))).await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+}
+
+const MIXED_QUERY: &str = "/api/v1/index/window/query";
+
+fn mixed_request() -> Value {
+    json!({"recall":{"time":{"from_ms":18,"to_ms":22}},"query_vector":[1,0],"all":true,"length":2})
+}
+
+fn mixed_row(nonce: &str, id: &str, expiry: Option<u64>) -> Value {
+    json!({"operation_id":OperationId::new(nonce.into()),"record_id":id,"expected":"Absent",
+        "temporal":{"event_time_ms":20,"expire_at_ms":expiry},"document":{"body":id,"vector":[1,0]}})
+}
+
+async fn write_mixed(app: &Router, rows: Vec<Value>) {
+    let (status, body) =
+        namespace_api(app, "POST", BATCH, "tenant", Some(json!({"writes":rows}))).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    for result in body["results"].as_array().unwrap() {
+        assert_eq!(result["code"], "applied", "{body}");
+    }
+}
+
+async fn wait_marker(marker: &FsPath) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !marker.exists() {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn event_time_public_handoffs_keep_point_observed_expiry_after_rollback() {
+    for mixed in [true, false] {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("catalog");
+        let service = open(&root).await;
+        let app = router(service.clone());
+        let sdk = Arc::new(local::LocalEngine::from_test_service(service.clone()));
+        create_mixed_collection(&app).await;
+        let p = service.record("tenant", "window").await.unwrap();
+        let (clock, now) = anyseek::record::tests::test_clock(&p).await;
+        let expiry = now + 60_000;
+        write_mixed(&app, vec![mixed_row("expire", "expires", Some(expiry))]).await;
+        assert_eq!(
+            build(&app, master_headers(), "window").await,
+            (StatusCode::OK, json!({"indexed_seq":1}))
+        );
+        let (path, request) = if mixed {
+            (MIXED_QUERY, mixed_request())
+        } else {
+            (
+                QUERY,
+                json!({"temporal":{"event":{"from_ms":18,"to_ms":22}}}),
+            )
+        };
+        let response =
+            namespace_response(&app, "POST", path, "tenant", Some(request.clone())).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let gate = root.join(".test-event-read-handoff-pause");
+        std::fs::write(&gate, b"pause").unwrap();
+        let reader = sdk.clone();
+        let pending = tokio::spawn(async move {
+            if mixed {
+                reader
+                    .query_time_vector("tenant", "window", serde_json::from_value(request).unwrap())
+                    .await
+                    .map(|_| ())
+            } else {
+                reader
+                    .query_event_time("tenant", "window", serde_json::from_value(request).unwrap())
+                    .await
+                    .map(|_| ())
+            }
+        });
+        wait_marker(&root.join(".test-event-read-handoff-started")).await;
+        clock.set(expiry + 1000);
+        assert!(
+            sdk.get("tenant", "window", "expires")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            p.committed_progress().await.committed_seq,
+            Some(1),
+            "point observation does not persist expiry"
+        );
+        clock.set(expiry - 7000);
+        std::fs::remove_file(gate).unwrap();
+        let mut body = response.into_body();
+        use http_body::Body as _;
+        let frame = std::future::poll_fn(|cx| Pin::new(&mut body).poll_frame(cx)).await;
+        assert!(
+            matches!(frame, Some(Err(_))),
+            "the prepared HTTP frame must not expose the expired row"
+        );
+        assert!(
+            std::future::poll_fn(|cx| Pin::new(&mut body).poll_frame(cx))
+                .await
+                .is_none()
+        );
+        assert_eq!(pending.await.unwrap().unwrap_err().code(), "busy");
+        drop(body);
+        drop(p);
+        drop(sdk);
+        drop(app);
+        service.shutdown().wait().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn event_time_vector_stringset_work_counts_tail_and_sealed_tags() {
+    let tmp = tempfile::tempdir().unwrap();
+    let service = open(&tmp.path().join("catalog")).await;
+    let app = router(service.clone());
+    create_mixed_collection(&app).await;
+    let mut row = mixed_row("small", "tagged", None);
+    row["document"]["tags"] = json!(["present"]);
+    write_mixed(&app, vec![row.clone()]).await;
+    assert_eq!(
+        build(&app, master_headers(), "window").await.0,
+        StatusCode::OK
+    );
+    let mut request = mixed_request();
+    let filter: Vec<_> = (0..128).map(|n| format!("missing-{n:04}")).collect();
+    request["filter"] = json!([{"StringSet":{"field":"tags","filter":filter}}]);
+    let (status, result) =
+        namespace_api(&app, "POST", MIXED_QUERY, "tenant", Some(request.clone())).await;
+    assert_eq!(status, StatusCode::OK, "{result}");
+    assert_eq!(result["hits"], json!([]));
+    row["operation_id"] = json!(OperationId::new("large".into()));
+    row["expected"] = json!({"Match":1});
+    let tags: Vec<_> = (0..4096).map(|n| format!("present-{n:04}")).collect();
+    row["document"]["tags"] = json!(tags);
+    write_mixed(&app, vec![row]).await;
+    for sealed in [false, true] {
+        if sealed {
+            assert_eq!(
+                build(&app, master_headers(), "window").await.0,
+                StatusCode::OK
+            );
+        }
+        let (status, error) = decode_response(
+            namespace_response(&app, "POST", MIXED_QUERY, "tenant", Some(request.clone())).await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "sealed={sealed} {error}");
+        assert!(
+            error["message"]
+                .as_str()
+                .unwrap()
+                .contains("shared query work budget exhausted"),
+            "{error}"
+        );
+        assert!(error.get("hits").is_none());
+    }
+    drop(app);
+    service.shutdown().wait().await.unwrap();
+}
+
+#[tokio::test]
+async fn event_time_vector_publication_timeout_remains_a_read_error() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("catalog");
+    let mut service = open(&root).await;
+    Arc::get_mut(&mut service).unwrap().request_timeout = Duration::from_millis(300);
+    let app = router(service.clone());
+    create_mixed_collection(&app).await;
+    let sdk = local::LocalEngine::from_test_service(service.clone());
+    let entry = service
+        .catalog
+        .collection_entry("tenant", "window")
+        .await
+        .unwrap();
+    let partition = root.join(entry.directory());
+    let gate = partition.join(".test-lexical-consumer-pause");
+    std::fs::write(&gate, b"pause").unwrap();
+    let owner = service.record("tenant", "window").await.unwrap();
+    let writer = tokio::spawn(async move {
+        owner
+            .write_batch(
+                &serde_json::from_value::<Vec<RecordWrite>>(json!([
+                    mixed_row("publish-a", "a", None),
+                    mixed_row("publish-b", "b", None)
+                ]))
+                .unwrap(),
+            )
+            .await
+    });
+    wait_marker(&partition.join(".test-lexical-consumer-started")).await;
+    let (status, error) = decode_response(
+        namespace_response(&app, "POST", MIXED_QUERY, "tenant", Some(mixed_request())).await,
+    )
+    .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{error}");
+    assert_eq!(error["code"], "busy");
+    assert!(!error["message"].as_str().unwrap().contains("operation"));
+    assert!(error.get("hits").is_none());
+    let error = sdk
+        .query_time_vector(
+            "tenant",
+            "window",
+            serde_json::from_value(mixed_request()).unwrap(),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), "busy");
+    assert!(!error.to_string().contains("operation"));
+    assert!(!writer.is_finished());
+    std::fs::remove_file(gate).unwrap();
+    assert!(writer.await.unwrap().unwrap().stop.is_none());
+    drop(sdk);
+    drop(app);
+    service.shutdown().wait().await.unwrap();
+}
+
 #[tokio::test]
 async fn event_time_vector_http_respects_authorization_and_publication() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join("catalog");
     let service = open(&root).await;
     let app = router(service.clone());
-    let (status, created) = namespace_api(&app, "POST", "/api/v1/index", "tenant", Some(json!({
-        "operation_id":OperationId::new("create-mixed".into()),"collection_id":"window",
-        "embedding_space_id":"fixture", "config":{"index_name":"window","vector":{"dimensions":2},"schema":[
-            {"field":"body","field_type":"Text","store":true}, {"field":"private","field_type":"Text","store":false},
-            {"field":"vector","field_type":"Json","index_vector":true}
-        ]}
-    }))).await;
-    assert_eq!(status, StatusCode::OK, "{created}");
+    create_mixed_collection(&app).await;
     let dated = |id, time, vector: Value| {
         json!({"operation_id":OperationId::new(String::from(id)),"record_id":id,
         "expected":"Absent","temporal":{"event_time_ms":time},"document":{"body":id,"private":"hidden","vector":vector}})

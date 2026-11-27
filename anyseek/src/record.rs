@@ -335,6 +335,7 @@ struct Inner {
     healthy: bool,
     clock: Arc<dyn temporal::Clock>,
     evaluation_time_ms: u64,
+    observed_time: temporal::ObservedTime,
     output: Arc<std::sync::RwLock<output::OutputState>>,
     remote: Option<RemotePersistence>,
     archive: Option<local_archive::Policy>,
@@ -1386,6 +1387,7 @@ impl RecordPartition {
                 healthy: true,
                 clock: temporal::clock()?,
                 evaluation_time_ms: 0,
+                observed_time: temporal::ObservedTime::default(),
                 output,
                 remote: None,
                 archive: None,
@@ -1521,6 +1523,7 @@ impl RecordPartition {
                 healthy: true,
                 clock: temporal::clock()?,
                 evaluation_time_ms: 0,
+                observed_time: temporal::ObservedTime::default(),
                 output:output.clone(),
                 remote: None,
                 archive,
@@ -1861,7 +1864,7 @@ impl RecordPartition {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::index::{
         Clustering, FieldLengthNormalization, FrequentwordType,
@@ -1995,14 +1998,14 @@ mod tests {
         std::fs::remove_dir_all(location).unwrap();
     }
 
-    struct TestClock(std::sync::atomic::AtomicU64);
+    pub(crate) struct TestClock(std::sync::atomic::AtomicU64);
     impl temporal::Clock for TestClock {
         fn now_ms(&self) -> Result<u64, RecordError> { Ok(self.0.load(std::sync::atomic::Ordering::SeqCst)) }
     }
     impl TestClock {
-        fn set(&self, value:u64) { self.0.store(value,std::sync::atomic::Ordering::SeqCst); }
+        pub(crate) fn set(&self, value:u64) { self.0.store(value,std::sync::atomic::Ordering::SeqCst); }
     }
-    async fn test_clock(p:&RecordPartition) -> (Arc<TestClock>,u64) {
+    pub(crate) async fn test_clock(p:&RecordPartition) -> (Arc<TestClock>,u64) {
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64;
         let clock=Arc::new(TestClock(std::sync::atomic::AtomicU64::new(now)));
         p.inner.lock().await.clock=clock.clone(); (clock,now)

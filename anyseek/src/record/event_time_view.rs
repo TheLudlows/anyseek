@@ -73,6 +73,7 @@ pub(crate) struct Window {
     pub(crate) cut: u64,
     pub(crate) evaluation_time_ms: u64,
     pub(crate) hits: Vec<Hit>,
+    delivery_time: output::ReadTimeFence,
     _memory: MemoryLease,
 }
 
@@ -94,6 +95,8 @@ pub struct EventTimeResult {
     pub evaluation_time_ms: u64,
     /// Exact matches ordered by descending event time, then ascending record ID.
     pub hits: Vec<QueryRecord>,
+    #[serde(skip)]
+    pub(crate) delivery_time: output::ReadTimeFence,
     #[serde(skip_serializing)]
     _memory: MemoryLease,
 }
@@ -115,12 +118,35 @@ struct Selection {
     fields: Option<Vec<String>>,
 }
 
+impl Selection {
+    fn matches_facets(
+        &self,
+        document: Option<&Document>,
+        deadline: Deadline,
+        work: Option<&QueryWork>,
+    ) -> Result<bool, RecordError> {
+        if self.facets.is_empty() {
+            return Ok(true);
+        }
+        let Some(document) = document else {
+            return Ok(false);
+        };
+        crate::metadata_filter::matches_document(document, &self.facets, |cost| match work {
+            Some(work) => work.charge(cost),
+            None if Deadline::now() >= deadline => Err(RecordError::Busy),
+            None => Ok(()),
+        })
+    }
+}
+
 struct View {
     #[cfg(test)]
     root: PathBuf,
     cut: u64,
     evaluation: u64,
     clock: Arc<dyn temporal::Clock>,
+    observed_time: temporal::ObservedTime,
+    certified_floor: u64,
     observed_at: Deadline,
     anchor: String,
     group_revision: u64,
@@ -381,17 +407,7 @@ impl RecordPartition {
                     evaluation_time_ms: view.evaluation,
                     count_total: None,
                     hits,
-                    delivery_time: output::ReadTimeFence {
-                        clock: view.clock.clone(),
-                        deadline,
-                        expires: expiry,
-                        monotonic_expiry: expiry.and_then(|expiry| {
-                            view.observed_at
-                                .checked_add(std::time::Duration::from_millis(
-                                    expiry.saturating_sub(view.evaluation),
-                                ))
-                        }),
-                    },
+                    delivery_time: view.time_fence(deadline, expiry),
                 };
                 Ok::<_, RecordError>((view, output))
             })
@@ -424,6 +440,7 @@ impl RecordPartition {
         Ok(EventTimeResult {
             visible_seq: window.cut,
             evaluation_time_ms: window.evaluation_time_ms,
+            delivery_time: window.delivery_time,
             hits: window
                 .hits
                 .into_iter()
@@ -789,6 +806,8 @@ impl View {
             cut,
             evaluation,
             clock: inner.clock.clone(),
+            observed_time: inner.observed_time.clone(),
+            certified_floor: inner.state.time_watermark_ms,
             observed_at,
             anchor: anchor.selected_owner().to_owned(),
             group_revision: inner.state.group_publication_revision(),
@@ -829,6 +848,22 @@ impl View {
         Ok(())
     }
 
+    fn time_fence(&self, deadline: Deadline, expires: Option<u64>) -> output::ReadTimeFence {
+        output::ReadTimeFence {
+            clock: self.clock.clone(),
+            observed: self.observed_time.clone(),
+            certified_floor: self.certified_floor,
+            deadline,
+            expires,
+            monotonic_expiry: expires.and_then(|expiry| {
+                self.observed_at
+                    .checked_add(std::time::Duration::from_millis(
+                        expiry.saturating_sub(self.evaluation),
+                    ))
+            }),
+        }
+    }
+
     fn read(
         &self,
         window: Range<i64>,
@@ -855,10 +890,7 @@ impl View {
                     &row.temporal,
                     row.ingested_at_ms,
                 )
-                && (selection.facets.is_empty()
-                    || row.document.as_ref().is_some_and(|doc| {
-                        crate::metadata_filter::matches_document(doc, &selection.facets)
-                    }))
+                && selection.matches_facets(row.document.as_ref(), deadline, work)?
             {
                 suffix_hits.push(TailHit { time, row });
             }
@@ -907,7 +939,8 @@ impl View {
                             &row.metadata.temporal,
                             row.metadata.ingested_at_ms,
                         )
-                        && let Some(hit) = output.sealed_hit(id, time, row, selection)?
+                        && let Some(hit) =
+                            output.sealed_hit(id, time, row, selection, deadline, work)?
                     {
                         base_hits.push(hit);
                     }
@@ -931,6 +964,10 @@ impl View {
         Ok(Window {
             cut: self.cut,
             evaluation_time_ms: self.evaluation,
+            delivery_time: self.time_fence(
+                deadline,
+                hits.iter().filter_map(|hit| hit.expires_at_ms).min(),
+            ),
             hits,
             _memory: memory,
         })
@@ -981,6 +1018,8 @@ impl OutputBudget {
         time: i64,
         row: crate::storage::disk_records::Located<'_>,
         selection: &Selection,
+        deadline: Deadline,
+        work: Option<&QueryWork>,
     ) -> Result<Option<Hit>, EventTimeError> {
         let version = row.metadata.version;
         let expiry = row.metadata.temporal.expire_at_ms;
@@ -996,11 +1035,7 @@ impl OutputBudget {
             .filter(|bytes| *bytes <= MAX_BODY_BYTES)
             .ok_or(EventTimeError::Budget("candidate payload budget exhausted"))?;
         let output = state_rows::decode(id, row, |record| {
-            if !selection.facets.is_empty()
-                && !record.document.as_ref().is_some_and(|doc| {
-                    crate::metadata_filter::matches_document(doc, &selection.facets)
-                })
-            {
+            if !selection.matches_facets(record.document.as_ref(), deadline, work)? {
                 return Ok(None);
             }
             let output = selection
