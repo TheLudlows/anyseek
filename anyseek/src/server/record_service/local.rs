@@ -297,10 +297,23 @@ impl LocalEngine {
     pub async fn query_time_vector(
         &self, tenant: &str, collection: &str, request: TimeVectorRequest,
     ) -> Result<TimeVectorResult, LocalError> {
+        self.query_mixed_time(tenant, collection, MixedTimeRequest::Vector(request)).await
+    }
+
+    /// Fuse time and bounded text recall, optionally including an exact vector.
+    pub async fn query_time_text(
+        &self, tenant: &str, collection: &str, request: TimeTextRequest,
+    ) -> Result<TimeVectorResult, LocalError> {
+        self.query_mixed_time(tenant, collection, MixedTimeRequest::Text(request)).await
+    }
+
+    async fn query_mixed_time(
+        &self, tenant: &str, collection: &str, request: MixedTimeRequest,
+    ) -> Result<TimeVectorResult, LocalError> {
         let deadline = tokio::time::Instant::now() + self.service()?.request_timeout;
         tokio::time::timeout_at(deadline, self.run(tenant, collection, Lane::Foreground,
             async move |service, tenant, collection| {
-                let (result, data) = query_time_vector_collection(&service, tenant, collection, request, deadline).await?;
+                let (result, data) = query_mixed_time_collection(&service, tenant, collection, request, deadline).await?;
                 Ok(data.deliver_after_publication(|| result).await??)
             })).await.map_err(|_| LocalError::unavailable("busy"))?
     }

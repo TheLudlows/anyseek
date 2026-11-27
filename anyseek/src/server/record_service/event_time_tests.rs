@@ -82,12 +82,17 @@ fn event_time_vector_openapi_keeps_ordinary_and_mixed_query_shapes() {
     let input = &query["requestBody"]["content"]["application/json"]["schema"]["oneOf"];
     assert_eq!(input[0]["$ref"], "#/components/schemas/SearchRequestObject");
     assert_eq!(input[1]["$ref"], "#/components/schemas/TimeVectorRequest");
+    assert_eq!(input[2]["$ref"], "#/components/schemas/TimeTextRequest");
     let output = &query["responses"]["200"]["content"]["application/json"]["schema"]["oneOf"];
     assert_eq!(
         output[0]["properties"]["diagnostics"]["$ref"],
         "#/components/schemas/QueryDiagnostics"
     );
     assert_eq!(output[1]["$ref"], "#/components/schemas/TimeVectorResult");
+    let channels = &doc["components"]["schemas"]["TimeVectorResult"]["properties"]["hits"]
+        ["items"]["properties"]["channels"];
+    assert_eq!(channels["maxItems"], 3);
+    assert_eq!(channels["items"]["properties"]["channel"]["enum"], json!(["time", "lexical", "vector"]));
     assert_eq!(
         doc["components"]["schemas"]["TimeVectorRequest"]["properties"]["all"]["const"],
         true
@@ -383,7 +388,6 @@ async fn event_time_vector_http_respects_authorization_and_publication() {
         StatusCode::FORBIDDEN
     );
     for (field, value) in [
-        ("query", json!("lexical")),
         ("nprobe", json!(1)),
         ("all", json!(false)),
         ("count", json!(true)),
@@ -422,6 +426,175 @@ async fn event_time_vector_http_respects_authorization_and_publication() {
         (busy.0, busy.1["code"].as_str()),
         (StatusCode::TOO_MANY_REQUESTS, Some("busy"))
     );
+    drop(app);
+    service.shutdown().wait().await.unwrap();
+}
+
+#[tokio::test]
+async fn event_time_text_http_and_sdk_fuse_one_cut_and_reject_excess_work() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("catalog");
+    let service = open(&root).await;
+    let app = router(service.clone());
+    let sdk = local::LocalEngine::from_test_service(service.clone());
+    create_mixed_collection(&app).await;
+    let mut rows = Vec::new();
+    for (id, time, body, vector) in [
+        ("both", 20, "match", Some(json!([1, 0]))),
+        ("time", 21, "other", None),
+        ("lexical", 90, "match", None),
+        ("vector", 91, "other", Some(json!([0, 1]))),
+    ] {
+        let mut row = mixed_row(id, id, None);
+        row["temporal"]["event_time_ms"] = json!(time);
+        row["document"] = json!({"body":body,"private":"hidden","tags":["broad",id]});
+        if let Some(vector) = vector {
+            row["document"]["vector"] = vector;
+        }
+        rows.push(row);
+    }
+    for n in 0..12 {
+        let id = format!("padding-{n}");
+        let mut row = mixed_row(&id, &id, None);
+        row["temporal"]["event_time_ms"] = json!(100);
+        row["document"] = json!({"body":"other","tags":["broad",id]});
+        rows.push(row);
+    }
+    write_mixed(&app, rows).await;
+    assert_eq!(
+        build(&app, master_headers(), "window").await,
+        (StatusCode::OK, json!({"indexed_seq":16}))
+    );
+    let routes = &app;
+    let call = |tenant, request| async move {
+        decode_response(
+            namespace_response(routes, "POST", MIXED_QUERY, tenant, Some(request)).await,
+        )
+        .await
+    };
+    let text = json!({"recall":{"time":{"from_ms":18,"to_ms":22}},"query":"match",
+        "length":4,"fields":["body","private"]});
+    let mut triple = text.clone();
+    triple["query_vector"] = json!([1, 0]);
+    triple["all"] = json!(true);
+    for (request, expected) in [(text.clone(), 3), (triple.clone(), 4)] {
+        let (status, body) = call("tenant", request.clone()).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["visible_seq"], 16);
+        assert!(body["count_total"].is_null());
+        let hits = body["hits"].as_array().unwrap();
+        assert_eq!(hits.len(), expected);
+        assert_eq!(hits[0]["record"]["record_id"], "both");
+        let channels = |id: &str| {
+            hits.iter()
+                .find(|hit| hit["record"]["record_id"] == id)
+                .unwrap()["channels"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|channel| channel["channel"].as_str().unwrap())
+                .collect::<Vec<_>>()
+        };
+        let expected_both = if expected == 3 {
+            vec!["time", "lexical"]
+        } else {
+            vec!["time", "lexical", "vector"]
+        };
+        assert_eq!(channels("both"), expected_both);
+        assert_eq!(channels("time"), ["time"]);
+        assert_eq!(channels("lexical"), ["lexical"]);
+        if expected == 4 {
+            assert_eq!(channels("vector"), ["vector"]);
+        }
+        assert_eq!(hits[0]["record"]["document"], json!({"body":"match"}));
+        let embedded = sdk
+            .query_time_text("tenant", "window", serde_json::from_value(request).unwrap())
+            .await
+            .unwrap();
+        let embedded: Value =
+            serde_json::from_str(&serde_json::to_string(&embedded).unwrap()).unwrap();
+        assert_eq!(embedded["hits"], body["hits"]);
+    }
+    assert_eq!(
+        call("outside", triple.clone()).await.0,
+        StatusCode::FORBIDDEN
+    );
+    assert!(
+        sdk.query_time_text(
+            "outside",
+            "window",
+            serde_json::from_value(triple.clone()).unwrap()
+        )
+        .await
+        .is_err()
+    );
+
+    let mut empty = text.clone();
+    empty["recall"]["time"] = json!({"from_ms":0,"to_ms":1});
+    empty["query"] = json!("unmatched");
+    let (status, body) = call("tenant", empty).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["hits"], json!([]));
+
+    let maximum =
+        json!({"constant":1,"time_weight":1.2e38,"keyword_weight":1.2e38,"vector_weight":1.2e38});
+    let mut finite = text.clone();
+    finite["rrf"] = maximum.clone();
+    assert_eq!(call("tenant", finite).await.0, StatusCode::OK);
+    let mut overflow = triple.clone();
+    overflow["rrf"] = maximum;
+    let mut over_budget = text.clone();
+    over_budget["filter"] = json!([{"StringSet":{"field":"tags","filter":vec!["broad";128]}}]);
+    let mut unsupported = triple;
+    unsupported["query"] = json!("\"match other\"");
+    for (request, message) in [
+        (overflow, "maximum fused score"),
+        (over_budget, "query work budget exhausted"),
+        (unsupported, "single positive analyzed term"),
+    ] {
+        let (status, body) = call("tenant", request.clone()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(
+            body["message"].as_str().unwrap().contains(message),
+            "{body}"
+        );
+        assert!(body.get("hits").is_none());
+        assert!(
+            sdk.query_time_text("tenant", "window", serde_json::from_value(request).unwrap())
+                .await
+                .is_err()
+        );
+    }
+
+    let entry = service
+        .catalog
+        .collection_entry("tenant", "window")
+        .await
+        .unwrap();
+    let partition = root.join(entry.directory());
+    let gate = partition.join(".test-lexical-consumer-pause");
+    std::fs::write(&gate, b"pause").unwrap();
+    let (status, ingested) = namespace_api(
+        &app,
+        "POST",
+        "/api/v1/index/window/ingest",
+        "tenant",
+        Some(json!({"records":[mixed_row("publish", "tail", None)]})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{ingested}");
+    assert_eq!(ingested["results"][0]["receipt"]["seq"], 17);
+    wait_marker(&partition.join(".test-lexical-consumer-started")).await;
+    let busy = call("tenant", text.clone()).await;
+    let embedded = sdk
+        .query_time_text("tenant", "window", serde_json::from_value(text).unwrap())
+        .await;
+    std::fs::remove_file(gate).unwrap();
+    assert_eq!(busy.0, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(busy.1["code"], "busy");
+    assert!(busy.1.get("hits").is_none());
+    assert_eq!(embedded.unwrap_err().code(), "busy");
+    drop(sdk);
     drop(app);
     service.shutdown().wait().await.unwrap();
 }

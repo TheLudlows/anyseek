@@ -38,7 +38,7 @@ pub(super) struct PinnedCandidate {
     candidate: Candidate,
     source: state_values::RecordSource,
 }
-pub(super) struct VectorEvidence {
+pub(super) struct RetrievalEvidence {
     pub id: String,
     pub version: u64,
     pub expiry: Option<u64>,
@@ -65,10 +65,10 @@ impl PinnedCandidate {
         }).transpose()
     }
 
-    pub(super) fn strict_evidence(self, evaluation: u64) -> Result<VectorEvidence, RecordError> {
+    pub(super) fn strict_evidence(self, evaluation: u64) -> Result<RetrievalEvidence, RecordError> {
         let expiry = self.qualified(evaluation)?.ok_or(RecordError::Busy)?
             .temporal().expire_at_ms;
-        Ok(VectorEvidence {
+        Ok(RetrievalEvidence {
             id: self.candidate.identity.id,
             version: self.candidate.identity.version,
             expiry,

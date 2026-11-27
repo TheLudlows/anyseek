@@ -36,7 +36,40 @@ pub(crate) struct TimeVectorQuery {
     pub length: usize,
 }
 
-/// Ranked time and exact-vector hits from one authorized Record cut.
+pub(crate) struct TimeMixedQuery {
+    pub window: TimeRange,
+    pub temporal: Option<TemporalFilter>,
+    pub lexical: Option<String>,
+    pub vector: Option<Embedding>,
+    pub facets: Vec<FacetFilter>,
+    pub fields: Vec<String>,
+    pub offset: usize,
+    pub length: usize,
+    pub rrf: crate::search::TimeRrfOptions,
+}
+
+impl From<TimeVectorQuery> for TimeMixedQuery {
+    fn from(query: TimeVectorQuery) -> Self {
+        Self {
+            window: query.window,
+            temporal: query.temporal,
+            lexical: None,
+            vector: Some(query.vector),
+            facets: query.facets,
+            fields: query.fields,
+            offset: query.offset,
+            length: query.length,
+            rrf: Default::default(),
+        }
+    }
+}
+
+enum RetrievalLane {
+    Lexical(String),
+    Vector(Embedding),
+}
+
+/// Ranked time and retrieval hits from one authorized Record cut.
 #[derive(Serialize)]
 pub struct TimeVectorResult {
     /// Common Record cut.
@@ -248,7 +281,12 @@ fn add_channel(
     rank_basis: &str,
     rank: usize,
     raw_score: Option<f32>,
+    constant: f32,
+    weight: f32,
 ) -> Result<(), RecordError> {
+    if weight == 0.0 {
+        return Ok(());
+    }
     let hit = fused.entry(id).or_insert_with(|| FusedHit {
         version,
         score: 0.0,
@@ -257,7 +295,7 @@ fn add_channel(
     if hit.version != version || hit.channels.iter().any(|prior| prior.channel == channel) {
         return Err(RecordError::Busy);
     }
-    let contribution = rrf_contribution(1.0, crate::search::RrfOptions::default().constant, rank);
+    let contribution = rrf_contribution(weight, constant, rank);
     hit.score += contribution;
     hit.channels.push(ChannelExplanation {
         channel: channel.into(),
@@ -275,36 +313,54 @@ impl RecordPartition {
         request: TimeVectorQuery,
         deadline: Deadline,
     ) -> Result<TimeVectorResult, EventTimeError> {
+        self.query_time_mixed(request.into(), deadline).await
+    }
+
+    pub(crate) async fn query_time_mixed(
+        &self,
+        request: TimeMixedQuery,
+        deadline: Deadline,
+    ) -> Result<TimeVectorResult, EventTimeError> {
         let work = Arc::new(QueryWork::new(
             MIXED_WORK,
             MIXED_RANGES,
             MIXED_READ_BYTES,
             deadline,
         ));
-        self.query_time_vector_with_work(request, deadline, work)
+        self.query_time_mixed_with_work(request, deadline, work)
             .await
     }
 
-    pub(super) async fn query_time_vector_with_work(
+    pub(super) async fn query_time_mixed_with_work(
         &self,
-        request: TimeVectorQuery,
+        request: TimeMixedQuery,
         deadline: Deadline,
         work: Arc<QueryWork>,
     ) -> Result<TimeVectorResult, EventTimeError> {
-        let TimeVectorQuery {
+        let TimeMixedQuery {
             window,
             temporal,
+            lexical,
             vector,
             facets,
             fields,
             offset,
             length,
+            rrf,
         } = request;
+        let lanes = 1 + usize::from(lexical.is_some()) + usize::from(vector.is_some());
+        if lanes == 1 {
+            return Err(
+                RecordError::Rejected("mixed query requires a retrieval channel".into()).into(),
+            );
+        }
+        rrf.validate(lexical.is_some(), vector.is_some())
+            .map_err(RecordError::Rejected)?;
         let limit = offset
             .checked_add(length)
-            .filter(|&window| length > 0 && window <= MAX_RESULTS / 2)
+            .filter(|&window| length > 0 && window <= MAX_RESULTS / lanes)
             .ok_or(EventTimeError::Budget(
-                "mixed query requires a positive window of at most 64",
+                "mixed query requires a positive window and at most 128 total channel candidates",
             ))?;
         let (window, _) = temporal::event_window(TemporalFilter {
             event: Some(window),
@@ -315,31 +371,66 @@ impl RecordPartition {
             .transpose()?
             .unwrap_or_default();
         check_facets(&facets)?;
-        let mut vector_filters = facets.clone();
-        vector_filters.extend(temporal.iter().cloned());
+        let mut retrieval_filters = facets.clone();
+        retrieval_filters.extend(temporal.iter().cloned());
+        let dependencies = if lexical.is_some() {
+            IndexDependencies::LexicalWithVectorMetadata
+        } else {
+            IndexDependencies::VectorMetadata
+        };
         let selection = Selection {
             temporal,
             facets,
             fields: None,
         };
-        let (view, time) = self
+        let (mut view, time) = self
             .capture_and_read(
                 window,
                 limit,
-                IndexDependencies::VectorMetadata,
+                dependencies,
                 deadline,
                 selection,
                 Some(work.clone()),
+                lanes,
             )
             .await?;
-        let (view, vectors) = self
-            .read_vector_candidates(view, vector, vector_filters, limit, deadline, work.clone())
-            .await?;
+        let mut ranks = Vec::new();
+        for (input, channel, weight) in [
+            (
+                lexical.map(RetrievalLane::Lexical),
+                "lexical",
+                rrf.keyword_weight,
+            ),
+            (
+                vector.map(RetrievalLane::Vector),
+                "vector",
+                rrf.vector_weight,
+            ),
+        ] {
+            if let Some(input) = input {
+                let (next, candidates) = self
+                    .read_retrieval_candidates(
+                        view,
+                        input,
+                        retrieval_filters.clone(),
+                        limit,
+                        deadline,
+                        work.clone(),
+                    )
+                    .await?;
+                view = next;
+                ranks.push((candidates, channel, weight));
+            }
+        }
         let expiry = time
             .hits
             .iter()
             .filter_map(|hit| hit.expires_at_ms)
-            .chain(vectors.iter().filter_map(|hit| hit.expiry))
+            .chain(
+                ranks
+                    .iter()
+                    .flat_map(|(hits, _, _)| hits.iter().filter_map(|hit| hit.expiry)),
+            )
             .min();
         let mut fused = BTreeMap::new();
         for (rank, hit) in time.hits.iter().enumerate() {
@@ -351,18 +442,24 @@ impl RecordPartition {
                 "window_time",
                 rank,
                 None,
+                rrf.constant,
+                rrf.time_weight,
             )?;
         }
-        for (rank, hit) in vectors.into_iter().enumerate() {
-            add_channel(
-                &mut fused,
-                hit.id,
-                hit.version,
-                "vector",
-                "score",
-                rank,
-                Some(hit.score),
-            )?;
+        for (hits, channel, weight) in ranks {
+            for (rank, hit) in hits.into_iter().enumerate() {
+                add_channel(
+                    &mut fused,
+                    hit.id,
+                    hit.version,
+                    channel,
+                    "score",
+                    rank,
+                    Some(hit.score),
+                    rrf.constant,
+                    weight,
+                )?;
+            }
         }
         let mut ranked: Vec<_> = fused.into_iter().collect();
         ranked.sort_unstable_by(|(a, left), (b, right)| {
@@ -494,13 +591,14 @@ impl RecordPartition {
                     ..Selection::default()
                 },
                 Some(work.clone()),
+                2,
             )
             .await
             .map_err(EventTimeError::record_error)?;
         let (view, candidates) = self
-            .read_vector_candidates(
+            .read_retrieval_candidates(
                 view,
-                Embedding::F32(vec![1.0, 0.0]),
+                RetrievalLane::Vector(Embedding::F32(vec![1.0, 0.0])),
                 facets,
                 limit,
                 deadline,
@@ -530,7 +628,7 @@ impl RecordPartition {
         &self,
         window: Range<i64>,
         text: String,
-        mut facets: Vec<FacetFilter>,
+        facets: Vec<FacetFilter>,
         deadline: Deadline,
         work: Arc<QueryWork>,
     ) -> Result<(Window, crate::search::ResultObject, (usize, usize)), RecordError> {
@@ -545,46 +643,20 @@ impl RecordPartition {
                     ..Selection::default()
                 },
                 Some(work.clone()),
+                2,
             )
             .await
             .map_err(EventTimeError::record_error)?;
         let after_time = work.remaining_io();
-        let runtime = tokio::runtime::Handle::current();
-        let worker = crate::resources::spawn_blocking(move || {
-            query::blocking_pause(&view.root, ".test-event-time-lexical-worker-pause")?;
-            facets.push(temporal::expiry_filter(view.evaluation));
-            let scored = work.with_reads(|| {
-                runtime.block_on(async {
-                    timeout_at(
-                        deadline,
-                        lexical::runtime_query::search(
-                            &view.retrieval.as_ref().unwrap().index,
-                            text,
-                            None,
-                            SearchMode::Lexical,
-                            QueryType::Union,
-                            0,
-                            1,
-                            ResultType::TopkCount,
-                            vec![],
-                            facets,
-                            vec![],
-                            lexical::Cut {
-                                sequence: view.cut,
-                                evaluation_time_ms: view.evaluation,
-                            },
-                        ),
-                    )
-                    .await
-                    .map_err(|_| RecordError::Busy)?
-                })
-            })?;
-            Ok::<_, RecordError>((view, scored))
-        });
-        let (view, scored) = timeout_at(deadline, worker)
-            .await
-            .map_err(|_| RecordError::Busy)?
-            .map_err(storage)??;
+        let (view, scored) = Self::score_retrieval_lane(
+            view,
+            RetrievalLane::Lexical(text),
+            facets,
+            1,
+            deadline,
+            work,
+        )
+        .await?;
         let window = self
             .deliver_window(view, output, deadline, None)
             .await
@@ -592,55 +664,99 @@ impl RecordPartition {
         Ok((window, scored, after_time))
     }
 
-    async fn read_vector_candidates(
-        &self,
+    async fn score_retrieval_lane(
         view: View,
-        vector: Embedding,
+        lane: RetrievalLane,
         facets: Vec<FacetFilter>,
         limit: usize,
         deadline: Deadline,
         work: Arc<QueryWork>,
-    ) -> Result<(View, Vec<query::VectorEvidence>), RecordError> {
+    ) -> Result<(View, crate::search::ResultObject), RecordError> {
         let runtime = tokio::runtime::Handle::current();
         let scorer_work = work.clone();
         let worker = crate::resources::spawn_blocking(move || {
             #[cfg(test)]
-            query::blocking_pause(&view.root, ".test-event-time-vector-worker-pause")?;
+            query::blocking_pause(
+                &view.root,
+                match &lane {
+                    RetrievalLane::Vector(_) => ".test-event-time-vector-worker-pause",
+                    RetrievalLane::Lexical(_) => ".test-event-time-lexical-worker-pause",
+                },
+            )?;
             let result = scorer_work.clone().with_reads(|| {
                 runtime.block_on(async {
                     let mut filters = facets;
                     filters.push(temporal::expiry_filter(view.evaluation));
-                    timeout_at(
-                        deadline,
-                        crate::search::search_with_counts(
-                            &view.retrieval.as_ref().unwrap().index,
-                            String::new(),
-                            Some(vector),
-                            SearchMode::Vector {
-                                similarity_threshold: None,
-                                ann_mode: crate::vector_similarity::AnnMode::All,
-                            },
-                            0,
-                            limit,
-                            ResultType::TopkCount,
-                            true,
-                            vec![],
-                            filters,
-                            vec![],
-                            &mut Vec::new(),
-                            Some(scorer_work),
-                        ),
-                    )
+                    let index = &view.retrieval.as_ref().unwrap().index;
+                    timeout_at(deadline, async move {
+                        match lane {
+                            RetrievalLane::Lexical(text) => {
+                                lexical::runtime_query::search(
+                                    index,
+                                    text,
+                                    None,
+                                    SearchMode::Lexical,
+                                    QueryType::Union,
+                                    0,
+                                    limit,
+                                    ResultType::TopkCount,
+                                    vec![],
+                                    filters,
+                                    vec![],
+                                    lexical::Cut {
+                                        sequence: view.cut,
+                                        evaluation_time_ms: view.evaluation,
+                                    },
+                                )
+                                .await
+                            }
+                            RetrievalLane::Vector(vector) => {
+                                crate::search::search_with_counts(
+                                    index,
+                                    String::new(),
+                                    Some(vector),
+                                    SearchMode::Vector {
+                                        similarity_threshold: None,
+                                        ann_mode: crate::vector_similarity::AnnMode::All,
+                                    },
+                                    0,
+                                    limit,
+                                    ResultType::TopkCount,
+                                    true,
+                                    vec![],
+                                    filters,
+                                    vec![],
+                                    &mut Vec::new(),
+                                    Some(scorer_work),
+                                )
+                                .await
+                            }
+                        }
+                    })
                     .await
                     .map_err(|_| RecordError::Busy)?
                 })
             });
-            result.map(|result| (view, result.results))
+            result.map(|result| (view, result))
         });
-        let (view, hits) = timeout_at(deadline, worker)
+        timeout_at(deadline, worker)
             .await
             .map_err(|_| RecordError::Busy)?
-            .map_err(storage)??;
+            .map_err(storage)?
+    }
+
+    async fn read_retrieval_candidates(
+        &self,
+        view: View,
+        lane: RetrievalLane,
+        facets: Vec<FacetFilter>,
+        limit: usize,
+        deadline: Deadline,
+        work: Arc<QueryWork>,
+    ) -> Result<(View, Vec<query::RetrievalEvidence>), RecordError> {
+        let (view, scored) =
+            Self::score_retrieval_lane(view, lane, facets, limit, deadline, work.clone()).await?;
+        let hits = scored.results;
         let candidates = timeout_at(deadline, view.retrieval.as_ref().unwrap().candidates(hits))
             .await
             .map_err(|_| RecordError::Busy)??;
@@ -684,7 +800,7 @@ impl RecordPartition {
         selection: Selection,
     ) -> Result<Window, EventTimeError> {
         let (view, output) = self
-            .capture_and_read(window, limit, dependencies, deadline, selection, None)
+            .capture_and_read(window, limit, dependencies, deadline, selection, None, 1)
             .await?;
         self.deliver_window(view, output, deadline, None).await
     }
@@ -697,6 +813,7 @@ impl RecordPartition {
         deadline: Deadline,
         selection: Selection,
         work: Option<Arc<crate::search::QueryWork>>,
+        lanes: usize,
     ) -> Result<(View, Window), EventTimeError> {
         if window.is_empty() || limit == 0 || limit > MAX_RESULTS {
             return Err(
@@ -723,7 +840,7 @@ impl RecordPartition {
                 "mixed event-time queries require local storage without archive",
             ));
         }
-        if work.is_some() && limit > inner.config.max_candidates / 2 {
+        if limit > inner.config.max_candidates / lanes {
             return Err(EventTimeError::Budget(
                 "combined candidate window exceeds the collection budget",
             ));

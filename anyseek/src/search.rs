@@ -282,6 +282,56 @@ impl Default for RrfOptions {
     }
 }
 
+/// Weighted rank fusion for a mixed event-time query.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct TimeRrfOptions {
+    /// Finite positive smoothing constant in the zero-based rank formula.
+    pub constant: f32,
+    /// Finite nonnegative event-time weight.
+    pub time_weight: f32,
+    /// Finite nonnegative lexical weight.
+    pub keyword_weight: f32,
+    /// Finite nonnegative exact-vector weight when a vector is supplied.
+    pub vector_weight: f32,
+}
+
+impl Default for TimeRrfOptions {
+    fn default() -> Self {
+        let rrf = RrfOptions::default();
+        Self {
+            constant: rrf.constant,
+            time_weight: 1.0,
+            keyword_weight: rrf.keyword_weight,
+            vector_weight: rrf.vector_weight,
+        }
+    }
+}
+
+impl TimeRrfOptions {
+    pub(crate) fn validate(self, lexical: bool, vector: bool) -> std::result::Result<(), String> {
+        if !self.constant.is_finite() || self.constant <= 0.0 {
+            return Err("RRF constant must be finite and positive".into());
+        }
+        let weights = [self.time_weight, self.keyword_weight, self.vector_weight];
+        if weights
+            .iter()
+            .any(|weight| !weight.is_finite() || *weight < 0.0)
+        {
+            return Err("RRF weights must be finite and nonnegative".into());
+        }
+        let enabled = [
+            self.time_weight,
+            if lexical { self.keyword_weight } else { 0.0 },
+            if vector { self.vector_weight } else { 0.0 },
+        ];
+        if enabled.iter().all(|&weight| weight == 0.0) {
+            return Err("at least one participating RRF weight must be positive".into());
+        }
+        validate_rrf_maximum(self.constant, &enabled)
+    }
+}
+
 /// Shared zero-based rank arithmetic; callers validate finite weight/constant.
 pub(crate) fn rrf_contribution(weight: f32, constant: f32, rank: usize) -> f32 {
     weight / (constant + rank as f32)

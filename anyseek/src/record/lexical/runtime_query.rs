@@ -29,7 +29,10 @@ pub(crate) async fn search(
 ) -> Result<ResultObject, RecordError> {
     let work = QueryWork::current();
     if let Some(work) = &work {
-        work.charge(0)?;
+        if !matches!(mode, SearchMode::Lexical) || text.len() > 1024 || text.trim().is_empty() {
+            return Err(RecordError::Rejected("bounded lexical recall requires a nonempty query of at most 1024 bytes".into()));
+        }
+        work.charge(text.len())?;
     }
     {
         let root = index.read().await;
@@ -136,6 +139,14 @@ pub(crate) async fn search(
             true,
         )
         .await;
+    if work.is_some()
+        && (!plan.predicate.downcast_ref::<super::query::Compiled>()
+            .is_some_and(super::query::Compiled::supports_bounded_scoring)
+            || plan.scores.len() > 1
+            || plan.scores.iter().any(|group| group.components.len() != 1))
+    {
+        return Err(RecordError::Rejected("bounded lexical recall supports a single positive analyzed term".into()));
+    }
     let indexed_fields = config
         .schema
         .iter()
@@ -252,12 +263,16 @@ pub(crate) async fn search(
     let _filter_workspace = if aligned && !filters.is_empty() {
         let mut bytes = (shards.len() as u64) * (size_of::<FacetReader<'_>>() as u64);
         for shard in &shards {
-            bytes = bytes.checked_add(crate::metadata_filter::workspace_bytes(shard, &filters)
-                .map_err(RecordError::Rejected)?)
+            let facet_bytes = match &work {
+                Some(work) => crate::metadata_filter::metered_workspace_bytes(shard, &filters, work)?,
+                None => crate::metadata_filter::workspace_bytes(shard, &filters).map_err(RecordError::Rejected)?,
+            };
+            bytes = bytes.checked_add(facet_bytes)
                 .ok_or_else(|| storage("metadata predicate memory overflow"))?;
         }
         let workspace = crate::record::build_budget::admit_memory(bytes, scope.as_ref())?;
         for shard in &shards {
+            if let Some(work) = &work { work.charge(0)?; }
             compiled.push(crate::metadata_filter::compile_filters(shard, &filters)
                 .map_err(RecordError::Rejected)?);
         }
@@ -277,7 +292,12 @@ pub(crate) async fn search(
         // then release component guards before native scoring.
         let mut accepted = FilteredMatches::default();
         let mut facets = shards.iter().map(|shard| FacetReader::new(shard)).collect::<Vec<_>>();
+        let checks = work.as_ref().map(|_| compiled.iter().map(|filters|
+            crate::metadata_filter::filter_work(filters)).collect::<Vec<_>>());
         corpus.as_ref().expect("aligned corpus").visit(plan.predicate.as_ref(), |slot, ordinal, _| {
+            if let (Some(work), Some(checks)) = (&work, &checks) {
+                work.charge(checks[slot])?;
+            }
             if !crate::metadata_filter::is_facet_filter(&mut facets[slot], &compiled[slot], ordinal)? {
                 accepted.insert(ordinal * n + slot, scope.as_ref())?;
             }

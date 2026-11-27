@@ -725,6 +725,111 @@ async fn event_time_lexical_statistics_meter_dictionary_and_physical_revisions_s
 }
 
 #[tokio::test]
+async fn event_time_lexical_work_depends_on_postings_and_facet_expansion() {
+    use crate::search::QueryWork;
+
+    let temp = tempfile::tempdir().unwrap();
+    let mut settings = config();
+    settings.max_records = 240;
+    settings.max_operations = 512;
+    settings.schema.push(serde_json::from_value(serde_json::json!({
+        "field":"tags", "field_type":"StringSet", "store":false, "facet":true, "index_lexical":false
+    })).unwrap());
+    let p = RecordPartition::create(&temp.path().join("records"), settings)
+        .await
+        .unwrap();
+    let long_body = format!("rare common {}alpha beta", "alpha zeta ".repeat(125));
+    for n in 0..192 {
+        let id = format!("row-{n}");
+        let mut row = dated(
+            &id,
+            &id,
+            if n == 0 { 25 } else { 36 },
+            ExpectedVersion::Absent,
+        );
+        let doc = row.document.as_mut().unwrap();
+        if n == 0 {
+            doc.insert("body".into(), long_body.clone().into());
+            doc.insert(
+                "tags".into(),
+                serde_json::json!(["tight", "broad", "tag-0"]),
+            );
+        } else {
+            doc.insert("body".into(), "common".into());
+            doc.insert(
+                "tags".into(),
+                serde_json::json!(["broad", format!("tag-{n}")]),
+            );
+        }
+        p.write(row).await.unwrap();
+    }
+    assert_eq!(build(&p).await, 192);
+
+    let filter = |tag: &str| FacetFilter::StringSet {
+        field: "tags".into(),
+        filter: vec![tag.into()],
+    };
+    let score = |text: &str, tag, visits| {
+        let deadline = native_deadline();
+        let work = Arc::new(QueryWork::new(visits, 2048, 16 * 1024 * 1024, deadline));
+        let run = p.probe_event_time_lexical_reads(
+            25..26,
+            text.into(),
+            vec![filter(tag)],
+            deadline,
+            work.clone(),
+        );
+        async move {
+            run.await
+                .map(|(window, scored, _)| (window, scored, visits - work.remaining()))
+        }
+    };
+
+    let full = 32_768;
+    let (window, rare, rare_work) = score("rare", "tight", full).await.unwrap();
+    assert_eq!(hit_ids(&window), ["row-0"]);
+    assert_eq!(rare.result_count_total, 1);
+    for (word, tag) in [("common", "tight"), ("rare", "broad")] {
+        let (window, result, used) = score(word, tag, full).await.unwrap();
+        assert_eq!(hit_ids(&window), ["row-0"]);
+        assert_eq!(result.result_count_total, 1);
+        let ordinary = p
+            .search(word.into(), None, SearchMode::Lexical, vec![filter(tag)], 1)
+            .await
+            .unwrap();
+        assert_eq!(ordinary.hits[0].record.record_id, "row-0");
+        assert_eq!(result.results[0].score, ordinary.hits[0].score);
+        assert!(
+            used > rare_work + 64,
+            "{word}/{tag} took {used} vs {rare_work}"
+        );
+        eprintln!("one visible match with {word}/{tag} cost {used} work units");
+        assert!(
+            matches!(score(word, tag, rare_work).await, Err(RecordError::Rejected(message))
+            if message == "shared query work budget exhausted")
+        );
+    }
+    eprintln!("one visible match with rare/tight cost {rare_work} work units");
+    for text in ["\"alpha beta\"", "+rare +common", "rare -common"] {
+        assert!(
+            matches!(score(text, "tight", full).await, Err(RecordError::Rejected(message))
+            if message == "bounded lexical recall supports a single positive analyzed term")
+        );
+    }
+    let phrase = p
+        .search(
+            "\"alpha beta\"".into(),
+            None,
+            SearchMode::Lexical,
+            vec![filter("tight")],
+            1,
+        )
+        .await
+        .unwrap();
+    assert_eq!(phrase.hits[0].record.record_id, "row-0");
+}
+
+#[tokio::test]
 async fn event_time_lexical_cut_refuses_legacy_identity_fallback() {
     use crate::search::QueryWork;
 
@@ -811,6 +916,67 @@ async fn event_time_lexical_worker_keeps_admission_until_cutoff_is_observed() {
     .await
     .unwrap();
     assert_eq!(work.remaining_io(), after_time);
+}
+
+#[tokio::test]
+async fn event_time_text_three_lane_holds_admission_through_the_last_worker() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("records");
+    let p = RecordPartition::create(&root, config()).await.unwrap();
+    p.write(dated("matching", "matching", 25, ExpectedVersion::Absent))
+        .await
+        .unwrap();
+    build(&p).await;
+    let request = || TimeMixedQuery {
+        window: TimeRange {
+            from_ms: Some(25),
+            to_ms: Some(26),
+        },
+        temporal: None,
+        lexical: Some("alpha".into()),
+        vector: Some(Embedding::F32(vec![1.0, 0.0])),
+        facets: vec![],
+        fields: vec![],
+        offset: 0,
+        length: 1,
+        rrf: Default::default(),
+    };
+
+    let baseline = p.admission.available_permits();
+    let lexical = root.join(".test-event-time-lexical-worker-pause");
+    let vector = root.join(".test-event-time-vector-worker-pause");
+    for gate in [&lexical, &vector] {
+        std::fs::write(gate, b"hold").unwrap();
+    }
+    let owner = p.clone();
+    let deadline = NativeDeadline::now() + std::time::Duration::from_secs(4);
+    let waiting = tokio::spawn(async move { owner.query_time_mixed(request(), deadline).await });
+    let lexical_entered = root.join(".test-event-time-lexical-worker-pause-entered");
+    let vector_entered = root.join(".test-event-time-vector-worker-pause-entered");
+    wait_file(&lexical_entered).await;
+    assert!(!vector_entered.exists());
+    assert_eq!(p.admission.available_permits(), baseline - 1);
+    std::fs::remove_file(lexical).unwrap();
+    wait_file(&vector_entered).await;
+    assert!(matches!(
+        waiting.await.unwrap(),
+        Err(EventTimeError::Record(RecordError::Busy))
+    ));
+    assert_eq!(p.admission.available_permits(), baseline - 1);
+    std::fs::remove_file(vector).unwrap();
+    tokio::time::timeout(DEADLINE, async {
+        while p.admission.available_permits() != baseline {
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let output = p
+        .query_time_mixed(request(), native_deadline())
+        .await
+        .map_err(EventTimeError::record_error)
+        .unwrap();
+    assert_eq!(output.hits[0].channels.len(), 3);
 }
 
 #[tokio::test]
@@ -954,7 +1120,7 @@ async fn event_time_vector_charges_positioned_ranges_and_bytes_through_delivery(
         4096, initial.0, initial.1, deadline,
     ));
     let output = p
-        .query_time_vector_with_work(request(), deadline, work.clone())
+        .query_time_mixed_with_work(request().into(), deadline, work.clone())
         .await
         .map_err(|error| error.record_error())
         .unwrap();
@@ -974,7 +1140,7 @@ async fn event_time_vector_charges_positioned_ranges_and_bytes_through_delivery(
         let deadline = native_deadline();
         let work = Arc::new(crate::search::QueryWork::new(4096, reads, bytes, deadline));
         assert!(
-            matches!(p.query_time_vector_with_work(request(), deadline, work).await,
+            matches!(p.query_time_mixed_with_work(request().into(), deadline, work).await,
             Err(EventTimeError::Record(RecordError::Rejected(message))) if message.contains("positioned read budget"))
         );
     }
