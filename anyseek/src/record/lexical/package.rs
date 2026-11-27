@@ -27,7 +27,7 @@ impl NativePackage {
         records: Vec<(Identity, Document)>,
         limit: u64,
     ) -> Result<Self, RecordError> {
-        if records.len() > config.max_records || records.len() > MAX_DOCUMENTS {
+        if records.len() > MAX_DOCUMENTS {
             return Err(RecordError::Rejected(
                 "native package record budget exceeded".into(),
             ));

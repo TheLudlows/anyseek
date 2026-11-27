@@ -28,7 +28,6 @@ const WRITER_BYTES: usize = 20_000_000;
 // A package stays small; a selected corpus may span multiple packages.
 #[cfg(test)]
 const MAX_DOCUMENTS: usize = 10_000;
-const MAX_POPULATION: usize = super::capacity::MAX_RECORDS;
 const MAX_FIELDS: usize = 64;
 const MAX_TOKENS: usize = 65_536;
 

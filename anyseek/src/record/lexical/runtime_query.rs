@@ -217,7 +217,7 @@ pub(crate) async fn search(
     // Lexical (including browse) has no score threshold. Hybrid/ANN retains
     // its channel counts, threshold evaluation and existing fusion contract.
     if !hybrid && result_type == ResultType::Count {
-        super::scoring::validate_bounds(&plan.scores, &boosts, snapshots[0].fields.len(), MAX_POPULATION)?;
+        super::scoring::validate_bounds(&plan.scores, &boosts, snapshots[0].fields.len())?;
         let count = corpus.count(plan.predicate.as_ref(), |id| locations.contains_key(id))?;
         return Ok(ResultObject {
             original_query: text.clone(),
@@ -234,7 +234,7 @@ pub(crate) async fn search(
     // The same user ordering selects candidates and orders the final result.
     // Hybrid reranks this bounded lexical set by score only before global RRF.
     let limit = if hybrid { rrf.keyword_candidates.unwrap_or(offset + length) }
-        else { offset + length }.min(MAX_POPULATION);
+        else { offset + length }.min(config.max_candidates);
     let mut candidates = std::collections::BinaryHeap::new();
     let lexical_counts = std::cell::RefCell::new(vec![0usize; n]);
     let lex_count = corpus.collect_scores(

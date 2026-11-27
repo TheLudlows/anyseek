@@ -149,7 +149,7 @@ impl LocalEngine {
             .await?)
     }
 
-    /// Create a standard-capacity collection using a stable operation identity.
+    /// Create a collection using a stable operation identity.
     pub async fn create_collection(
         &self,
         tenant: &str,

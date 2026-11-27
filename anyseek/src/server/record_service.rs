@@ -751,6 +751,8 @@ struct CollectionCreate {
     #[schema(pattern = "^[a-z][a-z0-9_-]{0,62}$", min_length = 1, max_length = 63)]
     collection_id: String,
     config: CreateIndexRequest,
+    /// Legacy input retained for retries of existing collection-create requests.
+    /// Both values use the same resource-based admission.
     #[serde(default)]
     #[schema(default = CapacityProfile::default)]
     capacity_profile: CapacityProfile,
@@ -769,7 +771,8 @@ fn record_config(
     if request.index_name.trim().is_empty() {
         return Err(bad("index_name must not be empty"));
     }
-    let population=match capacity {CapacityProfile::Standard10k=>10_000,CapacityProfile::Bounded100k=>100_000};
+    // Preserve serialized config and catalog request identity for old retries.
+    let legacy_count=match capacity {CapacityProfile::Standard10k=>10_000,CapacityProfile::Bounded100k=>100_000};
     let schema = request.schema.into_iter().map(Into::into).collect();
     let inference = request.vector.map(Inference::from).unwrap_or_default();
     Ok(RecordConfig {
@@ -788,9 +791,9 @@ fn record_config(
         },
         schema,
         embedding_space_id,
-        max_records: population,
+        max_records: legacy_count,
         max_record_bytes: 1024 * 1024,
-        max_operations: population,
+        max_operations: legacy_count,
         max_journal_bytes: 256 * 1024 * 1024,
         max_candidates: 10_000,
     })
@@ -800,7 +803,7 @@ fn index_info(entry: &CollectionEntry, stats: anyseek::record::RecordStatistics)
     Ok(json!({"id":entry.collection_id,"name":entry.config.index.name,"schema":schema,
         "text_normalization":entry.config.index.text_normalization,"field_length_normalization":entry.config.index.field_length_normalization,
         "version":crate::VERSION,"statistics":stats,
-        "limits":{"max_records":entry.config.max_records,"max_operations":entry.config.max_operations,"max_journal_bytes":entry.config.max_journal_bytes,"max_candidates":entry.config.max_candidates},
+        "limits":{"max_journal_bytes":entry.config.max_journal_bytes,"max_candidates":entry.config.max_candidates},
         "vector_dimensions":match &entry.config.index.inference { Inference::External {dimensions,..} => Some(*dimensions), _ => None },
         "embedding_space_id":entry.config.embedding_space_id,"analysis":entry.config.analysis_contract()?}))
 }
@@ -1938,17 +1941,6 @@ fn service_layers(app: Router<Arc<Service>>, service: Arc<Service>) -> Router {
 mod tests {
     use super::*;
     #[test]
-    fn capacity_profiles_are_explicit_finite_and_preserve_other_limits() {
-        let request=||serde_json::from_value::<CreateIndexRequest>(json!({"index_name":"capacity","schema":[]})).unwrap();
-        let standard=record_config(request(),None,CapacityProfile::default()).unwrap();
-        let larger=record_config(request(),None,serde_json::from_value(json!("bounded_100k")).unwrap()).unwrap();
-        assert_eq!((standard.max_records,standard.max_operations),(10_000,10_000));
-        assert_eq!((larger.max_records,larger.max_operations),(100_000,100_000));
-        assert_eq!(larger.max_journal_bytes,standard.max_journal_bytes);
-        assert_eq!(larger.max_candidates,standard.max_candidates);
-        assert!(serde_json::from_value::<CapacityProfile>(json!("unlimited")).is_err());
-    }
-    #[test]
     fn admission_errors_do_not_claim_a_definitive_write_rejection() {
         for error in [Error::from(RecordError::Busy), Error::from(CatalogError::Busy)] {
             assert_eq!(error.0, StatusCode::TOO_MANY_REQUESTS);
@@ -2409,18 +2401,27 @@ mod tests {
             "collection_id":id,"config":{"index_name":"schema","schema":[{"field":"body","field_type":"Text"}]}});
         let omitted = request("omitted");
         assert_eq!(tenant_api(&app,"POST","/api/v1/index",key,Some(omitted.clone())).await.0, StatusCode::OK);
-        assert_eq!(service.record("tenant","omitted").await.unwrap().configuration().await.unwrap().max_records, 10_000);
+        let default = service.record("tenant", "omitted").await.unwrap().configuration().await.unwrap();
+        assert_eq!((default.max_records, default.max_operations), (10_000, 10_000));
+        let (status, details) = tenant_api(&app, "GET", "/api/v1/index/omitted", key, None).await;
+        assert_eq!(status, StatusCode::OK);
+        let limits = json!({"max_journal_bytes": 256 * 1024 * 1024, "max_candidates": 10_000});
+        assert_eq!(details["limits"], limits);
         // Drive accepted requests from the generated enum, not another request definition.
         for (i, profile) in schemas["CapacityProfile"]["enum"].as_array().unwrap().iter().enumerate() {
             let id = format!("profile-{i}");
             let mut body = request(&id);
             body["capacity_profile"] = profile.clone();
             body["embedding_space_id"] = Value::Null;
-            assert_eq!(tenant_api(&app,"POST","/api/v1/index",key,Some(body)).await.0, StatusCode::OK);
-            let parsed: CapacityProfile = serde_json::from_value(profile.clone()).unwrap();
-            let config = serde_json::from_value(request(&id)["config"].clone()).unwrap();
-            assert_eq!(service.record("tenant",&id).await.unwrap().configuration().await.unwrap().max_records,
-                record_config(config,None,parsed).unwrap().max_records);
+            let created = tenant_api(&app,"POST","/api/v1/index",key,Some(body.clone())).await;
+            assert_eq!(created.0, StatusCode::OK);
+            assert_eq!(tenant_api(&app,"POST","/api/v1/index",key,Some(body)).await, created);
+            let (status, details) = tenant_api(&app,"GET",&format!("/api/v1/index/{id}"),key,None).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(details["limits"], limits);
+            let config = service.record("tenant", &id).await.unwrap().configuration().await.unwrap();
+            let legacy_count = [10_000, 100_000][i];
+            assert_eq!((config.max_records, config.max_operations), (legacy_count, legacy_count));
         }
         for invalid in [json!("unlimited"), Value::Null] {
             let mut body = request("invalid"); body["capacity_profile"] = invalid;

@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 for (const language of ['zh', 'en'] as const) {
   test(`progress, errors, recovery, capacity and failed refresh (${language})`, async ({page}) => {
     await page.setViewportSize({width:390,height:844});
-    const collection = {id:'docs',name:'docs',schema:[],statistics:{active_records:1,retained_identities:12,retained_operations:20},limits:{max_records:100,max_operations:100}};
+    const collection = {id:'docs',name:'docs',schema:[],statistics:{active_records:1,retained_identities:12,retained_operations:20},limits:{max_journal_bytes:1048576,max_candidates:100}};
     let progress: any = {committed_seq:'COMMIT',lexical_seq:'LEXICAL',vector_seq:'COMMIT',index_error:null,recovery_required:false};
     let failed = false;
     await page.route('**/api/v1/**', route => {
@@ -23,8 +23,8 @@ for (const language of ['zh', 'en'] as const) {
     await expect(runtime).toContainText(language==='zh'?'索引尚未追平':'Indexes are catching up');
     await expect(runtime.getByRole('table',{name:language==='zh'?'索引进度':'Index progress'})).toContainText('9,007,199,254,740,993');
     await dialog.locator('summary').click();
-    const capacity=runtime.getByRole('table',{name:language==='zh'?'容量余量':'Remaining capacity'});
-    await expect(capacity.locator('td')).toHaveText(['88','80',language==='zh'?'未提供':'Not provided']);
+    const capacity=runtime.getByRole('table',{name:language==='zh'?'容量限制':'Capacity limits'});
+    await expect(capacity.locator('td')).toHaveText(['1 MiB (1,048,576 B)','100']);
     const refresh=runtime.getByRole('button',{name:language==='zh'?'刷新运行状态':'Refresh runtime status'});
     progress={...progress,index_error:'cannot publish segment <failed>'};
     await refresh.click();

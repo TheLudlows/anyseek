@@ -1004,8 +1004,6 @@ impl Runtime {
             settings.max_record_bytes = 1024 * 1024;
             settings.max_journal_bytes = 256 * 1024 * 1024;
             settings.schema.retain(|field| field.index_lexical);
-            settings.max_records = 10_000;
-            settings.max_operations = 10_000;
             let native = Runtime::create(&package.join("native"), &settings).unwrap();
             let text = "alpha beta gamma delta epsilon zeta eta theta ".repeat(191);
             let document = serde_json::from_value(serde_json::json!({"body":text})).unwrap();
@@ -1255,7 +1253,7 @@ impl Runtime {
         async fn automatic_tail_rotation_preserves_durable_retry_and_fixed_searcher() {
             let root=tempfile::tempdir().unwrap();
             let path=root.path().join("partition");
-            let mut settings=config(); settings.max_records=512;settings.max_operations=1024;settings.max_candidates=512;
+            let mut settings=config(); settings.max_candidates=512;
             let partition=RecordPartition::create(&path,settings.clone()).await.unwrap();
             for i in 0..128 {
                 partition.write(write(&format!("op-{i}"),&format!("r-{i}"),"alpha",ExpectedVersion::Absent)).await.unwrap();
@@ -1267,7 +1265,7 @@ impl Runtime {
             assert_eq!(crate::record::tests::write_after_maintenance(&partition,request.clone()).await.unwrap_err(),crate::record::RecordError::DurablePending(129));
             {let inner=partition.inner.lock().await;
                 assert!(inner.anchor.is_none(),"derived rotation must leave WAL authority unchanged");
-                assert_eq!(inner.index.components().await.len(),2);}
+                assert_eq!(inner.index.component_count().await,2);}
             assert_eq!(held.identities.len(),128,"captured Searcher remains at its original cut");
             drop(held);partition.finish_service_shutdown().await.unwrap();drop(partition);
             let partition=RecordPartition::open(&path,settings.max_journal_bytes).await.unwrap();

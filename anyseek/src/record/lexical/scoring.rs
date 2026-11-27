@@ -116,10 +116,8 @@ pub(super) fn validate_bounds(
     groups: &[super::query::ScoreGroup],
     boosts: &[f32],
     field_count: usize,
-    limit: usize,
 ) -> Result<(), RecordError> {
     if groups.len() > 100
-        || limit > MAX_POPULATION
         || boosts.len() != field_count
         || boosts.iter().any(|b| !b.is_finite() || *b < 0.0)
     {
@@ -162,7 +160,7 @@ impl ActiveView<'_> {
         limit: usize,
         accepts: impl Fn(&Identity) -> bool,
     ) -> Result<(usize, Vec<Hit>), RecordError> {
-        validate_bounds(groups, boosts, self.snapshot.fields.len(), limit)?;
+        validate_bounds(groups, boosts, self.snapshot.fields.len())?;
         let statistics = QueryStatistics::build(&[self], groups, boosts.len(), normalization)?;
         let mut hits = Vec::new();
         let count = self.score_groups_in(
@@ -301,9 +299,6 @@ impl<'a> CorpusView<'a> {
         cut: Cut,
         identities: &BTreeSet<Identity>,
     ) -> Result<Self, RecordError> {
-        if identities.len() > MAX_POPULATION {
-            return Err(storage("native corpus topology budget exceeded"));
-        }
         if identities.iter().map(|i| &i.id).collect::<BTreeSet<_>>().len() != identities.len() {
             return Err(storage("multiple active revisions across packages"));
         }
@@ -322,8 +317,8 @@ impl<'a> CorpusView<'a> {
         cut: Cut,
         mut matches: impl FnMut(&'a Identity) -> bool,
     ) -> Result<Self, RecordError> {
-        if snapshots.is_empty() || snapshots.len() > 64 {
-            return Err(storage("native corpus topology budget exceeded"));
+        if snapshots.is_empty() {
+            return Err(storage("empty native corpus"));
         }
         let mut found = BTreeMap::new();
         let mut views = Vec::with_capacity(snapshots.len());
@@ -342,9 +337,6 @@ impl<'a> CorpusView<'a> {
                     return Err(storage(if previous == identity {
                         "duplicate selected native revision"
                     } else { "multiple active revisions across packages" }));
-                }
-                if found.len() > MAX_POPULATION {
-                    return Err(storage("native corpus topology budget exceeded"));
                 }
                 live.insert(ordinal);
             }
@@ -382,7 +374,6 @@ impl<'a> CorpusView<'a> {
             let predicate=query.downcast_ref::<super::query::Compiled>().ok_or_else(||storage("visible delta requires shared query compiler"))?;
             for (ordinal,row) in &view.snapshot.overlay {if view.live.contains(ordinal) && predicate.matches(row,&view.snapshot.fields) && accepts(&row.identity){count+=1;}}
         }}
-        // select() bounds the unique active population by MAX_POPULATION.
         Ok(count)
     }
 
@@ -396,7 +387,7 @@ impl<'a> CorpusView<'a> {
         accepts: impl Fn(&Identity) -> bool,
         mut collect: impl FnMut(&Identity, f32),
     ) -> Result<usize, RecordError> {
-        validate_bounds(groups, boosts, self.views[0].snapshot.fields.len(), 0)?;
+        validate_bounds(groups, boosts, self.views[0].snapshot.fields.len())?;
         let references: Vec<_> = self.views.iter().collect();
         let statistics = QueryStatistics::build(&references, groups, boosts.len(), normalization)?;
         let mut count = 0usize;
@@ -420,7 +411,6 @@ impl<'a> CorpusView<'a> {
         limit: usize,
         accepts: impl Fn(&Identity) -> bool,
     ) -> Result<(usize, Vec<Hit>), RecordError> {
-        validate_bounds(groups, boosts, self.views[0].snapshot.fields.len(), limit)?;
         let mut hits = Vec::new();
         let count = self.collect_scores(query, groups, boosts, normalization, accepts,
             |identity, score| hits.push(Hit { identity: identity.clone(), score }))?;

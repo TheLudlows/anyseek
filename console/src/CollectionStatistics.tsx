@@ -1,6 +1,5 @@
 import { getLocale, t } from "./i18n.ts";
 import { apiFieldText } from "./json.ts";
-import { remainingCapacity } from "./runtime-status.ts";
 import type { Collection } from "./types.ts";
 
 type Format = "count" | "bytes" | "time";
@@ -40,25 +39,11 @@ export function CollectionStatistics({ statistics, limits }: Partial<Pick<Collec
       { key: "evaluation_time_ms", label: t("统计时间"), help: t("本次统计视图的评估时间，统一显示为 UTC。"), format: "time" },
     ] },
     { title: t("容量限制"), source: limits, metrics: [
-      { key: "max_records", label: t("记录标识上限"), help: t("允许保留的记录标识数量上限，包含删除墓碑。") },
-      { key: "max_operations", label: t("操作回执上限"), help: t("允许保留的操作结果数量上限。") },
       { key: "max_journal_bytes", label: t("日志容量上限"), help: t("单代日志的字节上限；发布检查点期间可能同时保留两代。"), format: "bytes" },
       { key: "max_candidates", label: t("检索候选上限"), help: t("分区检索候选与最终结果的数量上限。") },
     ] },
   ];
   return <div className="collection-statistics">
-    <section aria-label={t("容量余量")}>
-      <h3>{t("容量余量")}</h3>
-      <table className="data-table statistics-table" aria-label={t("容量余量")}>
-        <thead><tr><th>{t("统计项")}</th><th>{t("数值")}</th></tr></thead>
-        <tbody>
-          <tr><th scope="row">{t("记录标识余量")}<small>{t("标识上限减去保留标识，包含墓碑；删除不一定立即释放。")}</small></th><td>{remainingCapacity(statistics, limits, "retained_identities", "max_records")?.toLocaleString(getLocale()) ?? t("未提供")}</td></tr>
-          <tr><th scope="row">{t("操作回执余量")}<small>{t("回执上限减去保留回执，不等于可新增记录数。")}</small></th><td>{remainingCapacity(statistics, limits, "retained_operations", "max_operations")?.toLocaleString(getLocale()) ?? t("未提供")}</td></tr>
-          <tr><th scope="row">{t("日志容量余量")}<small>{t("当前 API 未提供日志已用字节，不能用检查点大小推算。")}</small></th><td>{t("未提供")}</td></tr>
-        </tbody>
-      </table>
-      <p className="field-help">{t("余量来自本次统计快照，不保证请求准入；进程内存和磁盘余量未提供。")}</p>
-    </section>
     {groups.map(group => <section key={group.title} aria-label={group.title}>
       <h3>{group.title}</h3>
       <table className="data-table statistics-table" aria-label={group.title}>

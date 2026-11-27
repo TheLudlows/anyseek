@@ -1,14 +1,10 @@
 import { apiFieldText } from "./json.ts";
 
-// Use retained JSON tokens for both arithmetic and presentation.
+// Use retained JSON tokens to compare sequence numbers exactly.
 export function counter(source: any, key: string): bigint | null {
   if (source == null || typeof source[key] !== "number") return null;
   const raw = apiFieldText(source, key);
   return /^\d+$/.test(raw) ? BigInt(raw) : null;
-}
-export function remainingCapacity(statistics: any, limits: any, used: string, maximum: string): bigint | null {
-  const count = counter(statistics, used), limit = counter(limits, maximum);
-  return count === null || limit === null ? null : limit > count ? limit - count : 0n;
 }
 export function indexState(progress: any): "unknown" | "recovery" | "error" | "pending" | "caught_up" {
   if (progress?.recovery_required === true) return "recovery";

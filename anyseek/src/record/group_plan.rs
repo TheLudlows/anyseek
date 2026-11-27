@@ -86,12 +86,6 @@ pub(super) fn prepare(state:&State, groups:&Groups, config:&RecordConfig, reques
     let head=groups.heads.get(&request.group_id);
     let version=head.map_or(0,|h|h.version);
     if request.expected_group_version!=version {return Err(RecordError::Conflict("group version precondition failed".into()));}
-    if groups.receipts.len().saturating_add(state.operations.len())>=config.max_operations {
-        return Err(RecordError::Rejected("operation budget exceeded".into()));
-    }
-    if head.is_none() && groups.heads.len()>=config.max_records {
-        return Err(RecordError::Rejected("group identity budget exceeded".into()));
-    }
     let mut members=BTreeSet::new();
     for member in &request.records {
         if member.record_id.is_empty() || !members.insert(member.record_id.clone()) {
@@ -110,7 +104,6 @@ pub(super) fn prepare(state:&State, groups:&Groups, config:&RecordConfig, reques
     let receipt=GroupReceipt {seq:state.seq.checked_add(1).ok_or_else(||storage("sequence exhausted"))?,
         group_id:request.group_id.clone(), group_version:version.checked_add(1).ok_or_else(||storage("group version exhausted"))?,record_count:request.records.len()};
     let mut records=Vec::new();
-    let mut count=state.records.len();
     let mut ttl=state.records.live_ttl_count();
     let writes=request.records.iter().map(|r|(r.record_id.clone(),Some(r.document.clone()),r.temporal.clone()))
         .chain(removed.into_iter().map(|id|(id,None,None)));
@@ -118,11 +111,11 @@ pub(super) fn prepare(state:&State, groups:&Groups, config:&RecordConfig, reques
         let previous=state.records.get(&id);
         let write=RecordWrite{operation_id:request.operation_id.clone(),record_id:id,expected:ExpectedVersion::Any,document,vector_patch:None,temporal};
         let input=mutation::Input{previous,operation:None,seq:state.seq,epoch_watermark:epoch,time_watermark_ms:state.time_watermark_ms,
-            record_count:count,operation_count:state.operations.len(),group_operation_count:groups.receipts.len(),ttl_count:ttl};
+            record_count:state.records.len(),operation_count:state.operations.len(),ttl_count:ttl};
         let _request_plan=mutation::reserve_request(&write)?;
         let mutation::PlannedRecord { record, .. } = mutation::prepare_record(&input,config,write,epoch,now)?;
         ttl=ttl-usize::from(previous.is_some_and(temporal::live_ttl))+usize::from(temporal::live_ttl(&record));
-        count+=usize::from(previous.is_none());records.push(record);
+        records.push(record);
     }
     Ok(Plan::Replace(Decision{request_digest:request_digest(&request)?,operation_id:request.operation_id,members,receipt,records,observed_epoch:epoch,observed_time_ms:now}))
 }
@@ -179,10 +172,9 @@ pub(super) fn apply(state:&mut State,d:&Decision)->Result<(),RecordError>{
     state.seq=d.receipt.seq;state.epoch_watermark=state.epoch_watermark.max(d.observed_epoch);state.time_watermark_ms=d.observed_time_ms;
     Ok(())
 }
-pub(super) fn validate(state:&State,config:&RecordConfig)->Result<(),RecordError>{
+pub(super) fn validate(state:&State)->Result<(),RecordError>{
     let Some(g)=&state.groups else{return Ok(());};
-    if g.publication_seq>state.seq || g.heads.len()>config.max_records || g.owners.len()>config.max_records
-        || g.receipts.len().saturating_add(state.operations.len())>config.max_operations {return Err(storage("group metadata bounds exceeded"));}
+    if g.publication_seq>state.seq {return Err(storage("group publication watermark exceeds state sequence"));}
     let mut ids=BTreeSet::new();let mut seq=0;let mut latest=BTreeMap::new();
     for r in &g.receipts {
         if r.receipt.seq<=seq || r.receipt.seq>state.seq || r.observed_time_ms>state.time_watermark_ms
@@ -234,13 +226,13 @@ mod tests {
         let receipt = p.replace_group(replacement.clone()).await.unwrap();
         p.write(super::super::tests::write("ordinary", "independent", "beta", ExpectedVersion::Absent)).await.unwrap();
         assert_eq!(p.replace_group(replacement).await.unwrap(), receipt);
-        assert!(matches!(p.write(super::super::tests::write("over-quota", "extra", "gamma", ExpectedVersion::Absent)).await, Err(RecordError::Rejected(_))));
+        p.write(super::super::tests::write("extra", "extra", "gamma", ExpectedVersion::Absent)).await.unwrap();
         let inner = p.inner.lock().await;
         assert_eq!(inner.snapshot_bytes, checkpoint_codec::full_length(&config, &inner.state).unwrap());
-        assert_eq!(inner.state.operations.len(), 1);
+        assert_eq!(inner.state.operations.len(), 2);
         assert_eq!(inner.state.groups.as_ref().unwrap().receipts.len(), 1);
         drop(inner);
-        assert_eq!(p.statistics().await.unwrap().retained_operations, 2);
+        assert_eq!(p.statistics().await.unwrap().retained_operations, 3);
         p.finish_service_shutdown().await.unwrap();
     }
     #[test]
@@ -286,7 +278,7 @@ mod tests {
         maintenance::collect_operations(&mut state,epoch+1).unwrap();assert_eq!(state.groups.as_ref().unwrap().receipts.len(),1);
         maintenance::collect_operations(&mut state,epoch+2).unwrap();
         let groups=state.groups.as_ref().unwrap();assert!(groups.receipts.is_empty());assert_eq!(groups.heads["g"].version,1);assert_eq!(groups.owners["a"],"g");assert_eq!(groups.publication_seq,1);
-        validate(&state,&cfg).unwrap();temporal::validate_state(&state).unwrap();
+        validate(&state).unwrap();temporal::validate_state(&state).unwrap();
         assert!(matches!(prepare(&state,groups,&cfg,request,epoch,1),Err(RecordError::OperationExpired)));
     }
 

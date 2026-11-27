@@ -129,18 +129,11 @@ mod tests {
     use super::*;
     use crate::record::tests::{config, write};
 
-    fn settings() -> RecordConfig {
-        let mut config = config();
-        config.max_records = 128;
-        config.max_operations = 256;
-        config
-    }
-
     #[tokio::test]
     async fn independent_rejections_keep_100_64_limits_order_visibility_and_replay() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("records");
-        let p = RecordPartition::create(&root, settings()).await.unwrap();
+        let p = RecordPartition::create(&root, config()).await.unwrap();
         let requests: Vec<_> = (0..100).map(|i| write(&format!("mixed-{i}"), "same", "alpha",
             if i == 0 || i % 2 == 1 { ExpectedVersion::Absent } else { ExpectedVersion::Match(i / 2) })).collect();
         assert!(matches!(p.write_batch(&requests[..65]).await, Err(RecordError::Rejected(_))));
@@ -162,7 +155,7 @@ mod tests {
         assert_eq!(p.search("alpha".into(), None, SearchMode::Lexical, vec![], 10).await.unwrap().hits.len(), 1);
         p.finish_service_shutdown().await.unwrap();
         drop(p);
-        let p = RecordPartition::open(&root, settings().max_journal_bytes).await.unwrap();
+        let p = RecordPartition::open(&root, config().max_journal_bytes).await.unwrap();
         let replay = p.write_independent_batch(requests).await.unwrap();
         for (actual, expected) in replay.iter().zip(&result) {
             match expected {
@@ -178,7 +171,7 @@ mod tests {
     async fn independent_unknown_never_retries_and_recovers_original_receipts() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("records");
-        let p = RecordPartition::create(&root, settings()).await.unwrap();
+        let p = RecordPartition::create(&root, config()).await.unwrap();
         let seed = write("seed", "seed", "alpha", ExpectedVersion::Absent);
         let receipt = p.write(seed.clone()).await.unwrap();
         let mut requests = vec![seed,
@@ -193,7 +186,7 @@ mod tests {
         assert!(p.committed_progress().await.recovery_required);
         p.finish_service_shutdown().await.unwrap();
         drop(p);
-        let p = RecordPartition::open(&root, settings().max_journal_bytes).await.unwrap();
+        let p = RecordPartition::open(&root, config().max_journal_bytes).await.unwrap();
         assert_eq!(p.operation(&requests[1].operation_id).await.unwrap().unwrap().seq, 2);
         for request in &requests[2..] {
             assert!(p.operation(&request.operation_id).await.unwrap().is_none());
@@ -225,7 +218,7 @@ mod tests {
         }
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("records");
-        let p = RecordPartition::create(&root, settings()).await.unwrap();
+        let p = RecordPartition::create(&root, config()).await.unwrap();
         p.write(write("seed", "seed", "alpha", ExpectedVersion::Absent)).await.unwrap();
         let mut delete = write("delete", "seed", "unused", ExpectedVersion::Match(1));
         delete.document = None;
@@ -239,7 +232,7 @@ mod tests {
         assert!(p.get("suffix").await.unwrap().is_some());
         p.finish_service_shutdown().await.unwrap();
         drop(p);
-        let p = RecordPartition::open(&root, settings().max_journal_bytes).await.unwrap();
+        let p = RecordPartition::open(&root, config().max_journal_bytes).await.unwrap();
         assert!(p.operation(&requests[0].operation_id).await.unwrap().is_none());
         assert_eq!(p.operation(&requests[1].operation_id).await.unwrap().unwrap().seq, 2);
         assert_eq!(p.operation(&requests[2].operation_id).await.unwrap().unwrap().seq, 3);
@@ -259,7 +252,7 @@ mod tests {
             return;
         }
         let dir = tempfile::tempdir().unwrap();
-        let p = RecordPartition::create(&dir.path().join("records"), settings()).await.unwrap();
+        let p = RecordPartition::create(&dir.path().join("records"), config()).await.unwrap();
         let seed = write("seed", "seed", "alpha", ExpectedVersion::Absent);
         let receipt = p.write(seed.clone()).await.unwrap();
         let requests = vec![write("large", "large", &"x".repeat(2 * 1024 * 1024), ExpectedVersion::Absent), seed];
@@ -281,7 +274,7 @@ mod tests {
         use std::time::Duration;
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("records");
-        let p = RecordPartition::create(&root, settings()).await.unwrap();
+        let p = RecordPartition::create(&root, config()).await.unwrap();
         let requests: Vec<_> = (0..100).map(|i| write(&format!("cancel-{i}"), "same", "alpha",
             if i == 0 { ExpectedVersion::Absent } else { ExpectedVersion::Match(i) })).collect();
         let last = requests.last().unwrap().operation_id.clone();
@@ -312,7 +305,7 @@ mod tests {
         assert_eq!((progress.committed_seq, progress.lexical_seq, progress.vector_seq), (Some(100), 100, 100));
         p.finish_service_shutdown().await.unwrap();
         drop(p);
-        let p = RecordPartition::open(&root, settings().max_journal_bytes).await.unwrap();
+        let p = RecordPartition::open(&root, config().max_journal_bytes).await.unwrap();
         assert_eq!(p.operation(&last).await.unwrap(), Some(receipt));
         p.finish_service_shutdown().await.unwrap();
     }

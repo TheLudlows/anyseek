@@ -29,7 +29,6 @@ pub(super) struct Input<'a> {
     pub record_count: usize,
     /// Ordinary receipts only, also used for exact operations-array wire sizing.
     pub operation_count: usize,
-    pub group_operation_count: usize,
     pub ttl_count: usize,
 }
 impl<'a> Input<'a> {
@@ -39,7 +38,6 @@ impl<'a> Input<'a> {
             operation: state.operation_lookup.get(&request.operation_id).map(|&i| &state.operations[i]),
             seq: state.seq, epoch_watermark: state.epoch_watermark, time_watermark_ms: state.time_watermark_ms,
             record_count: state.records.len(), operation_count: state.operations.len(),
-            group_operation_count: state.groups.as_ref().map_or(0, |g| g.receipts.len()),
             ttl_count: state.records.live_ttl_count(),
         }
     }
@@ -146,15 +144,8 @@ pub(super) fn prepare_record(input: &Input<'_>, config: &RecordConfig, request: 
     let previous_ttl=input.previous.is_some_and(temporal::live_ttl);
     let next_ttl=next_document.is_some() && temporal.expire_at_ms.is_some();
     let reserve_bytes = input.ttl_count * 8192 + usize::from(next_ttl)*8192 - usize::from(previous_ttl)*8192;
-    if serde_json::to_vec(&request).map_err(storage)?.len() > config.max_record_bytes
-        || input.operation_count
-            .saturating_add(input.group_operation_count)
-            .saturating_add(1)
-            > config.max_operations
-    {
-        return Err(RecordError::Rejected(
-            "record/operation budget exceeded".into(),
-        ));
+    if checkpoint_codec::json_length(&request)? > config.max_record_bytes {
+        return Err(RecordError::Rejected("record operation byte budget exceeded".into()));
     }
     let previous = input.previous;
     let matches = match request.expected {
@@ -164,9 +155,6 @@ pub(super) fn prepare_record(input: &Input<'_>, config: &RecordConfig, request: 
     };
     if !matches {
         return Err(RecordError::Conflict("version precondition failed".into()));
-    }
-    if previous.is_none() && input.record_count >= config.max_records {
-        return Err(RecordError::Rejected("identity budget exceeded".into()));
     }
     if let Some(document) = &next_document {
         crate::vector::validate_vectors_in_schema(
@@ -253,7 +241,7 @@ mod replay_size_tests {
     use super::*;
     #[test]
     fn durable_size_matches_full_wire_with_tombstones_and_digit_boundaries() {
-        let mut config=super::super::tests::config();config.max_records=512;config.max_operations=512;config.max_record_bytes=1024*1024;config.max_journal_bytes=16*1024*1024;
+        let mut config=super::super::tests::config();config.max_record_bytes=1024*1024;config.max_journal_bytes=16*1024*1024;
         let mut state=State::default();let mut before=checkpoint_codec::length(&config,&state).unwrap();
         for i in 0..104 {
             let id=if i<100{format!("id-\"{i}繁")}else{"id-\"0繁".into()};

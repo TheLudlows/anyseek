@@ -73,7 +73,7 @@ impl Reference {
 }
 
 fn reference_shell_charge(segments:usize,blocks:usize)->Result<u64,RecordError> {
-    if segments>capacity::MAX_SEGMENTS || blocks>anchor_image::MAX_DELTAS {return Err(storage("reference metadata count exceeded"));}
+    if blocks>anchor_image::MAX_DELTAS {return Err(storage("reference state block count exceeded"));}
     // IDs are validated as 32-byte hex before selected paths can be used.
     // Include Vec slots, transient reallocations, Arc owner/header and IDs.
     let bytes=segments.checked_add(blocks).and_then(|n|n.checked_mul(256)).and_then(|n|n.checked_add(512))
@@ -125,7 +125,7 @@ impl NativeReuse {
     pub(super) async fn admit(inner:&Inner)->Result<Option<NativeAdmission>,RecordError> {
         let _phase=maintenance::Phase::new("compact_native_admission_locked",inner.state.seq);
         if inner.index.detached_cache || inner.anchor.as_ref().is_none_or(|previous|
-            previous.segments.len()+inner.index.pending_seals.len()>=capacity::segments(&inner.config)) {return Ok(None);}
+            previous.segments.len()+inner.index.pending_seals.len()>=capacity::package_target(inner.state.records.len())) {return Ok(None);}
         inner.index.join_materializers().await?;
         // Refuse known external I/O saturation before preparing or sealing a successor.
         // Actual handoff I/O retains its own admission and failure fencing.
@@ -161,9 +161,7 @@ fn directory(root:&Path,id:&str)->Result<PathBuf,RecordError>{
     Ok(root.join(format!("anchor-{id}")))
 }
 fn budget(config:&RecordConfig)->Result<Budget,RecordError>{
-    // Unlike one State (2 * max_records + max_operations payload positions),
-    // a closure retains whole objects used by old bases/deltas after history GC.
-    // Current operation counts therefore cannot bound its historical payloads.
+    // A closure retains whole objects used by old bases/deltas after history GC.
     // Every interned Document/patch is a JSON object, at least two bytes ({}).
     // The aggregate object byte cap includes headers, so bytes / 2 is a safe
     // count ceiling even across all 64 objects and a pending full-base rewrite.
@@ -206,16 +204,15 @@ impl Frozen {
             .ok_or_else(||storage("package identity estimate overflow"))?;
         let _keys=crate::storage::build_budget::reserve_memory(bytes).map_err(storage)?;
         let mut keys=std::collections::BTreeSet::new();
-        for key in state.records.keys().filter(|key|selected.is_none_or(|s|s.contains(*key))) {
+        for (key, _) in state.records.iter().filter(|(key, record)|
+            record.document.is_some() && selected.is_none_or(|s|s.contains(*key))) {
             keys.insert(key.clone());
             if keys.len()==capacity::PACKAGE_RECORDS {
-                if segments.len()>=capacity::segments(config){return Err(storage("selected package budget exceeded"));}
                 let (segment,active)=Self::prepare(root,config,state,Some(&keys)).await?;
                 segments.push(segment);statistics.push(active);keys.clear();
             }
         }
         if !keys.is_empty() {
-            if segments.len()>=capacity::segments(config){return Err(storage("selected package budget exceeded"));}
             let (segment,active)=Self::prepare(root,config,state,Some(&keys)).await?;
             segments.push(segment);statistics.push(active);
         }
@@ -296,7 +293,7 @@ impl Reference {
         // Inventory values have their own shared owners. Reserve the bounded
         // shell arrays/id copies before preparing or cloning any of them.
         let mut metadata_lease=crate::storage::build_budget::reserve_memory(
-            reference_shell_charge(capacity::segments(config),anchor_image::MAX_DELTAS)?
+            reference_shell_charge(capacity::package_target(state.records.len()),anchor_image::MAX_DELTAS)?
         ).map_err(storage)?;
         let mut state_blocks=Vec::new();
         let mut previous_capture=None;
@@ -386,10 +383,11 @@ impl Reference {
         };
         let mut segments=Vec::new();let mut statistics=Vec::new();
         let pending_count=native.map_or_else(||view.map_or(0,|v|v.pending_seals.len()),|capture|capture.pending.len());
+        let package_target=capacity::package_target(state.records.len());
         let reuse_native=!compact && (native.is_some() || view.is_some_and(|view|!view.detached_cache))
-            && previous.is_some_and(|p|p.segments.len()+pending_count<capacity::segments(config));
+            && previous.is_some_and(|p|p.segments.len()+pending_count<package_target);
         log::info!("record_maintenance phase=native_packages seq={} reuse={} selected={} pending={} package_limit={}",
-            state.seq,reuse_native,previous.map_or(0,|p|p.segments.len()),pending_count,capacity::segments(config));
+            state.seq,reuse_native,previous.map_or(0,|p|p.segments.len()),pending_count,package_target);
         let native_phase=maintenance::Phase::new("native_prepare",state.seq);
         if reuse_native {
             let previous=previous.unwrap();
@@ -501,7 +499,7 @@ impl Reference {
         state_proof::verify(config,live,&replayed)
     }
     fn authenticated_manifest(&self,root:&Path,authority_budget:u64)->Result<(PathBuf,Manifest,PoolReader,crate::storage::build_budget::MemoryLease),RecordError>{
-        if self.segments.is_empty()||self.segments.len()>capacity::MAX_SEGMENTS{return Err(storage("invalid selected segment count"));}
+        if self.segments.is_empty(){return Err(storage("missing selected segment"));}
         let mut ids=std::collections::BTreeSet::new();
         if self.segments.iter().any(|s|!ids.insert(&s.id)){return Err(storage("duplicate selected segment"));}
         let path=directory(root,&self.id)?;
@@ -522,7 +520,6 @@ impl Reference {
             }
         }
         validate_config(manifest.state.config())?;
-        if self.segments.len()>capacity::segments(manifest.state.config()){return Err(storage("configured selected segment count exceeded"));}
         let mut limits=budget(manifest.state.config())?;limits.bytes=limits.bytes.min(authority_budget);
         // PoolReader retains a separate copy of the closure while Manifest is
         // still used. Admit that copy before clone, not under the State lease.
@@ -609,23 +606,26 @@ impl Reference {
     async fn load_parts(root:&Path,config:&RecordConfig,state:&State,payloads:Closure,
         segments:&[segment::Package],statistics:Vec<crate::active::ActiveStatistics>)->Result<VerifiedView,RecordError>{
         if statistics.len()!=segments.len(){return Err(storage("segment statistics closure mismatch"));}
-        let visible=visibility::visible_records(&state.records)?;
-        let expected:std::collections::BTreeSet<_>=state.records.values().filter(|r|visible.get(&r.record_id)==Some(&true)).map(|r|r.record_id.clone()).collect();
-        let n=segments.len();let mut locations=BTreeMap::new();let mut ordinals=Vec::new();let mut live=std::collections::BTreeSet::new();let mut indexes=Vec::new();
-        let address_budget=config.max_records.checked_add(config.max_operations).and_then(|n|n.checked_mul(64)).ok_or_else(||storage("address budget overflow"))?;
+        let expected=state.records.values().filter(|record|record.document.is_some()).count();
+        let n=segments.len();let mut locations=BTreeMap::new();let mut ordinals=Vec::new();let mut indexes=Vec::new();
+        let address_budget=capacity::address_slots()?;
         for (slot,(segment,active)) in segments.iter().zip(statistics).enumerate(){
             for (id,key) in active.keys.iter().enumerate(){
                 let address=id.checked_mul(n).and_then(|v|v.checked_add(slot)).filter(|v|*v<address_budget).ok_or_else(||storage("segment address budget exceeded"))?;
                 if ordinals.len()<=address{ordinals.try_reserve(address+1-ordinals.len()).map_err(storage)?;ordinals.resize(address+1,String::new());}
                 ordinals[address]=key.clone();
                 if active.is_live(id) {
-                    if !live.insert(key.clone()){return Err(storage("duplicate live segment identity"));}
-                    locations.insert(key.clone(),address);
+                    if state.records.get(key).is_none_or(|record|record.document.is_none()) {
+                        return Err(storage("anchor visible identity mismatch"));
+                    }
+                    if locations.insert(key.clone(),address).is_some() {
+                        return Err(storage("duplicate live segment identity"));
+                    }
                 }
             }
             indexes.push(segment.load(root,&config,active).await?);
         }
-        if live!=expected{return Err(storage("anchor visible identity mismatch"));}
+        if locations.len()!=expected{return Err(storage("anchor visible identity mismatch"));}
         let index=indexes[0].clone();
         let mut shards=Vec::new();for component in &indexes{shards.push(component.read().await.segments[0].clone());}
         {let mut root=index.write().await;root.segments=shards;}
@@ -684,7 +684,10 @@ impl Inner {
         let target=root.join(format!("segment-{:032x}",rand::random::<u128>()));
         let (successor,_)=build_at(&root,&target,&self.config,&State::default()).await?;
         successor.read().await.segments[0].lexical.admit_writer().await?;
-        let budget=view::RotationBudget{max_segments:capacity::segments(&self.config).checked_add(1).ok_or_else(||storage("recovery segment limit overflow"))?,max_address_slots:self.config.max_records.checked_add(self.config.max_operations).and_then(|n|n.checked_mul(64)).ok_or_else(||storage("view address budget overflow"))?};
+        let budget=view::RotationBudget{
+            max_segments:capacity::package_target(self.state.records.len())+1,
+            max_address_slots:capacity::address_slots()?,
+        };
         // Fence before the first potentially destructive seal. A successful
         // private handoff restores availability even if certificate preparation
         // later rejects; an uncertain/failed handoff requires authoritative reopen.
@@ -707,8 +710,8 @@ impl Inner {
         // The certificate continues selecting its own immutable packages. The
         // live derived view has an independent finite component allowance plus
         // one successor, so foreground writes can proceed during a merge.
-        let limit=capacity::segments(&self.config)+1;
-        if self.index.components().await.len()>=limit {
+        let limit=capacity::package_target(self.state.records.len())+1;
+        if self.index.component_count().await>=limit {
             return Err(self.request_checkpoint(cache_merge::CAUSE));
         }
         let root=self.journal.root().to_path_buf();
@@ -716,14 +719,14 @@ impl Inner {
         let target=root.join(format!("cache-{:032x}",rand::random::<u128>()));
         let (successor,_)=build_at(&root,&target,&self.config,&State::default()).await?;
         successor.read().await.segments[0].lexical.admit_writer().await?;
-        let budget=view::RotationBudget{max_segments:limit,max_address_slots:cache_merge::address_limit(&self.config)?};
+        let budget=view::RotationBudget{max_segments:limit,max_address_slots:capacity::address_slots()?};
         let fenced=self.output.read().map_err(|_|RecordError::RecoveryRequired)?.fenced;
         self.output.write().map_err(|_|RecordError::RecoveryRequired)?.fenced=true;
         self.healthy=false;
         self.index.seal_cache_into_successor(successor,&mut self.ordinals,&mut self.locations,budget).await?;
         self.healthy=true;
         self.output.write().map_err(|_|RecordError::RecoveryRequired)?.fenced=fenced;
-        if self.index.components().await.len()>=limit && self.maintenance_requested.is_none() {
+        if self.index.component_count().await>=limit && self.maintenance_requested.is_none() {
             self.maintenance_requested=Some(cache_merge::CAUSE);
         }
         Ok(())
@@ -775,7 +778,7 @@ impl Inner {
         // Pre-admit a separate writer before making the current tail immutable.
         // Explicit replacement/compaction remains on the authoritative rebuild path.
         if candidate.is_none() && reuse && !self.index.detached_cache && self.anchor.as_ref().is_some_and(|a|
-            a.segments.len()+self.index.pending_seals.len()+1<capacity::segments(&self.config))
+            a.segments.len()+self.index.pending_seals.len()+1<capacity::package_target(self.state.records.len()))
             && self.index.stable_tail_path(&root).await.is_some()
             && self.index.local_statistics().await?.first().is_some_and(|s|!s.keys.is_empty()) {
             self.stage_stable_tail().await?;
@@ -818,7 +821,11 @@ impl Inner {
             RecordError::Busy=>RecordError::Busy,
             error=>storage(format!("stage=anchor_empty_tail {error}")),
         })?;
-        index.rotate_tail(tail,&mut ordinals,&mut locations,view::RotationBudget{max_segments:64,max_address_slots:self.config.max_records.checked_add(self.config.max_operations).and_then(|n|n.checked_mul(64)).ok_or_else(||storage("view address budget overflow"))?}).await?;
+        let budget=view::RotationBudget{
+            max_segments:index.component_count().await+1,
+            max_address_slots:capacity::address_slots()?,
+        };
+        index.rotate_tail(tail,&mut ordinals,&mut locations,budget).await?;
         #[cfg(test)]
         if root.join(".test-anchor-reject-loaded").exists() {
             return Err(storage("injected loaded candidate rejection before certificate"));
@@ -936,10 +943,10 @@ mod tests {
     }
 
     #[test]
-    fn payload_budget_retains_historical_objects_beyond_live_operation_limit() {
+    fn payload_budget_retains_history_at_exact_byte_boundary() {
         let root=tempfile::tempdir().unwrap();
         let mut settings=config();
-        settings.max_records=1;settings.max_operations=1;settings.max_journal_bytes=128;
+        settings.max_journal_bytes=128;
         let mut closure=Closure::default();
         let mut references=Vec::new();
         for i in 0..4 {
@@ -949,7 +956,6 @@ mod tests {
             references.push((pool.intern(&body).unwrap(),body));
             closure=pool.finish().unwrap();
         }
-        // Four historical bodies exceed the three positions in one small State.
         let reader=PoolReader::open(root.path(),closure.clone(),budget(&settings).unwrap()).unwrap();
         for (reference,body) in references {assert_eq!(reader.read(&reference).unwrap(),body);}
         let exact=closure.objects.values().map(|object|object.bytes).sum();
@@ -1284,14 +1290,14 @@ mod tests {
     #[tokio::test]
     async fn automatic_seal_leaves_checkpoint_unchanged_and_replays_complete_suffix() {
         let root=tempfile::tempdir().unwrap();let path=root.path().join("partition");let mut settings=config();
-        settings.max_records=256;settings.max_operations=512;settings.max_candidates=256;
+        settings.max_candidates=256;
         settings.max_journal_bytes=16*1024*1024;
         let p=RecordPartition::create(&path,settings.clone()).await.unwrap();
         p.write(write("seed","seed","alpha",ExpectedVersion::Absent)).await.unwrap();p.compact_journal().await.unwrap();
         let selected=p.inner.lock().await.anchor.as_ref().unwrap().id.clone();
         let mut receipts=Vec::new();
         for n in 0..129 {let req=write(&format!("op-{n}"),&format!("r-{n}"),"alpha",ExpectedVersion::Absent);let receipt=p.write(req.clone()).await.unwrap();receipts.push((req,receipt));}
-        {let inner=p.inner.lock().await;assert_eq!(inner.anchor.as_ref().unwrap().id,selected,"native rotation must not replace the State checkpoint");assert!(inner.index.detached_cache);assert_eq!(inner.index.components().await.len(),3);}
+        {let inner=p.inner.lock().await;assert_eq!(inner.anchor.as_ref().unwrap().id,selected,"native rotation must not replace the State checkpoint");assert!(inner.index.detached_cache);assert_eq!(inner.index.component_count().await,3);}
         assert_eq!(p.search("alpha".into(),None,SearchMode::Lexical,vec![],200).await.unwrap().count_total,130);
         p.finish_service_shutdown().await.unwrap();drop(p);
         std::fs::write(path.join(".test-recovery-after-derived-seal"),b"fail").unwrap();
@@ -1314,7 +1320,7 @@ mod tests {
         let p=RecordPartition::create(&path,settings.clone()).await.unwrap();
         p.write(write("seed","seed","alpha",ExpectedVersion::Absent)).await.unwrap();p.compact_journal().await.unwrap();
         let original=p.inner.lock().await.anchor.as_ref().unwrap().id.clone();
-        let bound=capacity::segments(&settings);
+        let bound=capacity::package_target(256);
         for n in 0..bound {
             super::super::tests::write_after_maintenance(&p,write(&format!("op-{n}"),&format!("r-{n}"),"alpha",ExpectedVersion::Absent)).await.unwrap();
             let result=p.inner.lock().await.maintain_index_tail().await;
@@ -1498,8 +1504,6 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("partition");
         let mut settings = config();
-        settings.max_records = 128;
-        settings.max_operations = 256;
         settings.max_candidates = 128;
         let mut p = RecordPartition::create(&path, settings.clone()).await.unwrap();
         let mut receipts = Vec::new();

@@ -32,7 +32,7 @@ def seed():
   s.call('POST','/api/v1/tenants',{'operation_id':b.oid(EPOCH,'tenant'),'tenant_id':'bench'},b.MASTER)
   s.call('POST','/api/v1/apikey',{'operation_id':b.oid(EPOCH,'key'),'key_id':'bench','tenant_id':'bench','apikey_base64':b.KEY},b.MASTER)
   config={'index_name':'query-alignment-768','tokenizer':'TantivySimpleV1','schema':[{'field':'body','field_type':'Text','store':True,'index_lexical':True},{'field':'group','field_type':'Int','store':True,'filterable':True,'index_lexical':False},{'field':'serial','field_type':'Int','store':True,'filterable':True,'index_lexical':False},{'field':'vector','field_type':'Json','store':False,'index_lexical':False,'index_vector':True}],'vector':{'dimensions':DIM}}
-  s.call('POST','/api/v1/index',{'operation_id':b.oid(EPOCH,'collection'),'collection_id':C,'config':config,'capacity_profile':'standard_10k'})
+  s.call('POST','/api/v1/index',{'operation_id':b.oid(EPOCH,'collection'),'collection_id':C,'config':config})
   for i in range(0,N,16):write(s,commands(i,16,0))
   b.wait(s,C,N);b.request(s,'PATCH',b.path(C))
   dump(ROOT/'http-seed-signature.json',{m:sig(s,m) for m in ['lexical','hybrid','facet']})

@@ -118,11 +118,13 @@ pub struct RecordConfig {
     pub schema: Vec<SchemaField>,
     /// Optional caller-provided description of the external embedding space.
     pub embedding_space_id: Option<String>,
-    /// Cap on live records plus retained tombstones (no implicit eviction).
+    /// Legacy value retained for serialized config and existing Rust callers.
+    /// Record identities are admitted by resource budgets.
     pub max_records: usize,
     /// Per-command serialized byte budget.
     pub max_record_bytes: usize,
-    /// Cap on retained operation results (backpressure, never silent eviction).
+    /// Legacy value retained for serialized config and existing Rust callers.
+    /// Operation receipts are admitted by resource budgets.
     pub max_operations: usize,
     /// Maximum bytes per journal generation; checkpoint publication may use two.
     pub max_journal_bytes: u64,
@@ -152,10 +154,7 @@ pub fn validate_config(config: &RecordConfig) -> Result<(), RecordError> {
             ));
         }
     }
-    if config.max_records == 0
-        || config.max_records > capacity::MAX_RECORDS
-        || config.max_operations == 0
-        || config.max_candidates == 0
+    if config.max_candidates == 0
         || config.max_record_bytes == 0
         || config.max_record_bytes > 1024 * 1024
     {
@@ -850,11 +849,11 @@ async fn build_at(path:&Path,cache:&Path,config:&RecordConfig,state:&State)->Res
     build_at_selected(path,cache,config,state,None).await
 }
 async fn build_at_selected(path:&Path,cache:&Path,config:&RecordConfig,state:&State,selected:Option<&std::collections::BTreeSet<String>>)->Result<(VectorIndexArc,Vec<String>),RecordError>{
-    let visible = visibility::visible_records(&state.records)?;
-    let records: Vec<_> = state.records.values().filter(|record|
-        visible.get(&record.record_id) == Some(&true)
-        && selected.is_none_or(|keys|keys.contains(&record.record_id))
-        ).collect();
+    let records = match selected {
+        Some(keys) => keys.iter().filter_map(|key| state.records.get(key))
+            .filter(|record| record.document.is_some()).collect(),
+        None => state.records.values().filter(|record| record.document.is_some()).collect(),
+    };
     build_records_at(path,cache,config,state.seq,records).await
 }
 async fn build_records_at(path:&Path,cache:&Path,config:&RecordConfig,sequence:u64,records:Vec<&Record>)->Result<(VectorIndexArc,Vec<String>),RecordError>{
@@ -921,7 +920,7 @@ async fn build_records_at(path:&Path,cache:&Path,config:&RecordConfig,sequence:u
     ))
 }
 fn validate_restored_state(config:&RecordConfig,state:&State)->Result<(),RecordError>{
-        state.records.validate_counts()?;
+    state.records.validate_counts()?;
     validate_config(config)?;
     // Older committed input must meet the same numerical contract before the
     // recovered partition becomes available or a cache rebuild is scheduled.
@@ -934,13 +933,8 @@ fn validate_restored_state(config:&RecordConfig,state:&State)->Result<(),RecordE
             }
         }
     }
-        temporal::validate_state(&state)?;
-        group_plan::validate(state,config)?;
-        if state.records.len() > config.max_records
-            || state.operations.len() > config.max_operations
-        {
-            return Err(storage("recovered state exceeds configured limits"));
-        }
+    temporal::validate_state(state)?;
+    group_plan::validate(state)?;
     Ok(())
 }
 fn restore_operation_lookup(state:&mut State)->Result<(),RecordError>{
@@ -1408,8 +1402,10 @@ impl RecordPartition {
         let snapshot_bytes = checkpoint_codec::length(&config, &state)?;
         history::validate_state(&state)?;
         log::info!("record_recovery stage=validated seq={} elapsed_ms={}",state.seq,recovery_started.elapsed().as_millis());
+        let rebuild_in_packages = prepared.is_none() && state.records.len() > capacity::PACKAGE_RECORDS;
         let (mut index,mut ordinals,mut locations)=match prepared {
             Some((index,ordinals,locations))=>(view::RetrievalView::single(index),ordinals,locations),
+            None if rebuild_in_packages => cache_merge::rebuild_recovery_view(path, &config, &state).await?,
             None=>{let (index,ordinals)=build(path,&config,&state).await?;
                 let locations=ordinals.iter().enumerate().map(|(i,key)|(key.clone(),i)).collect();
                 (index,ordinals,locations)},
@@ -1417,9 +1413,15 @@ impl RecordPartition {
         log::info!("record_recovery stage=index_built seq={} elapsed_ms={}",state.seq,recovery_started.elapsed().as_millis());
         if let Some(reference)=selected.as_ref(){
             reference.reclaim_unselected_segments(path)?;
+        }
+        if selected.is_some() || rebuild_in_packages {
             let target=path.join(format!("segment-{:032x}",rand::random::<u128>()));
             let (tail,_)=build_at(path,&target,&config,&State::default()).await?;
-            index.rotate_tail(tail,&mut ordinals,&mut locations,view::RotationBudget{max_segments:64,max_address_slots:config.max_records.checked_add(config.max_operations).and_then(|n|n.checked_mul(64)).ok_or_else(||storage("view address budget overflow"))?}).await?;
+            let budget=view::RotationBudget{
+                max_segments:index.component_count().await+1,
+                max_address_slots:capacity::address_slots()?,
+            };
+            index.rotate_tail(tail,&mut ordinals,&mut locations,budget).await?;
         }
         let output = Arc::new(std::sync::RwLock::new(output::OutputState {
             revision: 0, fenced: false,
@@ -2383,7 +2385,7 @@ mod tests {
     }
 
     #[test]
-    fn record_planning_replays_before_capacity_and_validates_original_vectors() {
+    fn record_planning_preserves_operation_replay_and_validates_original_vectors() {
         let mut config = config();
         config.max_operations = 1;
         let mut state = State::default();
@@ -2409,7 +2411,7 @@ mod tests {
             changed, current_epoch()), Err(RecordError::Conflict(_))));
         assert!(matches!(mutation::prepare(&state, &config, snapshot_bytes,
             write("new", "other", "another", ExpectedVersion::Absent), current_epoch()),
-            Err(RecordError::Rejected(_))));
+            Ok(mutation::PreparedWrite::Append { .. })));
     }
 
     #[tokio::test]
@@ -3160,7 +3162,6 @@ mod tests {
     async fn record_incremental_crosses_physical_block_with_retired_history() {
         let location = path();
         let mut settings = config();
-        settings.max_operations = 100_000;
         settings.max_journal_bytes = 128 * 1024 * 1024;
         settings.schema.push(serde_json::from_value(serde_json::json!({"field":"region", "field_type":"String", "store":false, "index_lexical":false, "facet":true})).unwrap());
         let partition = RecordPartition::create(&location, settings).await.unwrap();
@@ -3789,14 +3790,14 @@ mod tests {
     #[tokio::test]
     async fn record_rejections_leave_complete_view_usable() {
         let path = path();
-        let mut config = config();
-        config.max_operations = 1;
+        let config = config();
+        let oversized = "oversized ".repeat(config.max_record_bytes);
         let partition = RecordPartition::create(&path, config).await.unwrap();
         let first = write("a", "a", "alpha", ExpectedVersion::Absent);
         let receipt = partition.write(first.clone()).await.unwrap();
         assert!(matches!(
             partition
-                .write(write("b", "b", "alpha", ExpectedVersion::Absent))
+                .write(write("b", "b", &oversized, ExpectedVersion::Absent))
                 .await,
             Err(RecordError::Rejected(_))
         ));

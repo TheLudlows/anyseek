@@ -26,10 +26,10 @@ The derived full-text index uses Tantivy and WAL-backed queryable deltas. Backgr
 
 - [Service guide](../anyseek/src/server/README.en.md) covers startup, authentication, HTTP examples, queries, backup, and restoration.
 - [Console guide](../console/README.en.md) covers tenant connections, import, embedding services, search, and deployment.
-- [Resource and acceptance boundaries](../anyseek/src/server/README.en.md#current-resource-and-acceptance-boundaries) covers capacity profiles, requests and responses, concurrency, bytes, and I/O budgets.
+- [Resource and acceptance boundaries](../anyseek/src/server/README.en.md#current-resource-and-acceptance-boundaries) covers requests and responses, concurrency, bytes, and I/O budgets.
 - [Roadmap and acceptance evidence](roadmap.en.md) covers pending work, measurement scope, and unverified environments.
 
-The default limits are 10,000 each for identities (including tombstones) and retained operations. The bounded 100,000 profile can be selected explicitly. The candidate cap remains 10,000. The complete logical State is resident in memory. Unlimited writes, stable disk use, and a hard cap on whole-process RSS are beyond the guarantee. Receipts become eligible for reclamation after at least two days, subject to the safe cut and protection conditions.
+Collections admit writes according to resource budgets. The query candidate cap is 10,000. The complete logical State is resident in memory. Unlimited writes, stable disk use, and a hard cap on whole-process RSS are beyond the guarantee. Receipts become eligible for reclamation after at least two days, subject to the safe cut and protection conditions.
 
 Each collection has one partition. Cross-collection transactions, arbitrary historical reads, SQL/JOIN, a complete graph language, and distributed HA are unavailable. Upstream applications handle sources, relationships, parsing and chunking, Embedding, and Reflect. Saving URLs neither hosts nor backs up external files.
 

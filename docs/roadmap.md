@@ -144,7 +144,7 @@ W5 对照：Windows/default debug、local 新库、相同请求与临时数据�
 | 查询并发发布 | [发布等待与尾延迟](../benchmarks/query-503/README.zh-CN.md)、[期限复核](../benchmarks/query-503/REVIEW.zh-CN.md) | #199 已合入发布交接等待与原请求期限保护；报告按版本、负载模式区分，服务响应头后超时可能表现为传输错误 |
 | 原生目录 I/O / #203 | [目录隔离实验](../benchmarks/native-io/README.zh-CN.md) | 固定前后版本、真实 atomic write/sync 的诊断负载；支持消除无关目录间的 mutex 等待，不证明端到端吞吐、Busy 或 P99 改善。Windows、release 与代表性持久设备仍需独立验收 |
 | 向量 Segment 所有权 | [前后对照](../benchmarks/vector-segments/README.md) | #111 的结构整理与行为证据，不宣称性能收益 |
-| 容量及异步对比工具 | [容量探针](../benchmarks/capacity/README.zh-CN.md)、[异步协议](../benchmarks/capacity/ASYNC-PROTOCOL.zh-CN.md) | 有限负载与固定语料；不是 100k 容量或全库相关性承诺 |
+| 容量及异步对比工具 | [容量探针](../benchmarks/capacity/README.zh-CN.md)、[异步协议](../benchmarks/capacity/ASYNC-PROTOCOL.zh-CN.md) | 证据范围限于固定语料和所测负载 |
 | 文件库存 / #183 | [#184](https://github.com/TheLudlows/anyseek/pull/184)、[存储协议](storage.md#本地-segment-与共同视图) | 私有构建先有界合并、引用感知 GC 再收集库存，保留 1,024 文件上限。历史 4,000 条约 8 KiB 正文的 8 项回归及原故障库续写到 5,000 条不算当前提交重测，也不等于完整容量或真实 S3 验收 |
 
 每份报告以自己的源码 SHA、二进制指纹、语料和环境为准，不汇总不同版本冒充当前性能。历史阶段计划、累计用例数和合入流水账通过 Git 历史、PR 与 CI 查阅。本地命令、真实 S3 与[完整矩阵](development.md#完整验收)统一见[开发与验证](development.md)。
@@ -153,7 +153,7 @@ W5 对照：Windows/default debug、local 新库、相同请求与临时数据�
 
 ## 容量与架构边界
 
-完整逻辑 State 仍驻内存；100,000 档是准入上界，不是任意数据形态的容量承诺。有限准入和显式缓冲预算不是全进程 RSS 或全磁盘硬上限。默认服务共用 SQLite authority 及其校验对象缓存；多 authority、物化索引和独立备份仍需整体评估。
+完整逻辑 State 仍驻内存，集合可承载的数据量受内存、检查点和日志字节等预算约束。有限准入和显式缓冲预算不是全进程 RSS 或全磁盘硬上限。默认服务共用 SQLite authority 及其校验对象缓存；多 authority、物化索引和独立备份仍需整体评估。
 
 回执默认最早两日后具备回收资格，另受重试窗口、认证 history floor、epoch、读者与备份保护约束，不是固定清理期限。不能通过删除窗口内回执解除容量限制。S3 模式必须同时保留 metadata.sqlite、SQLite WAL 与 owner 锁文件，不能只凭 bucket 重建权威；SQLite 首版不提供跨主机 HA 或权威卷丢失零 RPO。
 
