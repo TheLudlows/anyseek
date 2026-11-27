@@ -16,6 +16,11 @@ impl<T: std::fmt::Debug> std::fmt::Debug for ValueOwner<T> {
 impl<T> Clone for Shared<T> {
     fn clone(&self) -> Self { Self(self.0.clone()) }
 }
+impl<T> Shared<T> {
+    pub(super) fn ptr_eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
 impl<T> std::ops::Deref for Shared<T> {
     type Target = T;
     fn deref(&self) -> &T { &self.0.value }
@@ -59,7 +64,7 @@ impl<T: Serialize> Shared<T> {
         let lease=Self::take_parts(parts,bytes)?;Ok(Self(Arc::new(ValueOwner{value:value.clone(),_lease:lease})))
     }
     pub(super) fn same_value(&self, other: &Self) -> Result<bool,RecordError> where T:ProofValue {
-        Ok(Arc::ptr_eq(&self.0,&other.0) || (self.charged_bytes()==other.charged_bytes()
+        Ok(self.ptr_eq(other) || (self.charged_bytes()==other.charged_bytes()
             && checkpoint_codec::json_digest(&**self)?==checkpoint_codec::json_digest(&**other)?))
     }
     pub(super) fn charged_bytes(&self) -> u64 { self.0._lease.bytes() }

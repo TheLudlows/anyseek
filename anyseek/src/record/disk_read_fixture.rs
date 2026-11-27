@@ -2,7 +2,7 @@
 //! checkpoint. Live authority never selects this fixture.
 use super::*;
 use crate::storage::{
-    build_budget::{File, reserve_memory},
+    build_budget::File,
     disk_records::{Checkpoint, CommittedChange, Limits, Root, View, primary, rows},
     segment,
 };
@@ -44,47 +44,15 @@ impl Pinned {
         Ok(())
     }
 
-    pub(super) fn read(
-        &self,
-        id: &str,
-        candidate: Option<(u64, [u8; 32])>,
-    ) -> Result<Option<Record>, RecordError> {
-        let Some(row) = self.view.get(id, self.evaluation).map_err(storage)? else {
+    pub(super) fn read(&self, id: &str) -> Result<Option<Record>, RecordError> {
+        let Some(row) = self
+            .view
+            .get(id, self.evaluation)
+            .map_err(state_rows::read_error)?
+        else {
             return Ok(None);
         };
-        if candidate.is_some_and(|(version, fingerprint)| {
-            version != row.metadata.version || Some(fingerprint) != row.metadata.fingerprint
-        }) {
-            return Ok(None);
-        }
-        row.with_body(|bytes| {
-            let size = (bytes.len() as u64)
-                .checked_mul(32)
-                .ok_or(RecordError::Busy)?;
-            let _decode = reserve_memory(size).map_err(memory_error)?;
-            let document = serde_json::from_slice(bytes).map_err(storage)?;
-            let current = crate::active::fingerprint(&temporal::indexed(
-                &document,
-                &row.metadata.temporal,
-                row.metadata.ingested_at_ms,
-            ))
-            .map_err(storage)?;
-            if Some(current) != row.metadata.fingerprint {
-                return Err(storage(
-                    "disk row fingerprint differs from original payload",
-                ));
-            }
-            Ok(Record {
-                record_id: id.to_owned(),
-                version: row.metadata.version,
-                document: Some(document),
-                temporal: row.metadata.temporal.clone(),
-                ingested_at_ms: row.metadata.ingested_at_ms,
-                expired_at_ms: row.metadata.expired_at_ms,
-            })
-        })
-        .map_err(storage)?
-        .transpose()
+        state_rows::decode(id, row, |record| Ok(Some(record)))
     }
 }
 
@@ -155,19 +123,22 @@ async fn install(
     let mut segment_rows = rows::SegmentWriter::create(path, 1).unwrap();
     let mut writer = segment::Writer::create(&payload, 1024 * 1024, logical.records.len()).unwrap();
     let mut prepared = Vec::new();
-    logical.records.scan(None, |id, row| {
-        let record = row.load(id)?;
-        let doc = record.document.as_ref().unwrap();
-        let fingerprint = crate::active::fingerprint(&temporal::indexed(
-            doc,
-            &record.temporal,
-            record.ingested_at_ms,
-        ))
+    logical
+        .records
+        .scan(None, |id, row| {
+            let record = row.load(id)?;
+            let doc = record.document.as_ref().unwrap();
+            let fingerprint = crate::active::fingerprint(&temporal::indexed(
+                doc,
+                &record.temporal,
+                record.ingested_at_ms,
+            ))
+            .unwrap();
+            let position = writer.intern(&serde_json::to_vec(doc).unwrap()).unwrap();
+            prepared.push((id.to_string(), record, fingerprint, position));
+            Ok(true)
+        })
         .unwrap();
-        let position = writer.intern(&serde_json::to_vec(doc).unwrap()).unwrap();
-        prepared.push((id.to_string(), record, fingerprint, position));
-        Ok(true)
-    }).unwrap();
     let sealed = writer.finish().unwrap();
     for (id, record, fingerprint, position) in prepared {
         let row = segment_rows
@@ -228,78 +199,6 @@ fn search_request() -> RecordQuery {
         filters: vec![],
         sort: vec![],
     }
-}
-
-#[tokio::test]
-async fn get_and_search_use_selected_disk_body_and_fail_closed_on_corruption() {
-    use super::tests::{config, write};
-    use std::io::{Seek, Write};
-    let tmp = tempfile::tempdir().unwrap();
-    let partition = RecordPartition::create(&tmp.path().join("live"), config())
-        .await
-        .unwrap();
-    partition
-        .write(write("a", "a", "alpha disk text", ExpectedVersion::Absent))
-        .await
-        .unwrap();
-    let dir = tmp.path().join("disk");
-    std::fs::create_dir(&dir).unwrap();
-    let payload = install(&partition, &dir, 8192).await;
-
-    let get = partition.get("a").await.unwrap().unwrap();
-    let search = partition.query(search_request()).await.unwrap();
-    assert_eq!(search.hits.len(), 1);
-    assert_eq!(get.record_id, "a");
-    assert_eq!(search.hits[0].record.document, get.document);
-    assert_eq!(get.document.unwrap()["body"], "alpha disk text");
-
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .open(payload)
-        .unwrap();
-    file.seek(std::io::SeekFrom::Start(16)).unwrap();
-    file.write_all(b"X").unwrap();
-    file.sync_all().unwrap();
-    drop(file);
-    // The in-memory body is still present, so these failures demonstrate
-    // that the tested read path does not fall back to it.
-    assert!(partition.get("a").await.is_err());
-    assert!(partition.query(search_request()).await.is_err());
-    partition.finish_service_shutdown().await.unwrap();
-}
-
-#[tokio::test]
-async fn search_rejects_publication_after_disk_readback() {
-    use super::tests::{config, write};
-    let tmp = tempfile::tempdir().unwrap();
-    let root = tmp.path().join("live");
-    let partition = RecordPartition::create(&root, config()).await.unwrap();
-    partition
-        .write(write("a", "a", "alpha old", ExpectedVersion::Absent))
-        .await
-        .unwrap();
-    let dir = tmp.path().join("disk");
-    std::fs::create_dir(&dir).unwrap();
-    install(&partition, &dir, 8192).await;
-    let pause = root.join(".test-disk-readback-pause");
-    std::fs::write(&pause, b"pause").unwrap();
-    let reader = partition.clone();
-    let query = tokio::spawn(async move { reader.query(search_request()).await });
-    tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        while !root.join(".test-disk-readback-pause-entered").exists() {
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-        }
-    })
-    .await
-    .unwrap();
-    partition
-        .write(write("b", "a", "alpha new", ExpectedVersion::Match(1)))
-        .await
-        .unwrap();
-    std::fs::remove_file(pause).unwrap();
-    assert!(matches!(query.await.unwrap(), Err(RecordError::Busy)));
-    assert!(matches!(partition.get("a").await, Err(RecordError::Busy)));
-    partition.finish_service_shutdown().await.unwrap();
 }
 
 #[tokio::test]

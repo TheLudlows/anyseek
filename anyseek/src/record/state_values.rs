@@ -363,6 +363,40 @@ pub(super) enum CurrentRow<'a> {
     Recent(&'a Shared<Record>),
     Sealed(crate::storage::disk_records::Located<'a>),
 }
+
+/// An owned read of one key from the published directory or recent suffix.
+/// Capturing and comparing the source never touches the filesystem.
+pub(super) enum RecordSource {
+    Recent(Shared<Record>),
+    Sealed(Arc<state_rows::Base>),
+}
+impl RecordSource {
+    pub(super) fn find(&self, id: &str) -> Result<Option<CurrentRow<'_>>, RecordError> {
+        match self {
+            Self::Recent(row) => Ok(Some(CurrentRow::Recent(row))),
+            Self::Sealed(base) => base
+                .checkpoint
+                .find_sealed(id)
+                .map(|row| row.map(CurrentRow::Sealed))
+                .map_err(state_rows::read_error),
+        }
+    }
+    pub(super) fn still_selected(&self, records: &Records, id: &str) -> bool {
+        match self {
+            Self::Recent(row) => records
+                .values
+                .get(id)
+                .is_some_and(|selected| row.ptr_eq(selected)),
+            Self::Sealed(base) => {
+                !records.values.contains_key(id)
+                    && records
+                        .base
+                        .as_ref()
+                        .is_some_and(|selected| Arc::ptr_eq(base, selected))
+            }
+        }
+    }
+}
 impl CurrentRow<'_> {
     pub(super) fn version(&self) -> u64 {
         match self {
@@ -505,6 +539,12 @@ impl Records {
             .as_ref()
             .filter(|_| !self.values.contains_key(id))
             .cloned()
+    }
+    pub(super) fn source(&self, id: &str) -> Option<RecordSource> {
+        match self.values.get(id) {
+            Some(row) => Some(RecordSource::Recent(row.clone())),
+            None => self.base.clone().map(RecordSource::Sealed),
+        }
     }
 
     /// Visit the effective ordered table one row at a time while sharing its

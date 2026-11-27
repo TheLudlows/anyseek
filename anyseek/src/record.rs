@@ -1595,7 +1595,7 @@ impl RecordPartition {
             drop(inner);
             let id = id.to_owned();
             let (pin, row) = crate::resources::spawn_blocking(move || {
-                let row = pin.read(&id, None)?;
+                let row = pin.read(&id)?;
                 Ok::<_, RecordError>((pin, row))
             }).await.map_err(storage)??;
             let mut inner = self.inner.lock().await;

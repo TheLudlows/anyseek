@@ -12,7 +12,7 @@
 
 `record/anchor.rs` 认证不可变 anchor、Segment 和 payload 闭包。完整原始 Document（含输入向量）保存在规范 payload pool；记录与操作回执通过引用共享。派生 Segment 不再存一份完整搜索正文，量化向量不能替代原始输入。全文使用锁定的 Tantivy 0.27.0 原生包，向量和元数据使用独立组件。数据访问统一使用 RecordPartition。当前持久化格式为 RecordCheckpointV19、完整和增量 state descriptor 10/7（包含分组状态时为 11/9）、私有向量和元数据 descriptor 3、anchor manifest 9、检索 package manifest 3。
 
-`record/view.rs` 在 partition guard 下捕获冻结段与可变 tail 的派生拓扑，在 guard 外评分，最终回到当前权威状态重验版本、删除及 TTL。全文按选中的活动身份构建跨段 N/df/字段长度上下文，每个通道先形成全局排名再融合。异步消费者可处于不同进度，不能将权威 visible_seq 当作完整索引水位，也不能承诺查询、回表及返回统计来自同一不可变业务快照；最终重验可能缩短结果页。
+`record/view.rs` 在 partition guard 下捕获冻结段与可变 tail 的派生拓扑。评分后，查询只固定入选候选的记录来源，在 guard 外定位封存行、读取正文并复制输出字段。交付前复核发布健康、组修订号、当前身份和 TTL。全文按选中的活动身份构建跨段 N/df/字段长度上下文，每个通道先形成全局排名再融合。异步消费者可处于不同进度，不能将权威 visible_seq 当作完整索引水位，也不能承诺查询、回表及返回统计来自同一不可变业务快照；最终重验可能缩短结果页。
 
 认证 checkpoint 可复用冻结段；compaction 重建完整等价闭包。可变 tail 按字节和 128 次原生更新额度准入。全文可查增量在原生物化完成前参与查询，工作区在 WAL 前预留；其可见发布、物化交接和派生缓存封存/轮换都不推进或替换 WAL 权威，恢复依据完整已提交 suffix。尾段和 owner 保护详见[架构](architecture.md#wal-支撑的可查全文尾段)。权威 checkpoint 先完成构建、校验及同步，再发布选择证书并安装视图；发布后应用失败保持 fenced，退休失败不回滚已提交状态。
 

@@ -1787,6 +1787,10 @@ mod tests {
             file.sync_all().unwrap();
         }
         assert!(matches!(restored.get("b").await, Err(RecordError::Storage(_))));
+        assert!(matches!(
+            restored.search("alpha".into(), None, SearchMode::Lexical, vec![], 10).await,
+            Err(RecordError::Storage(_))
+        ));
         restored.finish_service_shutdown().await.unwrap();
         drop(restored);
         drop(reference);

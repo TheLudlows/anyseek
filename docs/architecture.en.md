@@ -51,9 +51,9 @@ Deltas from the asynchronous consumer can be queried before native materializati
 
 ### Query views and locks
 
-Under a short Record guard, queries capture derived topology and evaluation_time. They score outside the guard and revalidate current Record versions, fingerprints, deletion, and TTL. Component ordinal is an address only. Consumer progress can differ. Ordinary queries do not present one immutable business snapshot across lanes, record reads, and statistics. Updates or expiry can shorten pages.
+Under a short Record guard, queries capture derived topology and evaluation_time. They score outside the guard, then pin the bounded set of candidate sources under a second guard. A pinned source retains the sealed files or an immutable recent row for readback and projection outside the guard. Delivery rechecks publication, group revision, current identity and TTL. Component ordinal is an address only. Consumer progress can differ. Ordinary queries do not present one immutable business snapshot across lanes, record reads, and statistics. Updates or expiry can shorten pages.
 
-Pure full-text Count, default ordering, and queries sorted only by `_id`/`_score` release vector and metadata component read locks after capturing identities and the lexical snapshot. Hybrid and field sorting retain the relevant component locks. Query projection copies text after scoring and identity revalidation. Each query uses one blocking worker. Final identity and TTL checks still use current authority.
+Pure full-text Count, default ordering, and queries sorted only by `_id`/`_score` release vector and metadata component read locks after capturing identities and the lexical snapshot. Hybrid and field sorting retain the relevant component locks. Scoring and candidate readback use separate blocking phases. Count-only requests have no candidate bodies to read.
 
 Lexical, Vector, and Hybrid share stable Record identity. Hybrid applies one RRF after global per-lane ranking across components. Candidate-window counts and field ordering inside ANN/Hybrid candidates do not guarantee exact corpus-wide results. Vector-only collections support metadata browsing. See the [search contract](search.en.md) for settings, scoring, and ordering.
 

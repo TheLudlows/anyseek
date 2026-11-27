@@ -1,5 +1,5 @@
-//! Retrieval pins only index topology while scoring. Record ownership is held by
-//! the outer task; canonical records and retirement are checked after scoring.
+//! Score against a captured index topology, then pin the selected candidate
+//! sources for lock-free readback. Recheck authority before delivery.
 use super::*;
 
 pub(super) struct Handle {
@@ -13,6 +13,49 @@ pub(super) struct Candidate {
     identity: lexical::Identity,
     fingerprint: [u8; 32],
     hit: crate::min_heap::Result,
+}
+impl Candidate {
+    async fn is_current(&self, inner: &Inner) -> Result<bool, RecordError> {
+        match inner.locations.get(&self.identity.id) {
+            Some(&ordinal) => inner.index
+                .matches_identity(ordinal, &self.identity, self.fingerprint).await,
+            None => Ok(false),
+        }
+    }
+}
+
+struct PinnedCandidate {
+    rank: usize,
+    candidate: Candidate,
+    source: state_values::RecordSource,
+}
+impl PinnedCandidate {
+    fn read(&self, fields: Option<&[String]>, evaluation: u64) -> Result<Option<QueryRecord>, RecordError> {
+        let id = &self.candidate.identity.id;
+        let Some(row) = self.source.find(id)? else {
+            return Err(storage("published candidate missing from selected records"));
+        };
+        if !row.visible(evaluation)
+            || !row.matches_candidate(self.candidate.identity.version, self.candidate.fingerprint)
+        {
+            return Ok(None);
+        }
+        let record = row.load(id)?;
+        Ok(Some(QueryRecord::copy(&record, fields)?))
+    }
+}
+
+fn check_publication(inner: &mut Inner, group_revision: u64, indexes_failed: bool) -> Result<(), RecordError> {
+    inner.observe_time()?;
+    if !inner.healthy || indexes_failed {
+        return Err(RecordError::RecoveryRequired);
+    }
+    // A group replacement cannot be observed as a subset of the old and new
+    // membership. Independent updates can instead discard a changed candidate.
+    if inner.state.group_publication_revision() != group_revision {
+        return Err(RecordError::Busy);
+    }
+    Ok(())
 }
 impl Handle {
     pub async fn capture(index: &VectorIndexArc, length: usize) -> Result<Self, RecordError> {
@@ -138,9 +181,9 @@ impl RecordPartition {
         #[cfg(test)] let scoring_root = root.clone();
         let (handle, result) = crate::resources::spawn_blocking(move || {
             let _owner = owner;
-            #[cfg(test)]
-            blocking_scoring_pause(&scoring_root);
             let work = async move {
+                #[cfg(test)]
+                blocking_pause(&scoring_root, ".test-blocking-scoring-pause")?;
                 let result = lexical::runtime_query::search(
                     &handle.index,
                     query.text,
@@ -158,7 +201,7 @@ impl RecordPartition {
                         evaluation_time_ms: evaluation,
                     },
                 ).await;
-                (handle, result)
+                Ok::<_, RecordError>((handle, result))
             };
             runtime.block_on(async move {
                 match context {
@@ -166,7 +209,7 @@ impl RecordPartition {
                     None => work.await,
                 }
             })
-        }).await.map_err(storage)?;
+        }).await.map_err(storage)??;
         let mut result = result?;
         let candidates = handle
             .candidates(std::mem::take(&mut result.results))
@@ -174,58 +217,48 @@ impl RecordPartition {
         #[cfg(test)]
         pause(&root, ".test-query-candidates-pause").await?;
         let mut inner = self.inner.lock().await;
-        inner.observe_time()?;
-        if !inner.healthy || self.indexes.error().is_some() {
-            return Err(RecordError::RecoveryRequired);
+        check_publication(&mut inner, group_publication_revision, self.indexes.error().is_some())?;
+        let (cut, read_time) = (inner.state.seq, inner.evaluation_time_ms);
+        let mut pinned = Vec::with_capacity(candidates.len());
+        for (rank, candidate) in candidates.into_iter().enumerate() {
+            if candidate.is_current(&inner).await? {
+                let source = inner.state.records.source(&candidate.identity.id)
+                    .ok_or_else(|| storage("published candidate missing from current records"))?;
+                pinned.push(PinnedCandidate { rank, candidate, source });
+            }
         }
-        // The shallow scoring handle can overlap an entire group replacement.
-        // Revalidating its candidates against the new canonical rows would
-        // silently drop old members or mix generations. Refuse that observation
-        // before copying any result; ordinary independent writes do not advance
-        // this revision. Already materialized complete results stay deliverable.
-        if inner.state.group_publication_revision() != group_publication_revision {
-            return Err(RecordError::Busy);
-        }
-        #[cfg(test)]
-        let mut disk_records = if let Some(pin) = disk_read_fixture::Pinned::capture(&inner)? {
-            let lookups: Vec<_> = candidates.iter().map(|candidate| (
-                candidate.identity.id.clone(), candidate.identity.version, candidate.fingerprint,
-            )).collect();
+        let records = if pinned.is_empty() {
+            Vec::new()
+        } else {
             let fields = output_fields.map(<[String]>::to_vec);
+            let owner = self.clone();
+            #[cfg(test)]
+            let read_root = root.clone();
             drop(inner);
-            let (pin, records) = crate::resources::spawn_blocking(move || {
-                let mut records = BTreeMap::new();
-                for (id, version, fingerprint) in lookups {
-                    if let Some(record) = pin.read(&id, Some((version, fingerprint)))? {
-                        records.insert(id, QueryRecord::copy(&record, fields.as_deref())?);
+            let records = crate::resources::spawn_blocking(move || {
+                let _owner = owner;
+                #[cfg(test)]
+                blocking_pause(&read_root, ".test-blocking-readback-pause")?;
+                let mut records = Vec::with_capacity(pinned.len());
+                for candidate in pinned {
+                    if let Some(record) = candidate.read(fields.as_deref(), read_time)? {
+                        records.push((candidate, record));
                     }
                 }
-                Ok::<_, RecordError>((pin, records))
-            }).await.map_err(storage)??;
-            pause(&root, ".test-disk-readback-pause").await?;
+                Ok::<_, RecordError>(records)
+            }).await.map_err(storage)?;
             inner = self.inner.lock().await;
-            pin.validate(&mut inner)?;
-            Some(records)
-        } else {
-            None
+            check_publication(&mut inner, group_publication_revision, self.indexes.error().is_some())?;
+            records?
         };
-        let mut hits = Vec::with_capacity(candidates.len());
-        for (rank, candidate) in candidates.into_iter().enumerate() {
-            let Some(&ordinal) = inner.locations.get(&candidate.identity.id) else {
-                continue;
-            };
-            if !inner
-                .index
-                .matches_identity(ordinal, &candidate.identity, candidate.fingerprint)
-                .await?
+        let mut hits = Vec::with_capacity(records.len());
+        for (PinnedCandidate { rank, candidate, source }, record) in records {
+            if !temporal::visible(&record, inner.evaluation_time_ms)
+                || (inner.state.seq != cut && !source.still_selected(&inner.state.records, &candidate.identity.id))
+                || !candidate.is_current(&inner).await?
             {
                 continue;
             }
-            let Some(row) = inner.state.records.find(&candidate.identity.id)?.filter(|row|
-                row.visible(inner.evaluation_time_ms)
-                    && row.matches_candidate(candidate.identity.version, candidate.fingerprint)) else {
-                continue;
-            };
             let channels = if let Some(channel) = channel {
                 vec![crate::search::ChannelExplanation {
                     channel: channel.into(),
@@ -244,19 +277,9 @@ impl RecordPartition {
                     .remove(&candidate.hit.doc_id)
                     .ok_or_else(|| storage("hybrid explanation missing"))?
             };
-            #[cfg(test)]
-            if let Some(records) = &mut disk_records {
-                if let Some(record) = records.remove(&candidate.identity.id)
-                    && temporal::visible(&record, inner.evaluation_time_ms)
-                {
-                    hits.push(RecordHit { channels, record, score: candidate.hit.score });
-                }
-                continue;
-            }
-            let record = row.load(&candidate.identity.id)?;
             hits.push(RecordHit {
                 channels,
-                record: QueryRecord::copy(&record, output_fields)?,
+                record,
                 score: candidate.hit.score,
             });
         }
@@ -341,16 +364,23 @@ mod tests {
         fn ids(result: &RecordSearch) -> BTreeSet<String> {
             result.hits.iter().map(|hit| hit.record.record_id.clone()).collect()
         }
-        for gate in [".test-query-scoring-pause", ".test-query-candidates-pause"] {
+        for gate in [".test-query-scoring-pause", ".test-query-candidates-pause", ".test-blocking-readback-pause"] {
             for mode in [
                 SearchMode::Lexical,
                 SearchMode::Vector { similarity_threshold: None, ann_mode: crate::vector_similarity::AnnMode::All },
                 SearchMode::Hybrid { similarity_threshold: None, ann_mode: crate::vector_similarity::AnnMode::All, rrf: Default::default() },
             ] {
+                let sealed = gate == ".test-blocking-readback-pause";
+                if sealed && !matches!(mode, SearchMode::Lexical) {
+                    continue;
+                }
                 let temporary = tempfile::tempdir().unwrap();
                 let root = temporary.path().join("records");
                 let p = RecordPartition::create(&root, config()).await.unwrap();
                 p.replace_group(replacement("old", 0, &["a", "b", "c"], "alpha old")).await.unwrap();
+                if sealed {
+                    p.compact_journal().await.unwrap();
+                }
                 let query = || RecordQuery { temporal: None, text: "alpha".into(),
                     vector: Some(Embedding::F32(vec![1.0, 0.0])), mode: mode.clone(),
                     query_type: QueryType::Union, offset: 0, length: 10,
@@ -364,7 +394,7 @@ mod tests {
                 entered(&root, gate).await;
                 tokio::time::timeout(std::time::Duration::from_secs(10),
                     p.replace_group(replacement("new", 1, &["a", "d"], "alpha new")))
-                    .await.expect("replacement must finish while scoring is paused").unwrap();
+                    .await.expect("replacement must finish while retrieval is paused").unwrap();
                 std::fs::remove_file(root.join(gate)).unwrap();
                 let result = tokio::time::timeout(std::time::Duration::from_secs(5), pending)
                     .await.expect("query must return a bounded retryable result").unwrap();
@@ -563,7 +593,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn candidate_deadline_is_rechecked_after_scoring_without_persistence() {
+    async fn candidate_deadline_is_rechecked_after_readback_without_persistence() {
         struct Clock(std::sync::atomic::AtomicU64);
         impl temporal::Clock for Clock {fn now_ms(&self)->Result<u64,RecordError>{Ok(self.0.load(std::sync::atomic::Ordering::SeqCst))}}
         let temporary=tempfile::tempdir().unwrap();let root=temporary.path().join("records");
@@ -573,6 +603,7 @@ mod tests {
         let mut request=write("a","a","alpha",ExpectedVersion::Absent);
         request.temporal=Some(TemporalMetadata{expire_at_ms:Some(1100),..Default::default()});
         p.write(request).await.unwrap();
+        p.compact_journal().await.unwrap();
         {
             let inner = p.inner.lock().await;
             assert_eq!(inner.state.records.live_ttl_count(), 1);
@@ -582,7 +613,7 @@ mod tests {
         let before = p.search("alpha".into(), None, SearchMode::Lexical, vec![], 10).await.unwrap();
         assert_eq!(before.statistics.active_records, 1);
         assert_eq!(before.hits.len(), 1);
-        let gate=".test-query-candidates-pause";std::fs::write(root.join(gate),b"pause").unwrap();
+        let gate=".test-blocking-readback-pause";std::fs::write(root.join(gate),b"pause").unwrap();
         let pending={let p=p.clone();tokio::spawn(async move {p.search("alpha".into(),None,SearchMode::Lexical,vec![],10).await})};
         entered(&root,gate).await;
         // Model encoding/upload: writer is held, but Inner remains available.
@@ -687,9 +718,9 @@ mod tests {
         // Check the mutex directly: durable commit/native flush time is not a
         // mutex latency assertion. Initial consumers have already been drained.
         drop(p.inner.try_lock().expect("paused scoring must not own the Record mutex"));
-        // Publication must still complete within the existing 20-second query
+        // Publication must still complete within the query
         // pause window, before releasing the query or checking its newer view.
-        tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
             p
                 .commit_writes(vec![write("second", "b", "alpha", ExpectedVersion::Absent)])
                 .await
@@ -713,11 +744,13 @@ mod tests {
             .commit_writes(vec![
                 write("a", "a", "alpha", ExpectedVersion::Absent),
                 write("b", "b", "alpha", ExpectedVersion::Absent),
+                write("c", "c", "alpha intact", ExpectedVersion::Absent),
             ])
             .await
             .unwrap();
         p.inner.lock().await.index.drain_indexes().await.unwrap();
-        let gate = ".test-query-candidates-pause";
+        p.compact_journal().await.unwrap();
+        let gate = ".test-blocking-readback-pause";
         std::fs::write(root.join(gate), b"pause").unwrap();
         let pending = {
             let p = p.clone();
@@ -727,6 +760,7 @@ mod tests {
             })
         };
         entered(&root, gate).await;
+        drop(p.inner.try_lock().expect("sealed readback must not hold the Record guard"));
         let mut delete = write("delete", "b", "", ExpectedVersion::Match(1));
         delete.document = None;
         tokio::time::timeout(std::time::Duration::from_secs(3), async {
@@ -743,25 +777,32 @@ mod tests {
         .unwrap();
         std::fs::remove_file(root.join(gate)).unwrap();
         let result = pending.await.unwrap().unwrap();
-        assert!(result.hits.is_empty());
+        assert_eq!(result.hits.len(), 1);
+        assert_eq!(result.hits[0].record.record_id, "c");
+        assert_eq!(result.hits[0].record.document.as_ref().unwrap()["body"], "alpha intact");
         assert_eq!(
-            result.count_total, 2,
+            result.count_total, 3,
             "count describes the observed index candidates"
         );
-        assert_eq!(result.visible_seq, 4);
+        assert_eq!(result.visible_seq, 5);
+        p.finish_service_shutdown().await.unwrap();
     }
-
 }
 
 #[cfg(test)]
-fn blocking_scoring_pause(root: &Path) {
-    let marker = root.join(".test-blocking-scoring-pause");
-    if !marker.exists() { return; }
-    std::fs::write(marker.with_extension("started"), b"ready").unwrap();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    while marker.exists() && std::time::Instant::now() < deadline {
-        std::thread::sleep(std::time::Duration::from_millis(2));
+fn blocking_pause(root: &Path, name: &str) -> Result<(), RecordError> {
+    let marker = root.join(name);
+    if marker.exists() {
+        std::fs::write(root.join(format!("{name}-entered")), b"ready").map_err(storage)?;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        while marker.exists() {
+            if std::time::Instant::now() >= deadline {
+                return Err(storage("blocking query pause timed out"));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
     }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -782,7 +823,7 @@ async fn blocking_scoring_keeps_single_thread_timer_and_small_task_responsive() 
         }, None).await
     }) };
     tokio::time::timeout(std::time::Duration::from_secs(2), async {
-        while !marker.with_extension("started").exists() { tokio::task::yield_now().await; }
+        while !root.join(".test-blocking-scoring-pause-entered").exists() { tokio::task::yield_now().await; }
         let start = std::time::Instant::now();
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         assert!(start.elapsed() < std::time::Duration::from_secs(1));
@@ -808,7 +849,7 @@ async fn cancelled_scoring_retains_request_slot_until_worker_finishes() {
         p.search("alpha".into(), None, SearchMode::Lexical, vec![], 10).await
     }) };
     tokio::time::timeout(std::time::Duration::from_secs(2), async {
-        while !marker.with_extension("started").exists() { tokio::task::yield_now().await; }
+        while !root.join(".test-blocking-scoring-pause-entered").exists() { tokio::task::yield_now().await; }
     }).await.unwrap();
     caller.abort();
     assert!(caller.await.unwrap_err().is_cancelled());
