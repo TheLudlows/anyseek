@@ -4,6 +4,7 @@
 //! service credential protects requests and the gateway supplies the namespace.
 mod admission;
 mod cold;
+mod residency;
 mod shutdown;
 mod diagnostics;
 pub(crate) mod local;
@@ -21,7 +22,7 @@ use axum::{
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
 use anyseek::{
-    resources::{Governor, Scope as ResourceScope},
+    resources::{Governor, Scope as ResourceScope, residency::{Pin as ResidencyPin, Residency}},
     catalog::{
         Catalog, CatalogCommand, CatalogError, CatalogRequest, CollectionEntry, MASTER,
     },
@@ -294,6 +295,10 @@ fn encode_data_response<T: Serialize>(
         Some(scope) => Bytes::from_owner(admission::OutputBytes { bytes, _scope: scope, _activity: None }),
         None => bytes,
     };
+    let bytes = match data.as_ref() {
+        Some(data) => Bytes::from_owner(residency::Output { bytes, _data: data.clone() }),
+        None => bytes,
+    };
     let mut response = Response::builder()
         .status(status)
         .header(header::CONTENT_TYPE, "application/json")
@@ -314,7 +319,7 @@ pub struct Service {
     master_verifier: Option<String>,
     root: PathBuf,
     catalog: Catalog,
-    records: RwLock<BTreeMap<String, RecordPartition>>,
+    records: Arc<Residency<RecordPartition>>,
     cold: cold::Registry,
     // Exclude management changes across the entire owned committed request.
     write_gate: Arc<RwLock<()>>,
@@ -358,10 +363,8 @@ impl Service {
                 let result = activity.run(scope.run(async {
                     // One loaded live partition per tick. Do not retain a map
                     // guard or whole inventory while scheduling maintenance.
-                    let next=service.records.try_read().ok().and_then(|records| {
-                        records.range((std::ops::Bound::Excluded(live_cursor.clone()),std::ops::Bound::Unbounded))
-                            .next().or_else(||records.iter().next()).map(|(key,p)|(key.clone(),p.clone()))
-                    });
+                    service.evict_over_budget();
+                    let next = service.records.next_for_maintenance(&live_cursor);
                     if let Some((key,partition))=next {live_cursor=key;partition.maintenance_tick().await;}
                     let collection = async {
                         if let Some(entry) = service.catalog.next_deleted_collection(generation).await? {
@@ -475,11 +478,12 @@ impl Service {
             .require_service_completion(root)
             .await
             .map_err(|e| e.to_string())?;
+        let records = Arc::new(residency::table(master_verifier.is_some())?);
         let service = Arc::new(Self {
             master_verifier,
             root: root.into(),
             catalog,
-            records: RwLock::new(BTreeMap::new()),
+            records,
             cold: cold::Registry::default(),
             write_gate: Arc::new(RwLock::new(())),
             control: Arc::new(Mutex::new(())),
@@ -725,6 +729,16 @@ impl Service {
 struct CollectionRecord {
     generation: u64,
     partition: RecordPartition,
+    residency: ResidencyPin,
+}
+impl CollectionRecord {
+    fn output_permit(&self) -> Result<DataOutputPermit, RecordError> {
+        Ok(self.partition.output_permit()?.with_residency(self.residency.clone()))
+    }
+
+    async fn output_permit_after_publication(&self) -> Result<DataOutputPermit, RecordError> {
+        Ok(self.partition.output_permit_after_publication().await?.with_residency(self.residency.clone()))
+    }
 }
 impl std::ops::Deref for CollectionRecord {
     type Target = RecordPartition;
@@ -934,10 +948,11 @@ async fn ingest(State(s): State<Arc<Service>>, headers: HeaderMap, Path(id): Pat
 async fn ingest_progress(State(s): State<Arc<Service>>, headers: HeaderMap, Path(id): Path<String>) -> Result<Response, Error> {
     let key = s.authenticate(&headers).await?;
     let partition = s.record(&key, &id).await?;
+    let data = DataOutputPermit::residency_only(partition.residency.clone());
     let progress = s.catalog.authorized_generation(key, id, partition.generation, move |_| async move {
         partition.committed_progress().await
     }).await?;
-    response(progress)
+    protected_data(Ok(progress), Some(data))
 }
 
 // Explicit fault binary only, no remote activation path. Pause inside accepted
@@ -1186,13 +1201,14 @@ async fn operation(
 ) -> Result<Response, Error> {
     let key = s.authenticate(&headers).await?;
     let p = s.record(&key, &id).await?;
+    let data = DataOutputPermit::residency_only(p.residency.clone());
     let operation_id = OperationId { epoch, nonce };
     let lookup = operation_id.clone();
     let result = s
         .catalog
         .authorized_generation(key, id, p.generation, move |_| async move { p.operation(&lookup).await })
         .await?;
-    protected(result.map(|receipt|json!({"operation_id":operation_id,"receipt":receipt,"expires_at":operation_id.expires_at_unix_seconds(),"absence_proves_failure":false})).map_err(Into::into))
+    protected_data(result.map(|receipt|json!({"operation_id":operation_id,"receipt":receipt,"expires_at":operation_id.expires_at_unix_seconds(),"absence_proves_failure":false})).map_err(Into::into), Some(data))
 }
 async fn catalog_operation(
     State(s): State<Arc<Service>>,
@@ -1301,7 +1317,7 @@ async fn service_backup(
         #[cfg(test)]
         s.cold.test.backup_waiters.increment();
         let _opens = s.cold.disk.write().await;
-        let records=s.records.read().await.clone();
+        let records=s.records.snapshot().ok_or(RecordError::RecoveryRequired)?;
         #[cfg(test)]
         s.cold.test.backup_snapshot.wait().await;
         let temporary=s.root.join(format!(".s3-service-export-{:032x}",rand::random::<u128>()));
@@ -1656,8 +1672,7 @@ async fn delete_collection(
         let deleted = s.catalog.collections().await?.into_iter()
             .filter(|e| e.tenant_id == key && e.collection_id == id && e.generation < receipt.seq && e.deleted)
             .map(|e| e.scope()).collect::<Vec<_>>();
-        let mut records = s.records.write().await;
-        for scope in deleted { records.remove(&scope); }
+        for scope in deleted { s.records.remove(&scope); }
         response(
             json!({"receipt":receipt,"deleted":true,"physical_reclamation":"pending"}),
         )
@@ -1946,7 +1961,7 @@ mod tests {
     #[tokio::test]
     async fn reclamation_waits_for_service_backup_before_catalog_lifecycle() {
         let (service,root,_) = setup().await;
-        let records = service.records.read().await.clone();
+        let records = service.records.snapshot().unwrap();
         let entry = service.catalog.listing("tenant").await.unwrap().remove(0);
         service.catalog.execute(CatalogRequest {operation_id:OperationId::new("delete-for-gc".into()),
             command:CatalogCommand::DeleteCollection {tenant_id:"tenant".into(),collection_id:"c".into()}}).await.unwrap();
@@ -1962,7 +1977,7 @@ mod tests {
         drop(backup_gate);
         assert!(!tokio::time::timeout(std::time::Duration::from_secs(10),reclaim).await.unwrap().unwrap().unwrap(),
             "the retained Record owner still protects the files");
-        service.records.write().await.clear();
+        service.records.remove(&entry.scope());
         tokio::time::timeout(std::time::Duration::from_secs(10),async {
             while !service.reclaim_collection(entry.clone()).await.unwrap() {tokio::task::yield_now().await;}
         }).await.unwrap();
@@ -2111,7 +2126,7 @@ mod tests {
                 let service = Service::open_http(&path,std::num::NonZeroUsize::new(200).unwrap(), "anyseek-unit-test-secret").await.unwrap();
                 let config = record_config(serde_json::from_value(json!({"index_name":"test","schema":[{"field":"body","field_type":"Text"}]})).unwrap(),None).unwrap();
                 let partition = RecordPartition::create(&path.join("held-partition"),config).await.unwrap();
-                service.records.write().await.insert("held".into(),partition.clone());
+                service.records.install("held".into(), partition.clone()).ok().unwrap();
                 let mut shutdown = service.shutdown();
                 assert!(shutdown.wait().await.unwrap_err().contains("partition shutdown"));
                 drop(shutdown);
@@ -3087,7 +3102,7 @@ mod tests {
         let service = Service::open_http(&path, std::num::NonZeroUsize::new(200).unwrap(), "anyseek-unit-test-secret")
             .await
             .unwrap();
-        assert!(service.records.read().await.is_empty());
+        assert!(service.records.is_empty());
         assert_eq!(service.catalog.listing("tenant").await.unwrap().len(), 3);
         drop(service);
         std::fs::remove_dir_all(path).unwrap();

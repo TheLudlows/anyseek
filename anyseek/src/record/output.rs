@@ -16,12 +16,14 @@ pub struct DataOutputPermit {
     // Inner must continue using synchronous deliver. Weak owners preserve the
     // rule that a saved response cannot keep a retired partition alive.
     publications: Vec<Weak<tokio::sync::Mutex<super::Inner>>>,
+    residency: Vec<crate::resources::residency::Pin>,
 }
 impl DataOutputPermit {
     pub(super) fn new(state: Arc<RwLock<OutputState>>, revision: u64) -> Self {
         Self {
             states: vec![(state, revision)],
             publications: Vec::new(),
+            residency: Vec::new(),
         }
     }
     /// Combine already captured views for bounded collection listings. This
@@ -29,7 +31,9 @@ impl DataOutputPermit {
     pub fn combine(permits: Vec<Self>) -> Self {
         let mut states = std::collections::BTreeMap::new();
         let mut publications = std::collections::BTreeMap::new();
+        let mut residency = Vec::new();
         for permit in permits {
+            residency.extend(permit.residency);
             for owner in permit.publications {
                 publications.insert(owner.as_ptr() as usize, owner);
             }
@@ -43,7 +47,19 @@ impl DataOutputPermit {
         Self {
             states: states.into_values().collect(),
             publications: publications.into_values().collect(),
+            residency,
         }
+    }
+
+    pub(crate) fn with_residency(mut self, pin: crate::resources::residency::Pin) -> Self {
+        self.residency.push(pin);
+        self
+    }
+
+    /// Receipt and progress responses keep residency without adding a new
+    /// publication fence to their existing contracts.
+    pub(crate) fn residency_only(pin: crate::resources::residency::Pin) -> Self {
+        Self { states: Vec::new(), publications: Vec::new(), residency: vec![pin] }
     }
     /// Wait for an in-progress publication before checking the unchanged failure
     /// barrier and handing off. No lock is retained after the synchronous callback.

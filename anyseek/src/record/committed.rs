@@ -90,6 +90,12 @@ pub(super) struct Queue {
     bytes: usize,
     running: bool,
 }
+
+impl Queue {
+    pub(super) fn is_idle(&self) -> bool {
+        !self.running && self.pending.is_empty() && self.records == 0 && self.bytes == 0
+    }
+}
 struct Queued {
     requests: Vec<RecordWrite>,
     count: usize,

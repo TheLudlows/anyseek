@@ -42,6 +42,10 @@ pub(crate) fn single_memory_limit() -> io::Result<u64> {
     Ok(memory_limits()?.single)
 }
 
+pub(crate) fn shared_memory_usage() -> io::Result<(u64, u64)> {
+    Ok((MEMORY.load(Ordering::Acquire), memory_limits()?.shared))
+}
+
 fn exceeded() -> io::Error {
     io::Error::other("record build resource budget exceeded")
 }

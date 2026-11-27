@@ -36,6 +36,8 @@ Send the service credential as the `apikey` header to all protected AnySeek endp
 
 On startup the standalone HTTP service checks the Catalog and finishes pending creates and restores. It opens existing active collections on their first authorized access. Concurrent requests for the same tenant, collection, and generation share one open in the Recovery lane. Cancellation of one request leaves other waiters in place. GET `/api/v1/index` returns live statistics and also opens any cold collections for that tenant. A request to a cold collection reports an open failure and later requests can retry.
 
+`ANYSEEK_RESIDENT_MEMORY_BYTES` sets the eviction threshold for the standalone HTTP service. It defaults to 75% of `ANYSEEK_BUILD_SHARED_MEMORY_BYTES` and must be positive and at most that shared limit. The threshold uses bytes actually reserved in the process. Under pressure the service closes the least recently used idle generation, then checks the budget after closure and resource release. Active requests, accepted writes, background work, backups, and output still in transit hold their generation. A memory admission phase waits for up to two seconds before returning `busy`. The Catalog and durable records survive eviction. The next authorized access can reopen the same generation.
+
 | Parameter | Default and constraints |
 | --- | --- |
 | `index_path` | `anyseek_index`. Relative paths are resolved from the executable's directory. |

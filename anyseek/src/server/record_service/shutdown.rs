@@ -55,11 +55,9 @@ impl Service {
             // Never wait for global work while holding writer/Inner/control.
             // Only after every producer has exited may we join retained
             // consumer handles and terminate native writers.
-            for partition in service.records.get_mut().values() {
-                if let Err(error) = partition.finish_service_shutdown().await {
-                    retain_failed(done, service, format!("partition shutdown: {error}"));
-                    return;
-                }
+            if let Err(error) = service.stop_resident_workers().await {
+                retain_failed(done, service, format!("partition shutdown: {error}"));
+                return;
             }
             // Keep the service root locked even if a storage destructor fails.
             // Blocking destruction includes mmap/files and native fallback joins.
@@ -72,6 +70,15 @@ impl Service {
             done.send_replace(Some(Ok(())));
         });
         shutdown
+    }
+
+    async fn stop_resident_workers(&mut self) -> Result<(), String> {
+        let records = Arc::get_mut(&mut self.records)
+            .ok_or("residency owner did not drain")?;
+        for partition in records.shutdown_values().ok_or("collection retirement did not finish")? {
+            partition.finish_service_shutdown().await.map_err(|error| error.to_string())?;
+        }
+        Ok(())
     }
 }
 
