@@ -323,3 +323,40 @@ async fn entity_members_share_limits_between_seed_edges_and_targets() {
     );
     p.finish_service_shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn entity_delivery_reuses_budget_and_refuses_a_new_root_at_the_same_cut() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = RecordPartition::create(&dir.path().join("records"), config())
+        .await
+        .unwrap();
+    base(&p).await;
+    let cut = build(&p).await;
+    let prepare = || {
+        p.prepare_entity_paths(
+            EntityDirection::Out,
+            "app:A",
+            "link",
+            32,
+            Instant::now() + WAIT,
+        )
+    };
+    let selected = prepare().await.unwrap();
+    let work = selected.work.clone();
+    let before = work.remaining();
+    let io = work.remaining_io();
+    let result = selected.deliver(&p).await.unwrap();
+    expect(&result, "seed", "app:B", "target", 1);
+    assert_eq!(work.remaining(), before - 4);
+    assert_eq!(work.remaining_io(), io);
+
+    let limited = prepare().await.unwrap();
+    limited.work.charge(limited.work.remaining() - 3).unwrap();
+    assert!(matches!(limited.deliver(&p).await,
+        Err(RecordError::Rejected(reason)) if reason.contains("work budget")));
+
+    let stale = prepare().await.unwrap();
+    assert_eq!(build(&p).await, cut);
+    assert!(matches!(stale.deliver(&p).await, Err(RecordError::Busy)));
+    p.finish_service_shutdown().await.unwrap();
+}

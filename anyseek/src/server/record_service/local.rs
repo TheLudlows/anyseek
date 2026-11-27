@@ -1,5 +1,6 @@
 //! Direct local access to the same catalog and collection engine used by the server.
 pub use super::QueryResponse;
+pub use crate::record::{EntityCandidatePaths, EntityDirection};
 use super::*;
 use anyseek::resources::Lane;
 use std::num::NonZeroUsize;
@@ -237,6 +238,86 @@ impl LocalEngine {
             let (record, permit) = read_collection(&service, tenant, collection, record).await?;
             Ok(permit.deliver_after_publication(|| record).await?)
         }).await
+    }
+
+    /// Explicitly build the optional entity sidecar for one local collection cut.
+    /// The embedding host authorizes this operation. A cancelled waiter can
+    /// leave an admitted build running until its deadline.
+    pub async fn build_entity_adjacency(
+        &self,
+        tenant: &str,
+        collection: &str,
+    ) -> Result<u64, LocalError> {
+        self.run(
+            tenant,
+            collection,
+            Lane::Background,
+            async |service, tenant, id| {
+                let partition = service.record(&tenant, &id).await?;
+                let timeout = service.request_timeout;
+                let sequence = service
+                    .catalog
+                    .authorized_generation(tenant, id, partition.generation, move |_| async move {
+                        partition.build_entity_adjacency(timeout).await
+                    })
+                    .await??;
+                Ok(sequence)
+            },
+        )
+        .await
+    }
+
+    /// Discover one directed hop for an already authorized, isolated collection.
+    /// Checks the same authorized generation again at handoff. A changed
+    /// publication or reached TTL returns `busy` for the whole read.
+    /// An already reached request deadline returns `busy` before admission.
+    /// Read the retained result through its borrowed candidate accessors.
+    pub async fn query_entity_paths(
+        &self,
+        tenant: &str,
+        collection: &str,
+        direction: EntityDirection,
+        anchor: &str,
+        kind: &str,
+        visit_limit: usize,
+    ) -> Result<EntityCandidatePaths, LocalError> {
+        let deadline = tokio::time::Instant::now() + self.service()?.request_timeout;
+        // Timeout polls the operation first, so an immediate result can win.
+        if tokio::time::Instant::now() >= deadline {
+            return Err(LocalError::unavailable("busy"));
+        }
+        tokio::time::timeout_at(
+            deadline,
+            self.run(tenant, collection, Lane::Foreground, async move |service, tenant, id| {
+                let partition = service.record(&tenant, &id).await?;
+                let generation = partition.generation;
+                let for_read = partition.clone();
+                // Only copy bounded keys. Report invalid input inside the
+                // authorization guard so a retired generation stays hidden.
+                let keys = RecordPartition::validate_entity_path_keys(anchor, kind)
+                    .map(|()| (anchor.to_owned(), kind.to_owned()));
+                let found = service
+                    .catalog
+                    .authorized_generation(tenant.clone(), id.clone(), generation, move |_| async move {
+                        let (anchor, kind) = keys?;
+                        for_read
+                            .prepare_entity_paths(direction, &anchor, &kind, visit_limit, deadline)
+                            .await
+                    })
+                    .await??;
+                #[cfg(test)]
+                service.cold.test.entity_handoff.wait().await;
+                let result = service
+                    .catalog
+                    .authorized_generation(tenant, id, generation, move |_| async move {
+                        found.deliver(&partition).await
+                    })
+                    .await??;
+                Ok(result)
+            }),
+        )
+        .await
+        .map_err(|_| LocalError::unavailable("busy"))?
     }
 
     /// Query a collection in process and return the admitted record view.

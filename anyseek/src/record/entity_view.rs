@@ -11,6 +11,10 @@ const MAX_TAIL_ROWS: usize = 128;
 const MAX_TAIL_BYTES: usize = 2 * 1024 * 1024;
 const MAX_TAIL_SEQUENCE: u64 = 4096;
 
+fn path_work(deadline: Instant) -> Arc<QueryWork> {
+    Arc::new(QueryWork::new(65_536, 2_048, 16 * 1024 * 1024, deadline))
+}
+
 /// Direction of one edge relative to the requested anchor entity.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EntityDirection {
@@ -102,6 +106,7 @@ impl EntityNeighborCandidates {
 pub struct EntityCandidatePaths {
     seeds: Vec<EntityMember>,
     neighbors: Vec<EntityNeighborCandidates>,
+    expires_at_ms: Option<u64>,
     _memory: MemoryLease,
 }
 
@@ -119,8 +124,8 @@ impl EntityCandidatePaths {
 
 /// An immutable storage snapshot for a trusted embedded partition owner.
 /// The selected files and suffix remain pinned for the lifetime of this view.
-/// Later writes do not change it. Consumers must separately prove seed and
-/// target eligibility and revalidate authority before delivering live results.
+/// Later writes do not change it. Live delivery also requires the current
+/// publication and authorization checks provided by the local SDK.
 pub struct EntityAdjacencyView {
     snapshot: Arc<Snapshot>,
     admission: Arc<tokio::sync::Semaphore>,
@@ -129,6 +134,9 @@ pub struct EntityAdjacencyView {
 struct Snapshot {
     cut: u64,
     evaluation: u64,
+    observed_at: Instant,
+    group_revision: u64,
+    selected_owner: String,
     base: Arc<state_rows::Base>,
     tail: Vec<state_memory::Shared<Record>>,
     max_visits: usize,
@@ -137,7 +145,20 @@ struct Snapshot {
     _scope: Option<crate::resources::Lease>,
 }
 
+/// Holds the complete leased result and the exact request work until handoff.
+pub(crate) struct PreparedEntityPaths {
+    view: EntityAdjacencyView,
+    owner: std::sync::Weak<Mutex<Inner>>,
+    paths: EntityCandidatePaths,
+    deadline: Instant,
+    work: Arc<QueryWork>,
+}
+
 impl RecordPartition {
+    pub(crate) fn validate_entity_path_keys(anchor: &str, kind: &str) -> Result<(), RecordError> {
+        entity::Range::validate(anchor, kind).map_err(state_rows::entity_error)
+    }
+
     /// Capture the current local Record cut and pin its optional adjacency sidecar.
     /// A missing sidecar or oversized suffix requires an explicit new build.
     pub async fn capture_entity_adjacency(&self) -> Result<EntityAdjacencyView, RecordError> {
@@ -156,17 +177,15 @@ impl RecordPartition {
             ));
         }
         let evaluation = inner.observe_time()?;
+        let observed_at = Instant::now();
         let cut = inner.state.seq;
         let records = &inner.state.records;
         let base = records.entity_base().cloned().ok_or_else(|| {
             RecordError::Rejected("entity adjacency has no selected sidecar".into())
         })?;
         let base_cut = base.entity.as_ref().expect("selected sidecar").cut();
-        let certified = inner
-            .anchor
-            .as_ref()
-            .ok_or(RecordError::RecoveryRequired)?
-            .checkpoint_state()?;
+        let anchor = inner.anchor.as_ref().ok_or(RecordError::RecoveryRequired)?;
+        let certified = anchor.checkpoint_state()?;
         if !certified
             .records
             .entity_base()
@@ -199,6 +218,9 @@ impl RecordPartition {
             snapshot: Arc::new(Snapshot {
                 cut,
                 evaluation,
+                observed_at,
+                group_revision: inner.state.group_publication_revision(),
+                selected_owner: anchor.selected_owner().to_owned(),
                 base,
                 tail: records.recent_records().cloned().collect(),
                 max_visits: entity::MAX_VISITS.min(inner.config.max_candidates),
@@ -208,6 +230,85 @@ impl RecordPartition {
             }),
             admission: self.admission.clone(),
         })
+    }
+
+    pub(crate) async fn prepare_entity_paths(
+        &self,
+        direction: EntityDirection,
+        anchor: &str,
+        kind: &str,
+        visit_limit: usize,
+        deadline: Instant,
+    ) -> Result<PreparedEntityPaths, RecordError> {
+        let view = timeout_at(deadline, self.capture_entity_adjacency())
+            .await
+            .map_err(|_| RecordError::Busy)??;
+        let work = path_work(deadline);
+        let paths = view
+            .candidate_paths_with_work(direction, anchor, kind, visit_limit, deadline, work.clone())
+            .await?;
+        Ok(PreparedEntityPaths {
+            view,
+            owner: Arc::downgrade(&self.inner),
+            paths,
+            deadline,
+            work,
+        })
+    }
+}
+
+impl PreparedEntityPaths {
+    /// The collection owner calls this inside its current authorization guard.
+    pub(crate) async fn deliver(
+        self,
+        p: &RecordPartition,
+    ) -> Result<EntityCandidatePaths, RecordError> {
+        if !self.owner.ptr_eq(&Arc::downgrade(&p.inner)) {
+            return Err(RecordError::Busy);
+        }
+        let mut inner = timeout_at(self.deadline, p.inner.lock())
+            .await
+            .map_err(|_| RecordError::Busy)?;
+        let snapshot = &self.view.snapshot;
+        if !inner.healthy {
+            return Err(RecordError::RecoveryRequired);
+        }
+        if inner.state.seq != snapshot.cut
+            || inner.state.group_publication_revision() != snapshot.group_revision
+            || inner
+                .anchor
+                .as_ref()
+                .is_none_or(|anchor| anchor.selected_owner() != snapshot.selected_owner)
+            || !inner
+                .state
+                .records
+                .entity_base()
+                .is_some_and(|base| Arc::ptr_eq(base, &snapshot.base))
+        {
+            return Err(RecordError::Busy);
+        }
+        // Versions and canonical claims are immutable at the checked cut.
+        // Bill each role before moving the complete result across the barrier.
+        let roles = self.paths.seeds.len()
+            + self
+                .paths
+                .neighbors
+                .iter()
+                .map(|neighbor| neighbor.declarations.len() + neighbor.members.len())
+                .sum::<usize>();
+        snapshot.barrier.deliver(|| {
+            self.work.charge(roles)?;
+            let evaluation = inner.observe_time()?;
+            if self.paths.expires_at_ms.is_some_and(|expiry| {
+                let elapsed =
+                    u64::try_from(snapshot.observed_at.elapsed().as_millis()).unwrap_or(u64::MAX);
+                evaluation >= expiry || snapshot.evaluation.saturating_add(elapsed) >= expiry
+            }) {
+                return Err(RecordError::Busy);
+            }
+            self.work.charge(0)?;
+            Ok(self.paths)
+        })?
     }
 }
 
@@ -260,7 +361,7 @@ impl EntityAdjacencyView {
         visit_limit: usize,
         deadline: Instant,
     ) -> Result<EntityCandidatePaths, RecordError> {
-        let work = Arc::new(QueryWork::new(65_536, 2_048, 16 * 1024 * 1024, deadline));
+        let work = path_work(deadline);
         self.candidate_paths_with_work(direction, anchor, kind, visit_limit, deadline, work)
             .await
     }
@@ -319,6 +420,15 @@ fn examine(work: Option<&QueryWork>) -> Result<(), RecordError> {
     work.map_or(Ok(()), |work| work.charge(1))
 }
 
+struct EdgeEvidence {
+    candidate: EntityCandidate,
+    expires_at_ms: Option<u64>,
+}
+
+fn include_expiry(earliest: &mut Option<u64>, expiry: Option<u64>) {
+    *earliest = (*earliest).into_iter().chain(expiry).min();
+}
+
 impl Snapshot {
     fn projection(&self) -> &entity::Projection {
         self.base.entity.as_ref().expect("selected sidecar")
@@ -342,7 +452,7 @@ impl Snapshot {
             },
         )?;
         self.barrier.deliver(|| EntityCandidates {
-            candidates,
+            candidates: candidates.into_iter().map(|edge| edge.candidate).collect(),
             _memory: memory,
         })
     }
@@ -351,7 +461,7 @@ impl Snapshot {
         &self,
         range: &entity::Range,
         budget: &mut RangeWork<'_>,
-    ) -> Result<Vec<EntityCandidate>, RecordError> {
+    ) -> Result<Vec<EdgeEvidence>, RecordError> {
         let work = budget.work;
         let mut output = Vec::new();
         let adjacency = self.projection();
@@ -368,10 +478,35 @@ impl Snapshot {
                         .locate(&self.base.checkpoint, &record_id, reference)
                         .map_err(state_rows::entity_error)?;
                     if row.metadata.visible(self.evaluation) {
-                        output.push(EntityCandidate {
-                            neighbor,
-                            record_id,
-                            version: row.metadata.version,
+                        let version = row.metadata.version;
+                        let expires_at_ms = row.metadata.temporal.expire_at_ms;
+                        // Candidate paths prove the body claim. The lower-level
+                        // declaration-only read relies on the authenticated key.
+                        if let Some(work) = work {
+                            let matched = state_rows::decode(&record_id, row, |record| {
+                                let document = record
+                                    .document
+                                    .as_ref()
+                                    .ok_or_else(|| storage("missing entity declaration body"))?;
+                                range
+                                    .matches_neighbor(&record_id, document, &neighbor, || {
+                                        work.charge(1).map_err(std::io::Error::other)
+                                    })
+                                    .map_err(state_rows::entity_error)
+                            })?;
+                            if !matched {
+                                return Err(storage(
+                                    "entity edge posting disagrees with its canonical Record",
+                                ));
+                            }
+                        }
+                        output.push(EdgeEvidence {
+                            candidate: EntityCandidate {
+                                neighbor,
+                                record_id,
+                                version,
+                            },
+                            expires_at_ms,
                         });
                     }
                 }
@@ -393,16 +528,21 @@ impl Snapshot {
                 if temporal::visible(row, self.evaluation) {
                     let (neighbor, record_id) =
                         range.identity(&key).map_err(state_rows::entity_error)?;
-                    output.push(EntityCandidate {
-                        neighbor,
-                        record_id,
-                        version: row.version,
+                    output.push(EdgeEvidence {
+                        candidate: EntityCandidate {
+                            neighbor,
+                            record_id,
+                            version: row.version,
+                        },
+                        expires_at_ms: row.temporal.expire_at_ms,
                     });
                 }
             }
         }
-        output
-            .sort_unstable_by(|a, b| (&a.neighbor, &a.record_id).cmp(&(&b.neighbor, &b.record_id)));
+        output.sort_unstable_by(|a, b| {
+            let (a, b) = (&a.candidate, &b.candidate);
+            (&a.neighbor, &a.record_id).cmp(&(&b.neighbor, &b.record_id))
+        });
         Ok(output)
     }
 
@@ -410,6 +550,7 @@ impl Snapshot {
         &self,
         range: &entity::MemberRange,
         budget: &mut RangeWork<'_>,
+        earliest: &mut Option<u64>,
     ) -> Result<Vec<EntityMember>, RecordError> {
         let work = budget.work;
         let check = || examine(work).map_err(std::io::Error::other);
@@ -432,6 +573,7 @@ impl Snapshot {
                     return Ok(());
                 }
                 let version = row.metadata.version;
+                let expiry = row.metadata.temporal.expire_at_ms;
                 let matched = state_rows::decode(&record_id, row, |record| {
                     let document = record
                         .document
@@ -446,6 +588,7 @@ impl Snapshot {
                         "entity member posting disagrees with its canonical Record",
                     ));
                 }
+                include_expiry(earliest, expiry);
                 output.push(EntityMember { record_id, version });
                 Ok(())
             },
@@ -461,6 +604,7 @@ impl Snapshot {
             {
                 budget.take()?;
                 if temporal::visible(row, self.evaluation) {
+                    include_expiry(earliest, row.temporal.expire_at_ms);
                     output.push(EntityMember {
                         record_id: row.record_id.clone(),
                         version: row.version,
@@ -492,22 +636,33 @@ impl Snapshot {
             remaining: limit,
             work: Some(work),
         };
-        let seeds = self.members(seeds, &mut budget)?;
+        let mut expires_at_ms = None;
+        let seeds = self.members(seeds, &mut budget, &mut expires_at_ms)?;
         let mut neighbors = Vec::new();
         if !seeds.is_empty() {
-            let mut ranges = BTreeMap::<String, Vec<EntityCandidate>>::new();
+            let mut ranges = BTreeMap::<String, Vec<EdgeEvidence>>::new();
             for edge in self.edges(edges, &mut budget)? {
                 work.charge(1)?;
-                if edge.neighbor != anchor {
-                    ranges.entry(edge.neighbor.clone()).or_default().push(edge);
+                if edge.candidate.neighbor != anchor {
+                    ranges
+                        .entry(edge.candidate.neighbor.clone())
+                        .or_default()
+                        .push(edge);
                 }
             }
             for (entity_id, declarations) in ranges {
                 work.charge(1)?;
                 let range =
                     entity::MemberRange::new(&entity_id).map_err(state_rows::entity_error)?;
-                let members = self.members(&range, &mut budget)?;
+                let members = self.members(&range, &mut budget, &mut expires_at_ms)?;
                 if !members.is_empty() {
+                    let declarations = declarations
+                        .into_iter()
+                        .map(|edge| {
+                            include_expiry(&mut expires_at_ms, edge.expires_at_ms);
+                            edge.candidate
+                        })
+                        .collect();
                     neighbors.push(EntityNeighborCandidates {
                         entity_id,
                         declarations,
@@ -520,6 +675,7 @@ impl Snapshot {
         self.barrier.deliver(|| EntityCandidatePaths {
             seeds,
             neighbors,
+            expires_at_ms,
             _memory: memory,
         })
     }

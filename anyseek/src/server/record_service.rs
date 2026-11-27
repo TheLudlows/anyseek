@@ -9,6 +9,9 @@ mod shutdown;
 mod diagnostics;
 pub(crate) mod local;
 #[cfg(test)]
+#[path = "record_service/entity_tests.rs"]
+mod entity_tests;
+#[cfg(test)]
 #[path = "record_service/diagnostic_tests.rs"]
 mod diagnostic_tests;
 #[cfg(test)]

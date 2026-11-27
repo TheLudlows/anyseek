@@ -108,10 +108,15 @@ pub(crate) struct Range {
 }
 
 impl Range {
-    pub(crate) fn new(direction: EntityDirection, anchor: &str, kind: &str) -> io::Result<Self> {
+    pub(crate) fn validate(anchor: &str, kind: &str) -> io::Result<()> {
         if !entity_id(anchor) || !token(kind, 128) {
             return Err(reject("invalid entity adjacency range"));
         }
+        Ok(())
+    }
+
+    pub(crate) fn new(direction: EntityDirection, anchor: &str, kind: &str) -> io::Result<Self> {
+        Self::validate(anchor, kind)?;
         Ok(Self {
             bounds: Bounds::prefix(prefix(direction, anchor, kind)),
             direction,
@@ -124,20 +129,44 @@ impl Range {
         &self,
         id: &str,
         document: &Document,
-        mut examine: impl FnMut() -> io::Result<()>,
+        examine: impl FnMut() -> io::Result<()>,
     ) -> io::Result<Vec<String>> {
         let mut keys = Vec::new();
-        visit_edges(id, document, |from, kind, to| {
-            examine()?;
-            let (anchor, neighbor) = self.direction.endpoints(from, to);
-            if anchor == self.anchor && kind == self.kind {
-                keys.push(finish_key(self.bounds.lower.clone(), neighbor, id));
-            }
-            Ok(())
+        self.matching_neighbors(id, document, examine, |neighbor| {
+            keys.push(finish_key(self.bounds.lower.clone(), neighbor, id));
         })?;
         keys.sort_unstable();
         keys.dedup();
         Ok(keys)
+    }
+
+    pub(crate) fn matches_neighbor(
+        &self,
+        id: &str,
+        document: &Document,
+        neighbor: &str,
+        examine: impl FnMut() -> io::Result<()>,
+    ) -> io::Result<bool> {
+        let mut matched = false;
+        self.matching_neighbors(id, document, examine, |value| matched |= value == neighbor)?;
+        Ok(matched)
+    }
+
+    fn matching_neighbors(
+        &self,
+        id: &str,
+        document: &Document,
+        mut examine: impl FnMut() -> io::Result<()>,
+        mut accept: impl FnMut(&str),
+    ) -> io::Result<()> {
+        visit_edges(id, document, |from, kind, to| {
+            examine()?;
+            let (anchor, neighbor) = self.direction.endpoints(from, to);
+            if anchor == self.anchor && kind == self.kind {
+                accept(neighbor);
+            }
+            Ok(())
+        })
     }
 
     pub(crate) fn identity(&self, key: &str) -> io::Result<(String, String)> {
