@@ -3,7 +3,7 @@ mod scale;
 // Retained literal membership/score corpora; both length policies run in full.
 #[path = "common/records.rs"]
 mod records;
-use anyseek::record::{RecordError, RecordPartition, RecordQuery};
+use anyseek::record::{RecordPartition, RecordQuery};
 // Literal document membership and an independent BM25 formula are the oracles.
 // Explicit score sorting shares engine code: it is a consistency check, not an oracle.
 use anyseek::{
@@ -18,7 +18,7 @@ use serde_json::json;
 use std::{
     collections::BTreeSet,
     path::{Path, PathBuf},
-    time::{Duration, Instant},
+    time::Instant,
 };
 
 struct Progress {
@@ -41,38 +41,6 @@ impl Progress {
             self.started.elapsed().as_secs_f64()
         );
     }
-}
-
-async fn checkpoint(index: &RecordPartition) {
-    let expected_seq = index.statistics().await.unwrap().visible_seq;
-    let started = Instant::now();
-    let retry_window = Duration::from_secs(300);
-    let mut busy_retries = 0;
-    eprintln!("[lexical-progress] checkpoint begin seq={expected_seq}");
-    let seq = loop {
-        match index.compact_journal().await {
-            Ok(seq) => break seq,
-            // A full fixture can finish writing while an automatic cache
-            // merge owns the partition build slot. Wait for that owner to
-            // finish, and keep all other errors fatal to the fixture.
-            Err(RecordError::Busy) if started.elapsed() < retry_window => {
-                if busy_retries == 0 {
-                    eprintln!("[lexical-progress] checkpoint Busy; retrying seq={expected_seq}");
-                }
-                busy_retries += 1;
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
-            Err(error) => panic!(
-                "checkpoint at seq {expected_seq} failed after {busy_retries} Busy retries ({:.3}s): {error:?}",
-                started.elapsed().as_secs_f64()
-            ),
-        }
-    };
-    assert_eq!(seq, expected_seq, "checkpoint must include all fixture writes");
-    eprintln!(
-        "[lexical-progress] checkpoint complete seq={seq} busy_retries={busy_retries} elapsed={:.3}s",
-        started.elapsed().as_secs_f64()
-    );
 }
 
 async fn reopen(path: &Path) -> RecordPartition {
@@ -240,7 +208,7 @@ async fn mixed_term_membership_scores_and_query_order_case(policy: FieldLengthNo
         / population as f64;
     for stage in 0..3 {
         if stage == 1 {
-            checkpoint(&index).await;
+            records::checkpoint(&index).await;
         }
         if stage == 2 {
             drop(index);
@@ -295,9 +263,9 @@ async fn appended_documents_preserve_scores_and_top1() {
             _ => json!({"title":"","text":"neutral ".repeat(if i<512 {1}else{5})}),
         };
         add(&index, 0, 512, &progress, doc).await;
-        checkpoint(&index).await;
+        records::checkpoint(&index).await;
         add(&index, 512, 576, &progress, doc).await;
-        checkpoint(&index).await;
+        records::checkpoint(&index).await;
         for reopened in [false, true] {
             if reopened {
                 drop(index);
@@ -361,7 +329,7 @@ async fn late_matching_document_remains_in_top2() {
             "alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta", "iota",
         ];
         add(&index,0,522,&progress,|i|json!({"title":"","text":if i==0 {terms.join(" ")}else if i<512 {"neutral ".repeat(10)}else if i<521 {terms[i-512].into()}else{"theta iota".into()}})).await;
-        checkpoint(&index).await;
+        records::checkpoint(&index).await;
         let q = terms.join(" ");
         let all = search(&index, &q, false, 523, false).await;
         assert_eq!(all.len(), 11);
@@ -421,7 +389,7 @@ async fn five_term_union_scores_and_topk_prefix_case(policy: FieldLengthNormaliz
         term_document(&terms, &sets, i)
     })
     .await;
-    checkpoint(&index).await;
+    records::checkpoint(&index).await;
     let avg = (0..population)
         .map(|i| sets.iter().filter(|s| s.contains(&i)).count().max(1))
         .sum::<usize>() as f64
