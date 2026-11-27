@@ -31,7 +31,7 @@ impl Context<'_> {
         cache_merge::reclaim_recovery_caches(self.root,self.index).await?;
         let _disk=crate::storage::build_budget::ensure_scope(self.root,disk_limit).map_err(storage)?;
         let limit=capacity::package_target(self.state.records.len())+1;
-        if self.index.components().await.len()>=limit {
+        if self.index.component_count().await>=limit {
             let compacted=async {
                 let Some(sources)=self.index.capture_merge(cache_merge::MAX_ROWS).await? else{return Ok(false);};
                 let snapshot=match cache_merge::Snapshot::capture(self.state,self.config,&sources) {
@@ -111,7 +111,7 @@ mod tests {
     #[tokio::test(flavor="multi_thread",worker_threads=2)]
     async fn cold_anchor_replay_batches_native_publication_and_keeps_receipts() {
         let temp=tempfile::tempdir().unwrap();let root=temp.path().join("records");
-        let mut cfg=config();cfg.max_operations=512;cfg.max_journal_bytes=16*1024*1024;
+        let mut cfg=config();cfg.max_journal_bytes=16*1024*1024;
         let p=RecordPartition::create(&root,cfg.clone()).await.unwrap();
         for i in 0..8 {let id=format!("r{i}");p.write(write(&id,&id,"alpha base",ExpectedVersion::Absent)).await.unwrap();}
         p.compact_journal().await.unwrap();

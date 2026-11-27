@@ -711,7 +711,7 @@ impl Inner {
         // live derived view has an independent finite component allowance plus
         // one successor, so foreground writes can proceed during a merge.
         let limit=capacity::package_target(self.state.records.len())+1;
-        if self.index.components().await.len()>=limit {
+        if self.index.component_count().await>=limit {
             return Err(self.request_checkpoint(cache_merge::CAUSE));
         }
         let root=self.journal.root().to_path_buf();
@@ -726,7 +726,7 @@ impl Inner {
         self.index.seal_cache_into_successor(successor,&mut self.ordinals,&mut self.locations,budget).await?;
         self.healthy=true;
         self.output.write().map_err(|_|RecordError::RecoveryRequired)?.fenced=fenced;
-        if self.index.components().await.len()>=limit && self.maintenance_requested.is_none() {
+        if self.index.component_count().await>=limit && self.maintenance_requested.is_none() {
             self.maintenance_requested=Some(cache_merge::CAUSE);
         }
         Ok(())
@@ -822,7 +822,7 @@ impl Inner {
             error=>storage(format!("stage=anchor_empty_tail {error}")),
         })?;
         let budget=view::RotationBudget{
-            max_segments:index.components().await.len()+1,
+            max_segments:index.component_count().await+1,
             max_address_slots:capacity::address_slots()?,
         };
         index.rotate_tail(tail,&mut ordinals,&mut locations,budget).await?;
@@ -943,10 +943,10 @@ mod tests {
     }
 
     #[test]
-    fn payload_budget_retains_historical_objects_beyond_live_operation_limit() {
+    fn payload_budget_retains_history_at_exact_byte_boundary() {
         let root=tempfile::tempdir().unwrap();
         let mut settings=config();
-        settings.max_records=1;settings.max_operations=1;settings.max_journal_bytes=128;
+        settings.max_journal_bytes=128;
         let mut closure=Closure::default();
         let mut references=Vec::new();
         for i in 0..4 {
@@ -956,7 +956,6 @@ mod tests {
             references.push((pool.intern(&body).unwrap(),body));
             closure=pool.finish().unwrap();
         }
-        // Four historical bodies exceed the three positions in one small State.
         let reader=PoolReader::open(root.path(),closure.clone(),budget(&settings).unwrap()).unwrap();
         for (reference,body) in references {assert_eq!(reader.read(&reference).unwrap(),body);}
         let exact=closure.objects.values().map(|object|object.bytes).sum();
@@ -1291,14 +1290,14 @@ mod tests {
     #[tokio::test]
     async fn automatic_seal_leaves_checkpoint_unchanged_and_replays_complete_suffix() {
         let root=tempfile::tempdir().unwrap();let path=root.path().join("partition");let mut settings=config();
-        settings.max_records=256;settings.max_operations=512;settings.max_candidates=256;
+        settings.max_candidates=256;
         settings.max_journal_bytes=16*1024*1024;
         let p=RecordPartition::create(&path,settings.clone()).await.unwrap();
         p.write(write("seed","seed","alpha",ExpectedVersion::Absent)).await.unwrap();p.compact_journal().await.unwrap();
         let selected=p.inner.lock().await.anchor.as_ref().unwrap().id.clone();
         let mut receipts=Vec::new();
         for n in 0..129 {let req=write(&format!("op-{n}"),&format!("r-{n}"),"alpha",ExpectedVersion::Absent);let receipt=p.write(req.clone()).await.unwrap();receipts.push((req,receipt));}
-        {let inner=p.inner.lock().await;assert_eq!(inner.anchor.as_ref().unwrap().id,selected,"native rotation must not replace the State checkpoint");assert!(inner.index.detached_cache);assert_eq!(inner.index.components().await.len(),3);}
+        {let inner=p.inner.lock().await;assert_eq!(inner.anchor.as_ref().unwrap().id,selected,"native rotation must not replace the State checkpoint");assert!(inner.index.detached_cache);assert_eq!(inner.index.component_count().await,3);}
         assert_eq!(p.search("alpha".into(),None,SearchMode::Lexical,vec![],200).await.unwrap().count_total,130);
         p.finish_service_shutdown().await.unwrap();drop(p);
         std::fs::write(path.join(".test-recovery-after-derived-seal"),b"fail").unwrap();
@@ -1505,8 +1504,6 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("partition");
         let mut settings = config();
-        settings.max_records = 128;
-        settings.max_operations = 256;
         settings.max_candidates = 128;
         let mut p = RecordPartition::create(&path, settings.clone()).await.unwrap();
         let mut receipts = Vec::new();

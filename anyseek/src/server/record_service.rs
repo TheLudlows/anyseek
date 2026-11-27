@@ -1941,17 +1941,6 @@ fn service_layers(app: Router<Arc<Service>>, service: Arc<Service>) -> Router {
 mod tests {
     use super::*;
     #[test]
-    fn legacy_capacity_profiles_preserve_config_and_resource_budgets() {
-        let request=||serde_json::from_value::<CreateIndexRequest>(json!({"index_name":"capacity","schema":[]})).unwrap();
-        let standard=record_config(request(),None,CapacityProfile::default()).unwrap();
-        let larger=record_config(request(),None,serde_json::from_value(json!("bounded_100k")).unwrap()).unwrap();
-        assert_eq!((standard.max_records,standard.max_operations),(10_000,10_000));
-        assert_eq!((larger.max_records,larger.max_operations),(100_000,100_000));
-        assert_eq!(larger.max_journal_bytes,standard.max_journal_bytes);
-        assert_eq!(larger.max_candidates,standard.max_candidates);
-        assert!(serde_json::from_value::<CapacityProfile>(json!("unlimited")).is_err());
-    }
-    #[test]
     fn admission_errors_do_not_claim_a_definitive_write_rejection() {
         for error in [Error::from(RecordError::Busy), Error::from(CatalogError::Busy)] {
             assert_eq!(error.0, StatusCode::TOO_MANY_REQUESTS);
@@ -2412,7 +2401,8 @@ mod tests {
             "collection_id":id,"config":{"index_name":"schema","schema":[{"field":"body","field_type":"Text"}]}});
         let omitted = request("omitted");
         assert_eq!(tenant_api(&app,"POST","/api/v1/index",key,Some(omitted.clone())).await.0, StatusCode::OK);
-        assert_eq!(service.record("tenant","omitted").await.unwrap().configuration().await.unwrap().max_records, 10_000);
+        let default = service.record("tenant", "omitted").await.unwrap().configuration().await.unwrap();
+        assert_eq!((default.max_records, default.max_operations), (10_000, 10_000));
         let (status, details) = tenant_api(&app, "GET", "/api/v1/index/omitted", key, None).await;
         assert_eq!(status, StatusCode::OK);
         let limits = json!({"max_journal_bytes": 256 * 1024 * 1024, "max_candidates": 10_000});
@@ -2429,10 +2419,9 @@ mod tests {
             let (status, details) = tenant_api(&app,"GET",&format!("/api/v1/index/{id}"),key,None).await;
             assert_eq!(status, StatusCode::OK);
             assert_eq!(details["limits"], limits);
-            let parsed: CapacityProfile = serde_json::from_value(profile.clone()).unwrap();
-            let config = serde_json::from_value(request(&id)["config"].clone()).unwrap();
-            assert_eq!(service.record("tenant",&id).await.unwrap().configuration().await.unwrap().max_records,
-                record_config(config,None,parsed).unwrap().max_records);
+            let config = service.record("tenant", &id).await.unwrap().configuration().await.unwrap();
+            let legacy_count = [10_000, 100_000][i];
+            assert_eq!((config.max_records, config.max_operations), (legacy_count, legacy_count));
         }
         for invalid in [json!("unlimited"), Value::Null] {
             let mut body = request("invalid"); body["capacity_profile"] = invalid;

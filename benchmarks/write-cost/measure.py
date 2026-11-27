@@ -108,7 +108,7 @@ def prepare(binary, out, n, cpus, epoch):
             {'field': 'vector', 'field_type': 'Json', 'store': True, 'index_lexical': False, 'index_vector': True}],
             'vector': {'dimensions': 32}}
         server.call('POST', '/api/v1/index', {'operation_id': oid(epoch, 'collection'), 'collection_id': 'bench',
-                    'config': config, 'capacity_profile': 'standard_10k'})
+                    'config': config})
         for start in range(0, n, 64):
             rows = [{'operation_id': oid(epoch, f'seed-{i}'), 'record_id': f'r{i:06d}', 'expected': 'Absent',
                      'document': {'body': 'seedword '+('padding '*30), 'group': 0, 'vector': V1}}

@@ -100,6 +100,10 @@ impl RetrievalView {
     pub(super) async fn capture_query(&self,length:usize)->Result<super::query::Handle,RecordError> {
         super::query::Handle::capture(&self.query,length).await
     }
+    pub(super) async fn component_count(&self) -> usize {
+        self.query.read().await.segments.len()
+    }
+    #[cfg(test)]
     pub(super) async fn components(&self)->Vec<crate::component::VectorSegmentArc> {
         self.query.read().await.segments.iter().map(|segment| segment.vector.clone()).collect()
     }

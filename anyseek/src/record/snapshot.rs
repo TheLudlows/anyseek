@@ -249,8 +249,6 @@ mod tests {
     async fn independent_snapshot_exceeds_one_frame_preserving_all_receipts() {
         let root = tempfile::tempdir().unwrap();
         let mut settings = config();
-        settings.max_records = 512;
-        settings.max_operations = 1024;
         settings.max_record_bytes = 64 * 1024;
         settings.max_journal_bytes = 128 * 1024 * 1024;
         let source = RecordPartition::create(&root.path().join("source"), settings.clone())

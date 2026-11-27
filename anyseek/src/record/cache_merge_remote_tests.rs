@@ -10,8 +10,6 @@ async fn remote_long_suffix_merges_caches_without_replacing_anchor_and_cold_reco
     let root=temporary.path().join("warm-cache");
     let authority_path=temporary.path().join("authority.sqlite");
     let mut settings=config();
-    settings.max_records=16;
-    settings.max_operations=4096;
     settings.max_journal_bytes=16*1024*1024;
     let p=RecordPartition::create(&root,settings.clone()).await.unwrap();
     let backend=Arc::new(InMemory::new());
@@ -64,7 +62,7 @@ async fn remote_long_suffix_merges_caches_without_replacing_anchor_and_cold_reco
         let inner=p.inner.lock().await;
         assert_eq!(inner.anchor.as_ref().unwrap().identity(),anchor);
         assert!(inner.index.detached_cache,"the suffix must exercise independent cache maintenance");
-        assert!(inner.index.components().await.len()<=capacity::package_target(inner.state.records.len())+1);
+        assert!(inner.index.component_count().await<=capacity::package_target(inner.state.records.len())+1);
         let remote=inner.remote.as_ref().unwrap();
         let head=remote.authority.lock().await.read_head("long-suffix").unwrap().unwrap();
         assert_eq!(head.manifest,manifest,"cache maintenance must not publish a new authority checkpoint");

@@ -40,7 +40,7 @@ mod tests {
         let mut outcomes=Vec::new();
         for anchored in [false,true] {
             let root=tempfile::tempdir().unwrap();let path=root.path().join("records");
-            let mut settings=super::super::tests::config();settings.max_records=256;settings.max_operations=512;
+            let mut settings=super::super::tests::config();
             settings.max_record_bytes=16*1024;settings.max_journal_bytes=32*1024*1024;
             let p=RecordPartition::create(&path,settings.clone()).await.unwrap();
             let mut shared_prefix=0;
@@ -307,7 +307,7 @@ mod tests {
     async fn native_hard_pressure_returns_busy_before_accepting_and_worker_makes_progress() {
         trace_timings();
         use super::super::tests::{config,path,write};
-        let root=path();let mut settings=config();settings.max_records=256;settings.max_operations=2048;
+        let root=path();let mut settings=config();
         let lifecycle=std::sync::Arc::new(crate::resources::Lifecycle::default());
         let activity=lifecycle.enter().unwrap();
         let (p,request,receipt)=activity.run(async {

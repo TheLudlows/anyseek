@@ -113,7 +113,7 @@ mod tests {
         drop(initial);
 
         let partition = RecordPartition::open(&path, config.max_journal_bytes).await.unwrap();
-        assert_eq!(partition.inner.lock().await.index.components().await.len(), 3);
+        assert_eq!(partition.inner.lock().await.index.component_count().await, 3);
         partition.write(tests::write("new", "new", "alpha", ExpectedVersion::Absent)).await.unwrap();
         let result = partition.search("alpha".into(), None, SearchMode::Lexical, vec![], 10).await.unwrap();
         assert_eq!(result.count_total, seed_count + 1);

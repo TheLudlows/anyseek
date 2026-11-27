@@ -261,7 +261,7 @@ master POST `/api/v1/service-backups`（`{operation_id}`）冻结 catalog、所�
 | Record 身份含墓碑、保留操作 | 由内存、日志和检查点字节等资源预算约束。回执默认最早在两天后进入回收资格，另须超出当前/前一 UTC 日重试窗口并满足认证历史切点及保护条件；维护可延迟，不保证两天内完成清理 |
 | 查询候选 | 10,000 |
 | 操作 / HTTP body / 响应 | 1 MiB / 2 MiB / 16 MiB |
-| Record WAL / 完整 checkpoint | 256 MiB 代预算，完整 checkpoint 另受 16 MiB 单帧限制 |
+| Record WAL / 完整 checkpoint | 256 MiB 代预算。WAL 和检查点的单个帧最多 16 MiB，完整检查点可分帧保存 |
 | Catalog | 16 MiB 元数据、10,000 操作，仅安全回收过期控制回执 |
 | admission | 普通 32/每集合 16、恢复 2/1、后台 2/1、可信控制 8/2、公共/存活 8/8；partition 内部 16；30 秒请求期限 |
 | 调度 | 不同 collection 可并行；共同快照保留全局屏障，已接管工作保留命名空间，资源不足立即 Busy |

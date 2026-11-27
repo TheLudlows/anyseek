@@ -241,7 +241,7 @@ mod replay_size_tests {
     use super::*;
     #[test]
     fn durable_size_matches_full_wire_with_tombstones_and_digit_boundaries() {
-        let mut config=super::super::tests::config();config.max_records=512;config.max_operations=512;config.max_record_bytes=1024*1024;config.max_journal_bytes=16*1024*1024;
+        let mut config=super::super::tests::config();config.max_record_bytes=1024*1024;config.max_journal_bytes=16*1024*1024;
         let mut state=State::default();let mut before=checkpoint_codec::length(&config,&state).unwrap();
         for i in 0..104 {
             let id=if i<100{format!("id-\"{i}繁")}else{"id-\"0繁".into()};

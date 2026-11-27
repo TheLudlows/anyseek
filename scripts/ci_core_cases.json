@@ -183,7 +183,7 @@
   "record::history::retention_tests::ordinary_writes_advance_retention_without_dropping_recent_receipts",
   "record::tests::removed_upload_envelope_is_rejected_but_business_generation_is_opaque",
   "record::tests::previous_record_storage_formats_are_rejected",
-  "record::anchor::tests::payload_budget_retains_historical_objects_beyond_live_operation_limit",
+  "record::anchor::tests::payload_budget_retains_history_at_exact_byte_boundary",
   "record::segment_state::tests::state_payload_visitor_includes_records_and_vector_patches",
   "record::tests::record_identity_contract_rejects_removed_fields",
   "record::tests::record_protocol_rejects_old_checkpoint_without_migration",

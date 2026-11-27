@@ -266,7 +266,7 @@ impl RecordPartition {
                 let cache = root.join(format!("segment-{:032x}",rand::random::<u128>()));
                 let (tail,_) = build_at(&root,&cache,&config,&State::default()).await?;
                 let budget=view::RotationBudget{
-                    max_segments:index.components().await.len()+1,
+                    max_segments:index.component_count().await+1,
                     max_address_slots:capacity::address_slots()?,
                 };
                 index.rotate_tail(tail,&mut ordinals,&mut locations,budget).await?;

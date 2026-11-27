@@ -668,7 +668,7 @@ mod tests {
             assert!(output.status.success(),"{}\n{}",String::from_utf8_lossy(&output.stdout),String::from_utf8_lossy(&output.stderr));return;
         }
         let root=tempfile::tempdir().unwrap();let mut config=super::super::tests::config();
-        config.max_records=256;config.max_operations=256;config.max_record_bytes=16*1024;config.max_journal_bytes=16*1024*1024;
+        config.max_record_bytes=16*1024;config.max_journal_bytes=16*1024*1024;
         let mut state=State{lineage:"0".repeat(32),history:history::HistoryState{scope:"1".repeat(32),floor:0},..State::default()};
         state.admit_bytes(checkpoint_codec::json_length(&state).unwrap()).unwrap();
         let mut snapshot=checkpoint_codec::length(&config,&state).unwrap();

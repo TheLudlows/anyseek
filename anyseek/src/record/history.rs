@@ -193,7 +193,7 @@ mod retention_tests {
     #[tokio::test]
     async fn ordinary_writes_advance_retention_without_dropping_recent_receipts() {
         let root=tempfile::tempdir().unwrap();
-        let mut settings=config();settings.max_operations=2048;settings.max_journal_bytes=4*1024*1024;
+        let mut settings=config();settings.max_journal_bytes=4*1024*1024;
         let initial=RecordPartition::create(&root.path().join("initial"),settings.clone()).await.unwrap();
         let mut state=initial.inner.lock().await.state.try_clone().unwrap();
         drop(initial);

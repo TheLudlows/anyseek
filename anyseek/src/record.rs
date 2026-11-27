@@ -1418,7 +1418,7 @@ impl RecordPartition {
             let target=path.join(format!("segment-{:032x}",rand::random::<u128>()));
             let (tail,_)=build_at(path,&target,&config,&State::default()).await?;
             let budget=view::RotationBudget{
-                max_segments:index.components().await.len()+1,
+                max_segments:index.component_count().await+1,
                 max_address_slots:capacity::address_slots()?,
             };
             index.rotate_tail(tail,&mut ordinals,&mut locations,budget).await?;
@@ -3162,7 +3162,6 @@ mod tests {
     async fn record_incremental_crosses_physical_block_with_retired_history() {
         let location = path();
         let mut settings = config();
-        settings.max_operations = 100_000;
         settings.max_journal_bytes = 128 * 1024 * 1024;
         settings.schema.push(serde_json::from_value(serde_json::json!({"field":"region", "field_type":"String", "store":false, "index_lexical":false, "facet":true})).unwrap());
         let partition = RecordPartition::create(&location, settings).await.unwrap();

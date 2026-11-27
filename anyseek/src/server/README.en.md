@@ -247,7 +247,7 @@ Omit `capacity_profile` when creating a collection. The service still accepts th
 | Record identities including tombstones, retained operations | Governed by resource budgets for memory, journal and checkpoint bytes. Receipts are eligible for reclamation after at least two days, and only after the current and prior UTC day retry window and when the certified history cut and protection requirements are met. Maintenance can be delayed and does not guarantee cleanup within two days. |
 | Query candidates | 10,000 |
 | Operation / HTTP body / response | 1 MiB / 2 MiB / 16 MiB |
-| Record WAL / full checkpoint | 256 MiB generation budget. A full checkpoint also has a 16 MiB single-frame limit. |
+| Record WAL / full checkpoint | 256 MiB generation budget. Individual WAL and checkpoint frames are limited to 16 MiB. A complete checkpoint can span multiple frames. |
 | Catalog | 16 MiB of metadata, 10,000 operations, safe reclamation for expired control receipts only |
 | admission | Ordinary 32 / 16 per collection, recovery 2/1, background 2/1, trusted control 8/2, public/liveness 8/8, internal partition 16, and a 30-second request deadline. |
 | Scheduling | Different collections can run concurrently. Shared snapshots retain a global barrier. Accepted work retains its namespace. Insufficient resources return Busy immediately. |

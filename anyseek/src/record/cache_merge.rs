@@ -208,7 +208,7 @@ impl RecordPartition {
                 inner.output.write().map_err(|_|RecordError::RecoveryRequired)?.fenced=true;
             }
             if result.is_err() && inner.maintenance_requested.is_none()
-                && inner.index.components().await.len()>=capacity::package_target(inner.state.records.len())+1 {
+                && inner.index.component_count().await>=capacity::package_target(inner.state.records.len())+1 {
                 inner.maintenance_requested=Some("cache_merge_retry_checkpoint");
             }
             if inner.healthy {
@@ -283,7 +283,7 @@ mod tests {
         p.write(write("d","d","alpha",ExpectedVersion::Absent)).await.unwrap();
         std::fs::remove_file(root.join(".test-cache-merge-pause")).unwrap();
         assert_eq!(job.finish().await.unwrap(),3);
-        {let inner=p.inner.lock().await;assert!(inner.anchor.is_none());assert_eq!(inner.state.seq,6);assert!(inner.index.detached_cache);assert_eq!(inner.index.components().await.len(),2);}
+        {let inner=p.inner.lock().await;assert!(inner.anchor.is_none());assert_eq!(inner.state.seq,6);assert!(inner.index.detached_cache);assert_eq!(inner.index.component_count().await,2);}
         assert_eq!(held.identities.len(),1);
         assert_eq!(p.search("alpha".into(),None,SearchMode::Lexical,vec![],10).await.unwrap().count_total,2);
         assert_eq!(p.get("a").await.unwrap().unwrap().version,2);
@@ -300,7 +300,7 @@ mod tests {
         std::fs::write(root.join(".test-cache-merge-fail-before-install"),b"failure").unwrap();
         assert_eq!(p.start_cache_merge_job(Duration::from_secs(20)).unwrap().finish().await,
             Err(storage("injected private cache candidate failure")));
-        {let inner=p.inner.lock().await;assert!(inner.healthy);assert!(inner.background.is_none());assert!(inner.anchor.is_none());assert_eq!(inner.index.components().await.len(),3);}
+        {let inner=p.inner.lock().await;assert!(inner.healthy);assert!(inner.background.is_none());assert!(inner.anchor.is_none());assert_eq!(inner.index.component_count().await,3);}
         assert_eq!(p.search("alpha".into(),None,SearchMode::Lexical,vec![],10).await.unwrap().count_total,3);
         p.finish_service_shutdown().await.unwrap();drop(p);
         let p=RecordPartition::open(&root,config().max_journal_bytes).await.unwrap();
@@ -327,7 +327,7 @@ mod tests {
     #[tokio::test]
     async fn repeated_updates_beyond_sixteen_tails_recover_from_original_wal() {
         let temporary=tempfile::tempdir().unwrap();let root=temporary.path().join("records");
-        let mut settings=config();settings.max_records=16;settings.max_operations=4096;settings.max_journal_bytes=16*1024*1024;
+        let mut settings=config();settings.max_journal_bytes=16*1024*1024;
         let p=RecordPartition::create(&root,settings.clone()).await.unwrap();
         p.compact_journal().await.unwrap();
         let certificate=p.inner.lock().await.anchor.as_ref().unwrap().identity().to_owned();
@@ -337,7 +337,7 @@ mod tests {
             crate::record::tests::commit_after_backpressure(&p,batch).await;p.inner.lock().await.index.drain_indexes().await.unwrap();
         }
         crate::record::tests::wait_maintenance_idle(&p).await;
-        {let inner=p.inner.lock().await;assert_eq!(inner.anchor.as_ref().unwrap().identity(),certificate,"cache merges must not replace the checkpoint");assert!(inner.index.components().await.len()<=capacity::package_target(inner.state.records.len())+1);}
+        {let inner=p.inner.lock().await;assert_eq!(inner.anchor.as_ref().unwrap().identity(),certificate,"cache merges must not replace the checkpoint");assert!(inner.index.component_count().await<=capacity::package_target(inner.state.records.len())+1);}
         log::info!("record_maintenance marker=long_suffix_before_drop");
         p.finish_service_shutdown().await.unwrap();
         drop(p);
@@ -351,7 +351,7 @@ mod tests {
     #[tokio::test]
     async fn recovery_rebuilds_private_cache_when_optional_merge_budget_is_exhausted() {
         let temporary=tempfile::tempdir().unwrap();let root=temporary.path().join("records");
-        let mut settings=config();settings.max_records=64;settings.max_record_bytes=16384;settings.max_journal_bytes=4*1024*1024;
+        let mut settings=config();settings.max_record_bytes=16384;settings.max_journal_bytes=4*1024*1024;
         let p=RecordPartition::create(&root,settings.clone()).await.unwrap();
         p.compact_journal().await.unwrap();
         let certificate=p.inner.lock().await.anchor.as_ref().unwrap().identity().to_owned();
@@ -364,7 +364,7 @@ mod tests {
         std::fs::write(root.join(".test-cache-merge-build-budget"),b"512").unwrap();
         let mut padded=0;
         for _ in 0..3 {
-            while p.inner.lock().await.index.components().await.len()<capacity::package_target(64)+1 {
+            while p.inner.lock().await.index.component_count().await<capacity::package_target(64)+1 {
                 let id=format!("pad-{padded}");padded+=1;
                 p.write(write(&id,&id,&"alpha ".repeat(1000),ExpectedVersion::Absent)).await.unwrap();rotate(&p).await;
             }
@@ -373,7 +373,7 @@ mod tests {
             inner.replay_context().stage_stable_tail().await.unwrap();
             assert_eq!(inner.journal.physical_bytes(),before);
             assert_eq!(inner.anchor.as_ref().unwrap().identity(),certificate);
-            assert_eq!(inner.index.components().await.len(),2,"budget pressure must use full private cache fallback");
+            assert_eq!(inner.index.component_count().await,2,"budget pressure must use full private cache fallback");
             let current=inner.index.storage_paths().await;
             let caches=std::fs::read_dir(&root).unwrap().filter_map(Result::ok)
                 .filter(|entry|entry.file_name().to_string_lossy().starts_with("cache-")).count();

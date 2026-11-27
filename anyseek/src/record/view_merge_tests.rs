@@ -57,7 +57,7 @@ async fn merge_install_discards_concurrent_updates_and_deletes() {
     let seq = p.inner.lock().await.state.seq;
     install(&p, &sources, candidate).await;
     assert_eq!(p.inner.lock().await.state.seq, seq, "cache merge is not a Record commit");
-    assert_eq!(p.inner.lock().await.index.components().await.len(), 2);
+    assert_eq!(p.inner.lock().await.index.component_count().await, 2);
     let found = p.search("alpha".into(), None, SearchMode::Lexical, vec![], 10).await.unwrap();
     assert_eq!(found.hits.iter().map(|hit| hit.record.record_id.as_str()).collect::<BTreeSet<_>>(), BTreeSet::from(["c", "d"]));
     assert_eq!(p.search("beta".into(), None, SearchMode::Lexical, vec![], 10).await.unwrap().hits.len(), 1);
@@ -158,7 +158,7 @@ async fn merge_rejection_keeps_addresses_and_reader_pins_protect_retired_files()
         assert!(index.install_merge(&sources, candidate.clone(), ordinals, locations, 1).await.is_err());
         assert_eq!(*ordinals, old_ordinals);
         assert_eq!(*locations, old_locations);
-        assert_eq!(index.components().await.len(), 3);
+        assert_eq!(index.component_count().await, 3);
     }
     install(&p, &sources, candidate).await;
     drop(sources);

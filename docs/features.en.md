@@ -26,7 +26,7 @@ The derived full-text index uses Tantivy and WAL-backed queryable deltas. Backgr
 
 - [Service guide](../anyseek/src/server/README.en.md) covers startup, authentication, HTTP examples, queries, backup, and restoration.
 - [Console guide](../console/README.en.md) covers tenant connections, import, embedding services, search, and deployment.
-- [Resource and acceptance boundaries](../anyseek/src/server/README.en.md#current-resource-and-acceptance-boundaries) covers capacity profiles, requests and responses, concurrency, bytes, and I/O budgets.
+- [Resource and acceptance boundaries](../anyseek/src/server/README.en.md#current-resource-and-acceptance-boundaries) covers requests and responses, concurrency, bytes, and I/O budgets.
 - [Roadmap and acceptance evidence](roadmap.en.md) covers pending work, measurement scope, and unverified environments.
 
 Collections admit writes according to resource budgets. The query candidate cap is 10,000. The complete logical State is resident in memory. Unlimited writes, stable disk use, and a hard cap on whole-process RSS are beyond the guarantee. Receipts become eligible for reclamation after at least two days, subject to the safe cut and protection conditions.

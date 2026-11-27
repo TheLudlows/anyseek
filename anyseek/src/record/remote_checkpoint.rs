@@ -1353,8 +1353,7 @@ mod tests {
     }
     #[tokio::test]
     async fn remote_seal_keeps_checkpoint_and_cold_replays_pending_packages() {
-        let mut settings=config();settings.max_records=256;settings.max_operations=256;
-        let (p,_store,root,_db,clock)=source_config(settings).await;
+        let (p,_store,root,_db,clock)=source_config(config()).await;
         p.write(write("seed","seed","alpha",ExpectedVersion::Absent)).await.unwrap();
         p.compact_journal().await.unwrap();
         let before={let inner=p.inner.lock().await;let remote=inner.remote.as_ref().unwrap();let head=remote.authority.lock().await.read_head("source").unwrap().unwrap();head};
@@ -1362,7 +1361,7 @@ mod tests {
         for i in 0..129 {let request=write(&format!("op{i}"),&format!("r{i}"),"alpha",ExpectedVersion::Absent);let receipt=p.write(request.clone()).await.unwrap();receipts.push((request,receipt));}
         {let inner=p.inner.lock().await;let remote=inner.remote.as_ref().unwrap();let head=remote.authority.lock().await.read_head("source").unwrap().unwrap();
             assert_eq!(head.indexed_seq,before.indexed_seq);assert_eq!(head.log_base_seq,before.log_base_seq);assert_eq!(head.manifest,before.manifest);
-            assert_eq!(head.committed_seq,130);assert!(inner.index.components().await.len()>1);
+            assert_eq!(head.committed_seq,130);assert!(inner.index.component_count().await>1);
             let selected=remote.selected(&head,true).await.unwrap();assert_eq!(selected.checkpoint_ref,before.manifest.clone().unwrap());assert!(selected.index.is_none());}
         let expected=scores(&p).await;
         let p=cold(p,&root,clock).await;
