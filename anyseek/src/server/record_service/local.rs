@@ -293,6 +293,18 @@ impl LocalEngine {
             })).await.map_err(|_| LocalError::unavailable("busy"))?
     }
 
+    /// Fuse independent event time and exact-vector ranks at a single authorized cut.
+    pub async fn query_time_vector(
+        &self, tenant: &str, collection: &str, request: TimeVectorRequest,
+    ) -> Result<TimeVectorResult, LocalError> {
+        let deadline = tokio::time::Instant::now() + self.service()?.request_timeout;
+        tokio::time::timeout_at(deadline, self.run(tenant, collection, Lane::Foreground,
+            async move |service, tenant, collection| {
+                let (result, data) = query_time_vector_collection(&service, tenant, collection, request, deadline).await?;
+                Ok(data.deliver_after_publication(|| result).await??)
+            })).await.map_err(|_| LocalError::unavailable("busy"))?
+    }
+
     /// Read the current version of a publication group if present.
     pub async fn group_version(
         &self,

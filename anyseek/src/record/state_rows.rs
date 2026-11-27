@@ -11,6 +11,9 @@ use std::collections::BTreeSet;
 const SEGMENT: u64 = 0;
 
 pub(super) fn read_error(error: std::io::Error) -> RecordError {
+    if let Some(reason) = error.get_ref().and_then(|cause| cause.downcast_ref::<RecordError>()) {
+        return reason.clone();
+    }
     if error
         .get_ref()
         .is_some_and(|cause| cause.is::<crate::resources::Busy>())

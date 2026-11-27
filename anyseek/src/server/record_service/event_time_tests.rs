@@ -75,6 +75,136 @@ fn bounded_request() -> Value {
                   {"StringSet":{"field":"tags","filter":["blue","green"]}}]})
 }
 
+#[test]
+fn event_time_vector_openapi_keeps_ordinary_and_mixed_query_shapes() {
+    let doc = openapi_document();
+    let query = &doc["paths"]["/api/v1/index/{id}/query"]["post"];
+    let input = &query["requestBody"]["content"]["application/json"]["schema"]["oneOf"];
+    assert_eq!(input[0]["$ref"], "#/components/schemas/SearchRequestObject");
+    assert_eq!(input[1]["$ref"], "#/components/schemas/TimeVectorRequest");
+    let output = &query["responses"]["200"]["content"]["application/json"]["schema"]["oneOf"];
+    assert_eq!(
+        output[0]["properties"]["diagnostics"]["$ref"],
+        "#/components/schemas/QueryDiagnostics"
+    );
+    assert_eq!(output[1]["$ref"], "#/components/schemas/TimeVectorResult");
+    assert_eq!(
+        doc["components"]["schemas"]["TimeVectorRequest"]["properties"]["all"]["const"],
+        true
+    );
+    assert!(
+        doc["components"]["schemas"]["EventTimeRequest"]["properties"]
+            .get("recall")
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn event_time_vector_http_respects_authorization_and_publication() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("catalog");
+    let service = open(&root).await;
+    let app = router(service.clone());
+    let (status, created) = namespace_api(&app, "POST", "/api/v1/index", "tenant", Some(json!({
+        "operation_id":OperationId::new("create-mixed".into()),"collection_id":"window",
+        "embedding_space_id":"fixture", "config":{"index_name":"window","vector":{"dimensions":2},"schema":[
+            {"field":"body","field_type":"Text","store":true}, {"field":"private","field_type":"Text","store":false},
+            {"field":"vector","field_type":"Json","index_vector":true}
+        ]}
+    }))).await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    let dated = |id, time, vector: Value| {
+        json!({"operation_id":OperationId::new(String::from(id)),"record_id":id,
+        "expected":"Absent","temporal":{"event_time_ms":time},"document":{"body":id,"private":"hidden","vector":vector}})
+    };
+    let (status, written) = namespace_api(
+        &app,
+        "POST",
+        BATCH,
+        "tenant",
+        Some(json!({"writes":[
+            dated("both", 20, json!([1,0])), dated("later", 100, json!([0,1]))
+        ]})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{written}");
+    assert_eq!(written["results"][1]["code"], "applied");
+
+    let path = "/api/v1/index/window/query";
+    let query = json!({"recall":{"time":{"from_ms":18,"to_ms":22}},"query_vector":[1,0],"all":true,
+        "length":2,"fields":["body","private"]});
+    let routes = &app;
+    let call = |tenant, request| async move {
+        decode_response(namespace_response(routes, "POST", path, tenant, Some(request)).await).await
+    };
+    let (status, missing) = call("tenant", query.clone()).await;
+    assert_eq!(
+        (status, missing["code"].as_str()),
+        (StatusCode::BAD_REQUEST, Some("event_time_unavailable"))
+    );
+    assert_eq!(
+        build(&app, master_headers(), "window").await,
+        (StatusCode::OK, json!({"indexed_seq":2}))
+    );
+    let (status, body) = call("tenant", query.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["visible_seq"], 2);
+    assert!(body["count_total"].is_null());
+    assert_eq!(
+        body["hits"][0]["record"]["document"],
+        json!({"body":"both"})
+    );
+    assert_eq!(body["hits"][0]["channels"][0]["channel"], "time");
+    assert_eq!(body["hits"][0]["channels"][1]["channel"], "vector");
+    assert_eq!(body["hits"][1]["record"]["record_id"], "later");
+    assert_eq!(
+        call("outside", query.clone()).await.0,
+        StatusCode::FORBIDDEN
+    );
+    for (field, value) in [
+        ("query", json!("lexical")),
+        ("nprobe", json!(1)),
+        ("all", json!(false)),
+        ("count", json!(true)),
+    ] {
+        let mut unsupported = query.clone();
+        unsupported[field] = value;
+        assert_eq!(call("tenant", unsupported).await.0, StatusCode::BAD_REQUEST);
+    }
+    let mut budget = query.clone();
+    budget["offset"] = json!(64);
+    let (_, rejected) = call("tenant", budget).await;
+    assert_eq!(rejected["code"], "event_time_budget");
+
+    let entry = service
+        .catalog
+        .collection_entry("tenant", "window")
+        .await
+        .unwrap();
+    let gate = root
+        .join(entry.directory())
+        .join(".test-vector-consumer-pause");
+    std::fs::write(&gate, b"pause").unwrap();
+    let (status, written) = namespace_api(
+        &app,
+        "POST",
+        "/api/v1/index/window/ingest",
+        "tenant",
+        Some(json!({"records":[dated("tail", 21, json!([1,0]))]})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{written}");
+    assert_eq!(written["results"][0]["receipt"]["seq"], 3);
+    let busy = call("tenant", query).await;
+    std::fs::remove_file(gate).unwrap();
+    assert_eq!(
+        (busy.0, busy.1["code"].as_str()),
+        (StatusCode::TOO_MANY_REQUESTS, Some("busy"))
+    );
+    drop(app);
+    service.shutdown().wait().await.unwrap();
+}
+
 #[tokio::test]
 async fn event_time_http_authority_reopen_and_work_limits() {
     let temp = tempfile::tempdir().unwrap();

@@ -624,6 +624,59 @@ async fn event_time_vector_cut_refuses_topology_handoff_and_group_publication() 
 }
 
 #[tokio::test]
+async fn event_time_vector_charges_positioned_ranges_and_bytes_through_delivery() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("records");
+    let p = RecordPartition::create(&root, config()).await.unwrap();
+    p.write(dated("base", "base", 25, ExpectedVersion::Absent))
+        .await
+        .unwrap();
+    assert_eq!(build(&p).await, 1);
+    let request = || TimeVectorQuery {
+        window: TimeRange {
+            from_ms: Some(20),
+            to_ms: Some(26),
+        },
+        temporal: None,
+        vector: Embedding::F32(vec![1., 0.]),
+        facets: vec![],
+        fields: vec!["body".into()],
+        offset: 0,
+        length: 1,
+    };
+    let deadline = native_deadline();
+    let initial = (128, 128 * 1024);
+    let work = Arc::new(crate::search::QueryWork::new(
+        4096, initial.0, initial.1, deadline,
+    ));
+    let output = p
+        .query_time_vector_with_work(request(), deadline, work.clone())
+        .await
+        .map_err(|error| error.record_error())
+        .unwrap();
+    assert_eq!(output.hits.len(), 1);
+    assert_eq!(output.hits[0].channels.len(), 2);
+    let remaining = work.remaining_io();
+    let measured = (initial.0 - remaining.0, initial.1 - remaining.1);
+    assert!(
+        measured.0 > 3 && measured.1 > 4096,
+        "positioned projection, Record and vector reads {measured:?}"
+    );
+    eprintln!(
+        "time, vector and selected-record readback: {} range requests / {} bytes",
+        measured.0, measured.1
+    );
+    for (reads, bytes) in [(measured.0 - 1, initial.1), (initial.0, measured.1 - 1)] {
+        let deadline = native_deadline();
+        let work = Arc::new(crate::search::QueryWork::new(4096, reads, bytes, deadline));
+        assert!(
+            matches!(p.query_time_vector_with_work(request(), deadline, work).await,
+            Err(EventTimeError::Record(RecordError::Rejected(message))) if message.contains("positioned read budget"))
+        );
+    }
+}
+
+#[tokio::test]
 async fn event_time_vector_budget_counts_filtered_work_across_selected_shards() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("records");
@@ -765,27 +818,46 @@ async fn event_time_vector_cut_rejects_expiry_outside_the_time_window_and_versio
     vector_only.temporal.as_mut().unwrap().expire_at_ms = Some(now + 2000);
     p.write(vector_only).await.unwrap();
     assert_eq!(build(&p).await, 2);
-    let (window, vector, _) = p
-        .probe_event_time_vector_cut(25..26, 2, 4096, vec![], native_deadline())
+    let request = || TimeVectorQuery {
+        window: TimeRange {
+            from_ms: Some(25),
+            to_ms: Some(26),
+        },
+        temporal: None,
+        vector: Embedding::F32(vec![1., 0.]),
+        facets: vec![],
+        fields: vec![],
+        offset: 0,
+        length: 2,
+    };
+    let output = p
+        .query_time_vector(request(), native_deadline())
         .await
+        .map_err(|error| error.record_error())
         .unwrap();
-    assert_eq!(hit_ids(&window), ["base"]);
-    assert_eq!(vector, ["base", "outside"]);
+    assert_eq!(output.hits[0].record.record_id, "base");
+    assert_eq!(output.hits[1].record.record_id, "outside");
+    assert_eq!(output.hits[1].channels.len(), 1);
+    assert_eq!(output.hits[1].channels[0].channel, "vector");
+    let transport = p
+        .output_permit()
+        .unwrap()
+        .with_time_fence(output.delivery_time);
 
     let gate = root.join(".test-event-time-delivery-pause");
     let started = root.join(".test-event-time-delivery-started");
     for expiry in [true, false] {
         std::fs::write(&gate, b"pause").unwrap();
         let reader = p.clone();
-        let pending = tokio::spawn(async move {
-            reader
-                .probe_event_time_vector_cut(25..26, 2, 4096, vec![], native_deadline())
-                .await
-        });
+        let pending =
+            tokio::spawn(
+                async move { reader.query_time_vector(request(), native_deadline()).await },
+            );
         wait_file(&started).await;
         if expiry {
             clock.0.store(now + 2000, Ordering::Release);
             assert_eq!(p.committed_progress().await.committed_seq, Some(2));
+            assert!(matches!(transport.deliver(|| ()), Err(RecordError::Busy)));
         } else {
             p.write(dated("replace", "base", 25, ExpectedVersion::Match(1)))
                 .await
@@ -793,15 +865,19 @@ async fn event_time_vector_cut_rejects_expiry_outside_the_time_window_and_versio
         }
         std::fs::remove_file(&gate).unwrap();
         std::fs::remove_file(&started).unwrap();
-        assert!(matches!(pending.await.unwrap(), Err(RecordError::Busy)));
+        assert!(matches!(
+            pending.await.unwrap(),
+            Err(EventTimeError::Record(RecordError::Busy))
+        ));
     }
-    let (window, vector, _) = p
-        .probe_event_time_vector_cut(25..26, 2, 4096, vec![], native_deadline())
+    let output = p
+        .query_time_vector(request(), native_deadline())
         .await
+        .map_err(|error| error.record_error())
         .unwrap();
-    assert_eq!(hit_ids(&window), ["base"]);
-    assert_eq!(window.hits[0].version, 2);
-    assert_eq!(vector, ["base"]);
+    assert_eq!(output.hits.len(), 1);
+    assert_eq!(output.hits[0].record.record_id, "base");
+    assert_eq!(output.hits[0].record.version, 2);
 }
 
 #[tokio::test]

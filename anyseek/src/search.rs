@@ -16,16 +16,37 @@ use tokio::time::Instant;
 /// leases still bound concurrent memory and physical I/O independently.
 pub(crate) struct QueryWork {
     remaining: AtomicUsize,
+    reads: AtomicUsize,
+    bytes: AtomicUsize,
     deadline: Instant,
 }
 
+tokio::task_local! { static QUERY_READS: Arc<QueryWork>; }
+
 impl QueryWork {
-    #[cfg(test)]
-    pub(crate) fn new(visits: usize, deadline: Instant) -> Self {
+    pub(crate) fn new(visits: usize, reads: usize, bytes: usize, deadline: Instant) -> Self {
         Self {
             remaining: AtomicUsize::new(visits),
+            reads: AtomicUsize::new(reads),
+            bytes: AtomicUsize::new(bytes),
             deadline,
         }
+    }
+
+    /// Meter synchronous positioned reads on this request-owned worker.
+    pub(crate) fn with_reads<T>(self: Arc<Self>, work: impl FnOnce() -> T) -> T {
+        QUERY_READS.sync_scope(self, work)
+    }
+
+    pub(crate) fn charge_read(bytes: usize) -> std::io::Result<()> {
+        QUERY_READS.try_with(|work| {
+            work.charge(0).map_err(std::io::Error::other)?;
+            for (counter, amount) in [(&work.reads, 1), (&work.bytes, bytes)] {
+                counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |remaining| remaining.checked_sub(amount))
+                    .map_err(|_| std::io::Error::other(RecordError::Rejected("shared query positioned read budget exhausted".into())))?;
+            }
+            Ok(())
+        }).unwrap_or(Ok(()))
     }
 
     pub(crate) fn charge(&self, visits: usize) -> std::result::Result<(), RecordError> {
@@ -41,6 +62,11 @@ impl QueryWork {
     #[cfg(test)]
     pub(crate) fn remaining(&self) -> usize {
         self.remaining.load(Ordering::Relaxed)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn remaining_io(&self) -> (usize, usize) {
+        (self.reads.load(Ordering::Relaxed), self.bytes.load(Ordering::Relaxed))
     }
 }
 /// Specifies the default QueryType: The following query types are supported:

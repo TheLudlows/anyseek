@@ -33,6 +33,48 @@ pub struct EventTimeRequest {
     pub facet_filter: Vec<FacetFilter>,
 }
 
+/// Independent event window for a bounded time and exact-vector query.
+#[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TimeVectorRecall {
+    /// Nonempty half-open UTC event-time range. Both ends are required.
+    #[schema(value_type = Object)]
+    pub time: crate::record::TimeRange,
+}
+
+/// Opt-in exact vector and event-time retrieval against one local published cut.
+#[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TimeVectorRequest {
+    /// Independent time recall settings.
+    pub recall: TimeVectorRecall,
+    /// External query embedding in the collection's configured format.
+    pub query_vector: serde_json::Value,
+    /// Must be true. This mode uses the bounded exhaustive scorer.
+    pub all: bool,
+    /// Optional temporal predicates shared by both channels.
+    #[serde(default)]
+    #[schema(value_type = Object)]
+    pub temporal: Option<crate::record::TemporalFilter>,
+    /// Skip this many fused records.
+    #[serde(default)]
+    pub offset: usize,
+    /// Page length. Offset plus length may not exceed 64.
+    #[serde(default = "length_api")]
+    #[schema(default = 10, minimum = 1, maximum = 64)]
+    pub length: usize,
+    /// Exact totals are unavailable in this mode. Must be false if supplied.
+    #[serde(default)]
+    pub count: bool,
+    /// Requested stored fields. An empty list selects all stored fields.
+    #[serde(default)]
+    pub fields: Vec<String>,
+    /// Predicates applied before ranking in both channels.
+    #[serde(default, rename = "filter")]
+    #[schema(value_type = Vec<api_schema::FacetFilter>, max_items = 32)]
+    pub facet_filter: Vec<FacetFilter>,
+}
+
 /// Search text, vectors, or both. Empty input browses documents. Pending writes are visible.
 #[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
 #[serde(deny_unknown_fields)]
