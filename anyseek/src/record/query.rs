@@ -87,6 +87,14 @@ impl Handle {
             _scope: scope,
         })
     }
+    #[cfg(test)]
+    pub(super) async fn candidate_ids(
+        &self,
+        hits: Vec<crate::min_heap::Result>,
+    ) -> Result<Vec<String>, RecordError> {
+        Ok(self.candidates(hits).await?.into_iter().map(|candidate| candidate.identity.id).collect())
+    }
+
     async fn candidates(
         &self,
         hits: Vec<crate::min_heap::Result>,

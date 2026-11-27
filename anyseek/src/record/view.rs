@@ -101,6 +101,17 @@ impl RetrievalView {
     pub(super) async fn capture_query(&self,length:usize)->Result<super::query::Handle,RecordError> {
         super::query::Handle::capture(&self.query,length).await
     }
+    // The caller holds Inner. A writer or different ordered component set
+    // means the captured ordinal mapping is no longer proved.
+    pub(super) fn matches_query_topology(&self, handle: &query::Handle) -> bool {
+        let (Ok(selected), Ok(captured)) = (self.query.try_read(), handle.index.try_read()) else {
+            return false;
+        };
+        selected.segments.len() == captured.segments.len()
+            && selected.segments.iter().zip(&captured.segments).all(|(a, b)| {
+                Arc::ptr_eq(&a.vector, &b.vector) && Arc::ptr_eq(&a.lexical, &b.lexical)
+            })
+    }
     pub(super) async fn component_count(&self) -> usize {
         self.query.read().await.segments.len()
     }
