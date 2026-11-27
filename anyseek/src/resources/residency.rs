@@ -7,7 +7,10 @@ use crate::storage::build_budget::shared_memory_usage;
 use std::{
     collections::{BTreeMap, btree_map::Entry},
     io,
-    sync::{Arc, Mutex, MutexGuard},
+    sync::{
+        Arc, Mutex, MutexGuard,
+        atomic::{AtomicU64, Ordering},
+    },
     time::Duration,
 };
 use tokio::{
@@ -19,7 +22,7 @@ pub(crate) struct Residency<T> {
     entries: Mutex<BTreeMap<String, Slot<T>>>,
     changed: watch::Sender<()>,
     close_slot: Arc<Semaphore>,
-    budget: u64,
+    budget: AtomicU64,
 }
 
 enum Slot<T> {
@@ -91,7 +94,7 @@ impl<T: Clone> Residency<T> {
             entries: Mutex::new(BTreeMap::new()),
             changed: watch::channel(()).0,
             close_slot: Arc::new(Semaphore::new(1)),
-            budget,
+            budget: AtomicU64::new(budget),
         })
     }
 
@@ -100,7 +103,7 @@ impl<T: Clone> Residency<T> {
     pub(crate) fn has_room(&self, requested: u64) -> bool {
         shared_memory_usage().is_ok_and(|(used, _)| {
             used.checked_add(requested)
-                .is_some_and(|total| total <= self.budget)
+                .is_some_and(|total| total <= self.budget.load(Ordering::Relaxed))
         })
     }
 
@@ -122,14 +125,95 @@ impl<T: Clone> Residency<T> {
     }
 
     pub(crate) fn lookup(&self, scope: &str) -> Lookup<T> {
-        match lock(&self.entries).get(scope) {
+        self.with_lookup(scope, |entry| entry)
+    }
+
+    /// Keep a miss and its singleflight registration under the same gate as
+    /// publication and retirement. `visit` cannot wait or reenter the table.
+    pub(crate) fn with_lookup<R>(&self, scope: &str, visit: impl FnOnce(Lookup<T>) -> R) -> R {
+        let entries = lock(&self.entries);
+        let entry = match entries.get(scope) {
             Some(Slot::Open(resident)) => Lookup::Open {
                 value: resident.value.clone(),
                 pin: self.pin(resident),
             },
             Some(Slot::Retiring(_)) => Lookup::Retiring,
             None => Lookup::Missing,
+        };
+        visit(entry)
+    }
+
+    /// Maintenance owns a real engine handle but does not refresh user access.
+    pub(crate) fn next_for_maintenance(&self, after: &str) -> Option<(String, T)> {
+        use std::ops::Bound::{Excluded, Unbounded};
+        let entries = lock(&self.entries);
+        entries
+            .range((Excluded(after.to_owned()), Unbounded))
+            .chain(entries.range(..=after.to_owned()))
+            .find_map(|(scope, slot)| match slot {
+                Slot::Open(resident) => Some((scope.clone(), resident.value.clone())),
+                Slot::Retiring(_) => None,
+            })
+    }
+
+    /// A whole-service cut holds the disk gate before capturing this snapshot.
+    /// Any remaining retirement is a failed close that cannot be reopened.
+    pub(crate) fn snapshot(&self) -> Option<BTreeMap<String, T>> {
+        lock(&self.entries)
+            .iter()
+            .map(|(scope, slot)| match slot {
+                Slot::Open(resident) => Some((scope.clone(), resident.value.clone())),
+                Slot::Retiring(_) => None,
+            })
+            .collect()
+    }
+
+    /// Catalog deletion may remove the resident owner. A separate retirement
+    /// still owns its barrier, and an old generation cannot install again.
+    pub(crate) fn remove(&self, scope: &str) -> Option<T> {
+        let mut entries = lock(&self.entries);
+        if !matches!(entries.get(scope), Some(Slot::Open(_))) {
+            return None;
         }
+        let Some(Slot::Open(resident)) = entries.remove(scope) else {
+            unreachable!()
+        };
+        self.changed.send_modify(|_| {});
+        Some(resident.value)
+    }
+
+    /// Called after service lifecycle and transport drain, without cloning any
+    /// partition before native shutdown verifies its unique ownership.
+    pub(crate) fn shutdown_values(&mut self) -> Option<impl Iterator<Item = &T>> {
+        let entries = self
+            .entries
+            .get_mut()
+            .unwrap_or_else(|error| error.into_inner());
+        if entries
+            .values()
+            .any(|slot| matches!(slot, Slot::Retiring(_)))
+        {
+            return None;
+        }
+        Some(entries.values().filter_map(|slot| match slot {
+            Slot::Open(resident) => Some(&resident.value),
+            Slot::Retiring(_) => None,
+        }))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        lock(&self.entries).len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_budget_for_test(&self, budget: u64) {
+        self.budget.store(budget, Ordering::Relaxed);
     }
 
     /// Called under the Catalog's generation installation fence after the

@@ -36,6 +36,8 @@ Windows PowerShell 使用 `.\target\debug\anyseek_server.exe print_master_key=tr
 
 独立 HTTP 服务启动时核对 Catalog 并完成未决的创建和恢复。已存在的活动集合在首次获准访问时打开，同一租户、集合及代次的并发请求共享一次 Recovery 打开。某个请求取消后，其余请求继续等待。GET `/api/v1/index` 返回实时统计，也会打开该租户仍处于冷态的集合。冷集合上的打开错误由相应请求返回，后续请求可以重试。
 
+`ANYSEEK_RESIDENT_MEMORY_BYTES` 设定独立 HTTP 服务的驻留淘汰阈值。默认使用 `ANYSEEK_BUILD_SHARED_MEMORY_BYTES` 的 75%，配置值须大于零且不得超过该共享上限。预算按进程已预留的实际字节计算。压力下服务关闭最久未访问的空闲代次，并在关闭及释放内存后重新计算预算。活动请求、已接收写入、后台工作、备份和仍在传输的输出持有代次。预算等待每个准入阶段最多 2 秒，超时返回 `busy`。淘汰仅关闭内存中的代次，Catalog 和持久化数据保留，同代次可通过下一次获准访问重新打开。
+
 | 参数 | 默认值与约束 |
 | --- | --- |
 | `index_path` | `anyseek_index`；相对路径以可执行文件目录为基准 |

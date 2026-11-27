@@ -1,5 +1,6 @@
 //! Generation-scoped recovery for existing HTTP collections.
 use super::*;
+use crate::resources::residency::Lookup;
 use anyseek::resources::Lane;
 use tokio::sync::watch;
 use tokio::time::Instant;
@@ -9,12 +10,18 @@ mod tests;
 
 type OpenResult = Option<Result<(), Error>>;
 
+enum Next {
+    Ready(CollectionRecord),
+    Retiring,
+    Opening(watch::Receiver<OpenResult>),
+}
+
 #[derive(Default)]
 pub(super) struct Registry {
     pending: std::sync::Mutex<BTreeMap<String, watch::Receiver<OpenResult>>>,
     // Whole-service backup can open cold partitions privately. Exclude lazy
     // opens while it captures residents and opens its remaining inputs.
-    pub(super) disk: RwLock<()>,
+    pub(super) disk: Arc<RwLock<()>>,
     #[cfg(test)]
     pub(super) test: tests::Hooks,
 }
@@ -74,65 +81,87 @@ impl Service {
         let key = entry.scope();
         let generation = entry.generation;
         let queued = Instant::now();
-        let mut completion = {
-            // Acquire the generation handle under the resident lock. There
-            // cannot be a gap between a miss and registration of the flight.
-            let records = self.records.read().await;
-            if let Some(partition) = records.get(&key) {
-                return Ok(CollectionRecord {
-                    generation,
-                    partition: partition.clone(),
-                });
+        let deadline = self.residency_deadline();
+        let retirement_deadline = residency::pressure_deadline(deadline);
+        let mut changes = self.records.changes();
+        loop {
+            if Instant::now() >= deadline {
+                return Err(RecordError::Busy.into());
             }
-            let mut pending = self.cold.pending.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some(completion) = pending.get(&key) {
-                completion.clone()
-            } else {
-                let activity = self.lifecycle.enter().ok_or_else(|| {
-                    Error(
-                        StatusCode::SERVICE_UNAVAILABLE,
-                        "shutting_down",
-                        "service is shutting down".into(),
-                    )
+            let next = self
+                .records
+                .with_lookup(&key, |lookup| -> Result<Next, Error> {
+                    match lookup {
+                        Lookup::Open { value, pin } => {
+                            return Ok(Next::Ready(CollectionRecord {
+                                generation,
+                                partition: value,
+                                residency: pin,
+                            }));
+                        }
+                        Lookup::Retiring => return Ok(Next::Retiring),
+                        Lookup::Missing => {}
+                    }
+                    // Singleflight registration shares the resident lookup gate.
+                    let mut pending = self.cold.pending.lock().unwrap_or_else(|e| e.into_inner());
+                    if let Some(completion) = pending.get(&key) {
+                        return Ok(Next::Opening(completion.clone()));
+                    }
+                    let activity = self.collection_activity().ok_or_else(|| {
+                        Error(
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            "shutting_down",
+                            "service is shutting down".into(),
+                        )
+                    })?;
+                    let scope = self.recovery_scope(&entry)?;
+                    let (done, completion) = watch::channel(None);
+                    pending.insert(key.clone(), completion.clone());
+                    let flight = Flight {
+                        service: self.clone(),
+                        key: key.clone(),
+                    };
+                    let entry = entry.clone();
+                    tokio::spawn(activity.run(async move {
+                        let result = scope.run(flight.open(entry, queued)).await;
+                        drop(flight);
+                        done.send_replace(Some(result));
+                    }));
+                    Ok(Next::Opening(completion))
                 })?;
-                let scope = self.recovery_scope(&entry)?;
-                let (done, completion) = watch::channel(None);
-                pending.insert(key.clone(), completion.clone());
-                let flight = Flight {
-                    service: self.clone(),
-                    key: key.clone(),
-                };
-                tokio::spawn(activity.run(async move {
-                    let result = scope.run(flight.open(entry, queued)).await;
-                    drop(flight);
-                    done.send_replace(Some(result));
-                }));
-                completion
+            match next {
+                Next::Ready(record) => return Ok(record),
+                Next::Retiring => {
+                    if !Residency::<RecordPartition>::wait_for_change(
+                        &mut changes,
+                        retirement_deadline,
+                    )
+                    .await
+                    {
+                        return Err(RecordError::Busy.into());
+                    }
+                }
+                Next::Opening(mut completion) => {
+                    #[cfg(test)]
+                    self.cold.test.waiters.increment();
+                    let result =
+                        tokio::time::timeout_at(deadline, completion.wait_for(Option::is_some))
+                            .await
+                            .map_err(|_| RecordError::Busy)?
+                            .map_err(|_| storage("collection opener exited without a result"))?
+                            .as_ref()
+                            .unwrap()
+                            .clone();
+                    log::debug!(
+                        "cold collection wait generation={generation} elapsed_ms={}",
+                        queued.elapsed().as_millis()
+                    );
+                    result?;
+                    // Completion carries no ownership. Reacquire the same
+                    // generation, including when retirement won the handoff.
+                }
             }
-        };
-        #[cfg(test)]
-        self.cold.test.waiters.increment();
-        let result = completion
-            .wait_for(Option::is_some)
-            .await
-            .map_err(|_| storage("collection opener exited without a result"))?
-            .as_ref()
-            .unwrap()
-            .clone();
-        log::debug!(
-            "cold collection wait generation={generation} elapsed_ms={}",
-            queued.elapsed().as_millis()
-        );
-        result?;
-        let records = self.records.read().await;
-        let partition = records
-            .get(&key)
-            .cloned()
-            .ok_or(CatalogError::Unauthorized)?;
-        Ok(CollectionRecord {
-            generation,
-            partition,
-        })
+        }
     }
 
     // Management holds the control gate for unfinished intents. Register
@@ -163,7 +192,11 @@ impl Service {
             }
         };
         let result = async {
+            let deadline = self.residency_deadline();
+            let disk = self.open_gate(deadline).await?;
+            self.wait_for_resident_room(&disk, 1, deadline).await?;
             let partition = Box::pin(self.open_partition(&entry)).await?;
+            self.wait_for_resident_room(&disk, 0, deadline).await?;
             self.catalog
                 .execute(CatalogRequest {
                     operation_id: internal_id(format!("sys:activate:{}", entry.directory())),
@@ -174,9 +207,8 @@ impl Service {
                 })
                 .await?;
             self.records
-                .write()
-                .await
-                .insert(flight.key.clone(), partition);
+                .install(flight.key.clone(), partition)
+                .map_err(|_| RecordError::Busy)?;
             Ok(())
         }
         .await;
@@ -189,7 +221,10 @@ impl Service {
 impl Flight {
     async fn open(&self, entry: CollectionEntry, queued: Instant) -> Result<(), Error> {
         let service = &self.service;
-        let _disk = service.cold.disk.read().await;
+        // The recovery owner has its own budget deadline, independent of any
+        // one cancelled or already-near-deadline request waiting for it.
+        let deadline = queued + service.request_timeout;
+        let disk = service.open_gate(deadline).await?;
         let generation = entry.generation;
         let current = service
             .catalog
@@ -198,6 +233,7 @@ impl Flight {
         if current.generation != generation {
             return Err(CatalogError::Unauthorized.into());
         }
+        service.wait_for_resident_room(&disk, 1, deadline).await?;
         let opened = Instant::now();
         log::debug!(
             "cold collection opening generation={generation} queued_ms={}",
@@ -215,6 +251,8 @@ impl Flight {
         if partition.is_ok() {
             service.cold.test.before_install.wait().await;
         }
+        let partition = partition?;
+        service.wait_for_resident_room(&disk, 0, deadline).await?;
         let owner = service.clone();
         let key = self.key.clone();
         service
@@ -224,7 +262,13 @@ impl Flight {
                 entry.collection_id,
                 generation,
                 async move |_| {
-                    owner.records.write().await.insert(key, partition?);
+                    if owner.master_verifier.is_some() && !owner.records.has_room(0) {
+                        return Err(RecordError::Busy.into());
+                    }
+                    owner
+                        .records
+                        .install(key, partition)
+                        .map_err(|_| RecordError::Busy)?;
                     #[cfg(test)]
                     owner.cold.test.installs.increment();
                     log::debug!("cold collection installed generation={generation}");
