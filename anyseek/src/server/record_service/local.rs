@@ -24,6 +24,7 @@ pub enum LocalErrorKind {
 pub struct LocalError {
     kind: LocalErrorKind,
     code: &'static str,
+    guidance: Option<&'static str>,
 }
 
 impl LocalError {
@@ -39,12 +40,17 @@ impl LocalError {
         Self {
             kind: LocalErrorKind::Unavailable,
             code,
+            guidance: None,
         }
     }
 }
 impl std::fmt::Display for LocalError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.code)
+        f.write_str(self.code)?;
+        if let Some(guidance) = self.guidance {
+            write!(f, ". {guidance}")?;
+        }
+        Ok(())
     }
 }
 impl std::error::Error for LocalError {}
@@ -60,6 +66,7 @@ impl From<Error> for LocalError {
         Self {
             kind,
             code: error.1,
+            guidance: None,
         }
     }
 }
@@ -77,6 +84,11 @@ enum Owner {
 }
 
 impl LocalEngine {
+    #[cfg(test)]
+    pub(super) fn from_test_service(service: Arc<Service>) -> Self {
+        Self { state: std::sync::Mutex::new(Owner::Open(service)) }
+    }
+
     /// Recover existing local collections, or create a catalog if allowed.
     /// The parent directory must exist. This opens a disk owner without a socket.
     pub async fn open(root: &FsPath, allow_create: bool) -> Result<Self, LocalError> {
@@ -250,13 +262,23 @@ impl LocalEngine {
 
     /// Build the optional event-time projection for one local collection cut.
     /// The embedding host must authorize this administrative operation.
+    /// If admission is refused (`busy`) or the admitted result is unknown
+    /// (`outcome_unknown`), query the current projection first. A successful
+    /// query can use a previous projection and does not confirm a refresh.
+    /// An explicit new call starts a separate attempt.
     pub async fn build_event_time_projection(&self, tenant: &str, collection: &str) -> Result<u64, LocalError> {
         let deadline = tokio::time::Instant::now() + self.service()?.request_timeout;
-        tokio::time::timeout_at(deadline, self.run(tenant, collection, Lane::Background,
+        let wait = EventTimeCheckpointWait::default();
+        let admission = wait.0.clone();
+        let result = tokio::time::timeout_at(deadline, self.run(tenant, collection, Lane::Background,
             async move |service, tenant, collection| {
-                build_event_time_collection(&service, tenant, collection, deadline).await
+                build_event_time_collection(&service, tenant, collection, deadline, admission).await
                     .map(|(sequence, _pin)| sequence)
-            })).await.map_err(|_| LocalError::unavailable("busy"))?
+            })).await.unwrap_or_else(|_| Err(wait.timeout_error().into()));
+        result.map_err(|mut error| {
+            error.guidance = event_time_checkpoint_guidance(error.code);
+            error
+        })
     }
 
     /// Query the selected event-time projection with the catalog's stored-field policy.

@@ -329,6 +329,8 @@ Service archive/root 清理是明确的离线操作，不提供删除运行根�
 
 服务管理员用 `POST /api/v1/event-time-checkpoints` 为本地集合构建投影。使用服务密钥，省略 `X-AnySeek-Tenant`，在 JSON 正文指定 `tenant_id` 和 `collection_id`。网关须限制此操作为管理员。构建受现有后台和分区准入约束，成功返回 `indexed_seq`。本地 SDK 的 `build_event_time_projection(tenant, collection)` 由嵌入宿主授权。此构建启用当前认证基座，增量 checkpoint 可沿用该基座，普通完整 checkpoint（包括常规 PATCH）会选用一个不含投影的新基座。重开后可通过同一管理入口再次构建。远端和归档集合不支持此选项。
 
+构建接口不接受 `operation_id`。等待超时发生在后台 job 准入前时返回 429 `busy`，本次请求不会启动构建。已接收后等待超时返回 503 `outcome_unknown`，原构建仍可能继续。SDK 用相同的 `LocalError::code()` 区分。遇到这两种结果，先用事件时间查询检查当前投影；查询成功可能读到旧投影，无法确认本次刷新已经完成。确认仍需要构建时，再显式调用管理入口。这是一次新构建尝试。
+
 租户通过 `POST /api/v1/index/{id}/event-time/query` 读取窗口，或使用 SDK `query_event_time`。示例见 [HTTP 请求](test_api.rest)。`temporal.event` 必须提供非空半开区间的两个 UTC 毫秒端点，可同时使用 `temporal.ingested`、`temporal.valid_at_ms` 和普通 `filter`。结果返回 `visible_seq`、`evaluation_time_ms` 和 `hits`，按事件时间降序、同时间按记录 ID 升序。`length` 为 1 至 128，默认 10。`fields` 只选择存储字段。携带总数、分页、文本、向量、混合或自定义排序参数返回 400。
 
 查询固定同一个已发布规范切点并应用 TTL。投影缺失返回 400 `event_time_unavailable`。尾段超过 128 个变更身份或 2 MiB、基座之后超过 4096 个序号，或候选扫描或正文读取额度用尽时，返回 400 `event_time_budget`，不交付部分窗口。投影缺失或尾段超额时，可用同一管理入口刷新到新认证基座。单次窗口扫描超额时，缩小查询范围。基础扫描最多访问 4096 个候选，且受集合候选上限约束。读取的基座正文累计最多 16 MiB。选根或 TTL 在交付前变化可返回 429 `busy`，使用原请求期限。已认证的投影文件缺损时返回 503 `storage_error`，该集合打开失败。SDK 的 `LocalError::code()` 提供相同错误码。普通 `/query` 继续接受既有时间谓词。

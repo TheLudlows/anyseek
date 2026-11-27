@@ -57,6 +57,7 @@ impl PauseNext {
 
 #[derive(Default)]
 pub(in crate::server::record_service) struct Hooks {
+    pub(in crate::server::record_service) event_time_admission: PauseNext,
     pub(in crate::server::record_service) preflight: PauseNext,
     pub(in crate::server::record_service) before_install: PauseNext,
     pub(in crate::server::record_service) backup_snapshot: PauseNext,

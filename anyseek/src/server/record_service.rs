@@ -18,7 +18,7 @@ use super::api_types::{CreateIndexRequest, EventTimeRequest, FieldRequest, GetDo
 use axum::{
     Json, Router,
     body::{Body, Bytes},
-    extract::{DefaultBodyLimit, Path, Query, State},
+    extract::{DefaultBodyLimit, Extension, Path, Query, State},
     http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -58,6 +58,7 @@ struct Principal(String);
 const TENANT_HEADER: &str = "x-anyseek-tenant";
 const ERROR_CODE_HEADER: &str = "x-anyseek-error-code";
 const EVENT_TIME_QUERY_PATH: &str = "/api/v1/index/{id}/event-time/query";
+const EVENT_TIME_CHECKPOINT_PATH: &str = "/api/v1/event-time-checkpoints";
 
 const MAX_BODY: usize = 2 * 1024 * 1024;
 const MAX_RESPONSE: usize = 16 * 1024 * 1024;
@@ -1729,32 +1730,100 @@ struct EventTimeCheckpointRequest {
     collection_id: String,
 }
 
+#[derive(Default)]
+enum CheckpointAdmission {
+    #[default]
+    Waiting,
+    Accepted,
+    Closed,
+}
+
+type EventTimeAdmission = Arc<std::sync::Mutex<CheckpointAdmission>>;
+
+#[derive(Default)]
+struct EventTimeCheckpointWait(EventTimeAdmission);
+
+impl EventTimeCheckpointWait {
+    // Admission and waiter exit serialize around the synchronous try-start.
+    // Catalog authorization owns its task and can outlive a dropped waiter.
+    fn stop_waiting(&self) -> bool {
+        let Ok(mut admission) = self.0.lock() else { return true; };
+        if matches!(*admission, CheckpointAdmission::Accepted) {
+            return true;
+        }
+        *admission = CheckpointAdmission::Closed;
+        false
+    }
+
+    fn timeout_error(&self) -> Error {
+        if self.stop_waiting() {
+            Error(StatusCode::SERVICE_UNAVAILABLE, "outcome_unknown",
+                "The wait ended after checkpoint admission.".into())
+        } else {
+            Error(StatusCode::TOO_MANY_REQUESTS, "busy",
+                "The wait ended before checkpoint admission.".into())
+        }
+    }
+}
+
+impl Drop for EventTimeCheckpointWait {
+    fn drop(&mut self) {
+        self.stop_waiting();
+    }
+}
+
+fn event_time_checkpoint_guidance(code: &str) -> Option<&'static str> {
+    match code {
+        "busy" => Some("Query the current event-time projection before explicitly requesting a new build."),
+        "outcome_unknown" => Some("The build may continue. Query the current event-time projection first. A successful query can read a previous projection and does not confirm this refresh. A new explicit call requests a separate build."),
+        _ => None,
+    }
+}
+
+fn event_time_checkpoint_error(mut error: Error) -> Error {
+    if let Some(guidance) = event_time_checkpoint_guidance(error.1) {
+        error.2.push(' ');
+        error.2.push_str(guidance);
+    }
+    error
+}
+
 async fn event_time_checkpoint(
     State(s): State<Arc<Service>>,
+    Extension(admission): Extension<EventTimeAdmission>,
     headers: HeaderMap,
     bytes: Bytes,
 ) -> Result<Response, Error> {
     s.admin(&headers).await?;
     let request: EventTimeCheckpointRequest = parse(&bytes)?;
     let deadline = REQUEST_DEADLINE.with(|deadline| *deadline);
-    let (seq, pin) = build_event_time_collection(&s, request.tenant_id, request.collection_id, deadline).await?;
+    let (seq, pin) = build_event_time_collection(&s, request.tenant_id, request.collection_id, deadline, admission)
+        .await.map_err(event_time_checkpoint_error)?;
     protected_data(Ok(json!({"indexed_seq":seq})), Some(DataOutputPermit::residency_only(pin)))
 }
 
 async fn build_event_time_collection(
     s: &Arc<Service>, tenant: String, id: String, deadline: tokio::time::Instant,
+    admission: EventTimeAdmission,
 ) -> Result<(u64, ResidencyPin), Error> {
     anyseek::catalog::validate_tenant(&tenant)?;
     anyseek::catalog::validate_name(&id)?;
     let p = s.record(&tenant, &id).await?;
     let generation = p.generation;
     let partition = p.clone();
+    #[cfg(test)]
+    let service = s.clone();
     let job = s.catalog.authorized_generation(tenant.clone(), id.clone(), generation, move |_| async move {
+        #[cfg(test)]
+        service.cold.test.event_time_admission.wait().await;
+        let mut admission = admission.lock().map_err(|_| RecordError::OutcomeUnknown("checkpoint admission interrupted".into()))?;
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        if remaining.is_zero() {
+        if !matches!(*admission, CheckpointAdmission::Waiting) || remaining.is_zero() {
             return Err(RecordError::Busy);
         }
-        partition.start_event_time_checkpoint(remaining)
+        let job = partition.start_event_time_checkpoint(remaining)?;
+        *admission = CheckpointAdmission::Accepted;
+        Ok(job)
     }).await??;
     let seq = job.finish().await?;
     let seq = s.catalog.authorized_generation(tenant, id, generation, move |_| async move { seq }).await?;
@@ -1937,13 +2006,30 @@ async fn request_admitted(
 ) -> Response {
     let version = request.version();
     let deadline = tokio::time::Instant::now() + service.request_timeout;
-    let (request, scope) = match tokio::time::timeout_at(deadline, admission::request(&service, request)).await {
+    let checkpoint = (request.method() == axum::http::Method::POST
+        && request.extensions().get::<axum::extract::MatchedPath>()
+            .is_some_and(|path| path.as_str() == EVENT_TIME_CHECKPOINT_PATH))
+        .then(EventTimeCheckpointWait::default);
+    let (mut request, scope) = match tokio::time::timeout_at(deadline, admission::request(&service, request)).await {
         Ok(Ok(value)) => value,
-        Ok(Err(error)) => return admission_refusal(error, version),
+        Ok(Err(error)) => {
+            let error = if checkpoint.is_some() { event_time_checkpoint_error(error) } else { error };
+            return admission_refusal(error, version);
+        }
         // No handler or owned data task has started. A previous attempt can
         // still be running, so callers must keep the original operation ID.
-        Err(_) => return admission_refusal(Error(StatusCode::TOO_MANY_REQUESTS, "busy", "admission deadline exceeded; retry the original operation identity".into()), version),
+        Err(_) => {
+            let error = if let Some(wait) = &checkpoint {
+                event_time_checkpoint_error(wait.timeout_error())
+            } else {
+                Error(StatusCode::TOO_MANY_REQUESTS, "busy", "admission deadline exceeded; retry the original operation identity".into())
+            };
+            return admission_refusal(error, version);
+        }
     };
+    if let Some(wait) = &checkpoint {
+        request.extensions_mut().insert(wait.0.clone());
+    }
     if request.uri().path().ends_with("/query")
         && request.uri().query().is_some_and(|q| !q.is_empty())
     {
@@ -1965,12 +2051,15 @@ async fn request_admitted(
             Ok(response) => response,
             Err(_) if event_time_read => Error(StatusCode::TOO_MANY_REQUESTS, "busy",
                 "event-time query deadline exceeded".into()).into_response(),
-            Err(_) => Error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "outcome_unknown",
-                "request deadline exceeded; retry the original operation identity".into(),
-            )
-            .into_response(),
+            Err(_) => {
+                let error = if let Some(wait) = &checkpoint {
+                    event_time_checkpoint_error(wait.timeout_error())
+                } else {
+                    Error(StatusCode::SERVICE_UNAVAILABLE, "outcome_unknown",
+                        "request deadline exceeded; retry the original operation identity".into())
+                };
+                error.into_response()
+            }
         };
     let (parts, body) = response.into_parts();
     Response::from_parts(
@@ -2004,7 +2093,7 @@ pub fn router(service: Arc<Service>) -> Router {
         .route("/api/v1/index/{id}/ingest", get(ingest_progress).post(ingest))
         .route("/api/v1/index/{id}/query", post(query))
         .route(EVENT_TIME_QUERY_PATH, post(event_time_query))
-        .route("/api/v1/event-time-checkpoints", post(event_time_checkpoint))
+        .route(EVENT_TIME_CHECKPOINT_PATH, post(event_time_checkpoint))
         .route("/api/v1/index/{id}/iterator", post(iterate))
         .route("/api/v1/index/{id}/batch", post(batch))
         .route("/api/v1/index/{id}/group/replace", post(replace_group))
@@ -3294,7 +3383,7 @@ fn openapi_document() -> Value {
         ),
         (EVENT_TIME_QUERY_PATH, "post", "Query an opted-in pure event-time window",
             Some(json!({"$ref":"#/components/schemas/EventTimeRequest"}))),
-        ("/api/v1/event-time-checkpoints", "post", "Service administration: build a bounded local event-time checkpoint. Omit the tenant header and name the tenant in the body.",
+        (EVENT_TIME_CHECKPOINT_PATH, "post", "Service administration: build a bounded local event-time checkpoint. Omit the tenant header and name the tenant in the body.",
             Some(json!({"$ref":"#/components/schemas/EventTimeCheckpointRequest"}))),
         ("/api/v1/index/{id}/ingest", "post", "Commit 1..64 independent commands; continue after business rejection; indexes asynchronous",
             Some(json!({"type":"object","additionalProperties":false,"required":["records"],"properties":{"records":{"type":"array","minItems":1,"maxItems":64,"items":{"$ref":"#/components/schemas/RecordWrite"}}}}))),
@@ -3430,17 +3519,21 @@ fn openapi_document() -> Value {
             operation["responses"]["429"] = json!({"description":"Temporary admission, publication, or deadline refusal (busy)"});
             operation["responses"]["503"] = json!({"description":"Storage integrity or recovery failure (storage_error or recovery_required)"});
         }
-        if path == "/api/v1/event-time-checkpoints" {
+        if path == EVENT_TIME_CHECKPOINT_PATH {
+            operation["description"] = json!("No operation ID. After a timeout, query the current projection before explicitly starting a new build. A successful query can use a previous projection and does not confirm the refresh.");
+            operation["responses"]["default"] = json!({"description":"JSON code/message error"});
             operation["responses"]["200"] = json!({"description":"Published checkpoint cut",
                 "content":{"application/json":{"schema":{"type":"object","required":["indexed_seq"],
                     "properties":{"indexed_seq":{"type":"integer","minimum":0}}}}}});
             operation["responses"]["403"] = json!({"description":"Tenant-scoped credentials cannot request administrative construction"});
+            operation["responses"]["429"] = json!({"description":"Busy. A timeout before checkpoint admission does not start a build."});
+            operation["responses"]["503"] = json!({"description":"Build failure or outcome_unknown. After admission the wait can end while the build continues."});
         }
         let mut params = vec![
             json!({"name":"apikey","in":"header","required":path!="/api/v1/live","schema":{"type":"string"}}),
         ];
         if !matches!(path, "/api/v1/live" | "/api/v1/backups" | "/api/v1/backups/{id}"
-            | "/api/v1/service-backups" | "/api/v1/service-restores" | "/api/v1/event-time-checkpoints"
+            | "/api/v1/service-backups" | "/api/v1/service-restores" | EVENT_TIME_CHECKPOINT_PATH
             | "/api/v1/catalog/operation/{epoch}/{nonce}") {
             params.push(json!({"name":"X-AnySeek-Tenant","in":"header","required":true,
                 "description":"Tenant namespace supplied by the authenticated gateway; not a user credential.",

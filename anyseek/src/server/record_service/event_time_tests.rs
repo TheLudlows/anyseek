@@ -407,3 +407,191 @@ async fn event_time_http_query_busy_keeps_its_error_header() {
     service.shutdown().wait().await.unwrap();
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[derive(Clone)]
+enum CheckpointClient {
+    Http(Router),
+    Sdk(Arc<local::LocalEngine>),
+}
+
+impl CheckpointClient {
+    async fn checkpoint(&self) -> Result<u64, (String, String)> {
+        match self {
+            Self::Http(app) => {
+                let (status, body) = build(app, master_headers(), "c").await;
+                if status == StatusCode::OK {
+                    return Ok(body["indexed_seq"].as_u64().unwrap());
+                }
+                let code = body["code"].as_str().unwrap();
+                assert_eq!(
+                    status,
+                    match code {
+                        "busy" => StatusCode::TOO_MANY_REQUESTS,
+                        "outcome_unknown" => StatusCode::SERVICE_UNAVAILABLE,
+                        _ => panic!("unexpected checkpoint error {body}"),
+                    }
+                );
+                Err((code.into(), body["message"].as_str().unwrap().into()))
+            }
+            Self::Sdk(engine) => engine
+                .build_event_time_projection("tenant", "c")
+                .await
+                .map_err(|error| (error.code().into(), error.to_string())),
+        }
+    }
+
+    async fn current_cut(&self) -> Result<u64, String> {
+        let request = json!({"temporal":{"event":{"from_ms":150,"to_ms":151}}});
+        match self {
+            Self::Http(app) => {
+                let (status, body) = decode_response(
+                    namespace_response(
+                        app,
+                        "POST",
+                        "/api/v1/index/c/event-time/query",
+                        "tenant",
+                        Some(request),
+                    )
+                    .await,
+                )
+                .await;
+                if status == StatusCode::OK {
+                    Ok(body["visible_seq"].as_u64().unwrap())
+                } else {
+                    Err(body["code"].as_str().unwrap().into())
+                }
+            }
+            Self::Sdk(engine) => engine
+                .query_event_time("tenant", "c", serde_json::from_value(request).unwrap())
+                .await
+                .map(|result| result.visible_seq)
+                .map_err(|error| error.code().into()),
+        }
+    }
+}
+
+#[tokio::test]
+async fn event_time_checkpoint_wait_distinguishes_http_and_sdk_admission() {
+    for use_sdk in [false, true] {
+        let (mut service, root, _) = super::tests::setup().await;
+        Arc::get_mut(&mut service).unwrap().request_timeout = Duration::from_secs(2);
+        let app = router(service.clone());
+        let client = if use_sdk {
+            CheckpointClient::Sdk(Arc::new(local::LocalEngine::from_test_service(
+                service.clone(),
+            )))
+        } else {
+            CheckpointClient::Http(app.clone())
+        };
+
+        let partition = root.join(
+            service
+                .catalog
+                .collection_entry("tenant", "c")
+                .await
+                .unwrap()
+                .directory(),
+        );
+        let (status, body) = namespace_api(
+            &app,
+            "POST",
+            "/api/v1/index/c/batch",
+            "tenant",
+            Some(json!({"writes":[row("old",150,None,None)]})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+
+        // Catalog work owns its task, even before the Record worker is admitted.
+        let (reached, release) = service.cold.test.event_time_admission.pause_next();
+        let caller = client.clone();
+        let request = tokio::spawn(async move { caller.checkpoint().await });
+        tokio::time::timeout(Duration::from_secs(5), reached)
+            .await
+            .unwrap()
+            .unwrap();
+        let (code, message) = request.await.unwrap().unwrap_err();
+        assert_eq!(code, "busy");
+        assert!(!message.contains("operation identity"), "{message}");
+        assert!(
+            message.contains("Query the current event-time projection"),
+            "{message}"
+        );
+        if !use_sdk {
+            assert!(message.contains("before checkpoint admission"), "{message}");
+        }
+        release.send(()).unwrap();
+        assert_eq!(
+            client.current_cut().await,
+            Err("event_time_unavailable".into())
+        );
+
+        // Only this new explicit invocation installs the first projection.
+        assert_eq!(client.checkpoint().await, Ok(1));
+        let previous = std::fs::read_dir(&partition)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .find(|path| path.join("event-time/descriptor").exists())
+            .unwrap();
+        let (status, body) = namespace_api(
+            &app,
+            "POST",
+            "/api/v1/index/c/batch",
+            "tenant",
+            Some(json!({"writes":[row("recent",151,None,None)]})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+
+        // Hold private image construction after the actual worker was admitted.
+        // The live authority and old projection remain independently readable.
+        let gate = partition.join(".test-anchor-image-io-pause");
+        std::fs::write(&gate, b"pause").unwrap();
+        let caller = client.clone();
+        let request = tokio::spawn(async move { caller.checkpoint().await });
+        let started = partition.join(".test-anchor-image-io-started");
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !started.exists() {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let (code, message) = request.await.unwrap().unwrap_err();
+        assert_eq!(code, "outcome_unknown");
+        assert!(!message.contains("operation identity"), "{message}");
+        assert!(message.contains("The build may continue"), "{message}");
+        assert!(
+            message.contains("Query the current event-time projection first"),
+            "{message}"
+        );
+        assert!(
+            message.contains("does not confirm this refresh"),
+            "{message}"
+        );
+        if !use_sdk {
+            assert!(message.contains("after checkpoint admission"), "{message}");
+        }
+        assert_eq!(client.current_cut().await, Ok(2));
+        assert!(previous.join("event-time/descriptor").exists());
+
+        std::fs::remove_file(gate).unwrap();
+        drop(app);
+        tokio::time::timeout(Duration::from_secs(10), async move {
+            match client {
+                CheckpointClient::Sdk(engine) => {
+                    drop(service);
+                    engine.shutdown().await.unwrap();
+                }
+                CheckpointClient::Http(app) => {
+                    drop(app);
+                    service.shutdown().wait().await.unwrap();
+                }
+            }
+        })
+        .await
+        .unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
