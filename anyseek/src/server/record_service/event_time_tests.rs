@@ -96,6 +96,12 @@ fn event_time_vector_openapi_keeps_ordinary_and_mixed_query_shapes() {
     assert_eq!(input[0]["$ref"], "#/components/schemas/SearchRequestObject");
     assert_eq!(input[1]["$ref"], "#/components/schemas/TimeVectorRequest");
     assert_eq!(input[2]["$ref"], "#/components/schemas/TimeTextRequest");
+    assert_eq!(input[3]["$ref"], "#/components/schemas/TimeAnnRequest");
+    let ann = &doc["components"]["schemas"]["TimeAnnRequest"];
+    assert_eq!(ann["properties"]["nprobe"]["minimum"], 1);
+    assert_eq!(ann["properties"]["nprobe"]["maximum"], MAX_MIXED_NPROBE);
+    assert_eq!(ann["additionalProperties"], false);
+    assert!(ann["properties"].get("all").is_none());
     let output = &query["responses"]["200"]["content"]["application/json"]["schema"]["oneOf"];
     assert_eq!(
         output[0]["properties"]["diagnostics"]["$ref"],
@@ -135,6 +141,13 @@ fn mixed_request() -> Value {
     json!({"recall":{"time":{"from_ms":18,"to_ms":22}},"query_vector":[1,0],"all":true,"length":2})
 }
 
+fn ann_request() -> Value {
+    let mut request = mixed_request();
+    request.as_object_mut().unwrap().remove("all");
+    request["nprobe"] = json!(1);
+    request
+}
+
 fn mixed_row(nonce: &str, id: &str, expiry: Option<u64>) -> Value {
     json!({"operation_id":OperationId::new(nonce.into()),"record_id":id,"expected":"Absent",
         "temporal":{"event_time_ms":20,"expire_at_ms":expiry},"document":{"body":id,"vector":[1,0]}})
@@ -147,6 +160,438 @@ async fn write_mixed(app: &Router, rows: Vec<Value>) {
     for result in body["results"].as_array().unwrap() {
         assert_eq!(result["code"], "applied", "{body}");
     }
+}
+
+async fn create_ann_fixture_collection(service: &Arc<Service>, id: &str, vector: Value) {
+    let config = serde_json::from_value(json!({"index_name":id,"vector":vector,"schema":[
+        {"field":"body","field_type":"Text","store":true},
+        {"field":"private","field_type":"Text","store":false},
+        {"field":"vector","field_type":"Json","index_vector":true},
+        {"field":"tags","field_type":"StringSet","filterable":true}
+    ]}))
+    .unwrap();
+    let mut config = record_config(config, Some("ann-fixture".into())).unwrap();
+    // The public create route uses Auto. Use the same catalog creation and
+    // storage lifecycle with two deterministic medoids for the oracle.
+    config.index.clustering = Clustering::Fixed(2);
+    let receipt = service
+        .catalog
+        .execute(CatalogRequest {
+            operation_id: OperationId::new(format!("ann-create-{id}")),
+            command: CatalogCommand::PrepareCollection {
+                collection_id: id.into(),
+                tenant_id: "tenant".into(),
+                config,
+            },
+        })
+        .await
+        .unwrap();
+    let entry = service
+        .catalog
+        .collections()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|entry| {
+            entry.collection_id == id
+                && entry.tenant_id == "tenant"
+                && entry.generation == receipt.seq
+        })
+        .unwrap();
+    service.finish_collection(entry).await.unwrap();
+}
+
+async fn request_mixed(
+    app: &Router,
+    id: &str,
+    tenant: &str,
+    request: Value,
+) -> (StatusCode, Value) {
+    decode_response(
+        namespace_response(
+            app,
+            "POST",
+            &format!("/api/v1/index/{id}/query"),
+            tenant,
+            Some(request),
+        )
+        .await,
+    )
+    .await
+}
+
+#[tokio::test]
+async fn event_time_ann_opt_in_shares_a_cut_through_http_sdk_and_reopen() {
+    const DIMENSIONS: usize = 256;
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("catalog");
+    let service = open(&root).await;
+    let app = router(service.clone());
+    let sdk = local::LocalEngine::from_test_service(service.clone());
+    create_ann_fixture_collection(&service, "window", json!({"dimensions":DIMENSIONS})).await;
+    let embedding = |x: f32, y: f32| {
+        let mut values = vec![0.; DIMENSIONS];
+        values[0] = x;
+        values[1] = y;
+        json!(values)
+    };
+    let mut request = ann_request();
+    request["query_vector"] = embedding(1., 0.);
+    request["fields"] = json!(["body", "private"]);
+    let (_, missing) = request_mixed(&app, "window", "tenant", request.clone()).await;
+    assert_eq!(missing["code"], "event_time_unavailable");
+    let partition = service.record("tenant", "window").await.unwrap();
+    for segment in 0..2 {
+        for start in [0, 60] {
+            let rows = (start..start + 60).map(|ordinal| {
+                let id = format!("s{segment}-r{ordinal:03}");
+                let winner = ordinal < 24;
+                let mut row = mixed_row(&id, &id, None);
+                let group = if winner { "winner" } else { "loser" };
+                // Both needles are closer to the loser medoid than to the winner.
+                // For the tilted query they outscore any winner's ordinary member.
+                let vector = match (segment, ordinal) {
+                    (0, 118) => embedding(0.45, 0.89302856),
+                    (0, 119) => embedding(0.35, 0.9367497),
+                    _ if winner => embedding(1., 0.),
+                    _ => embedding(0., 1.),
+                };
+                row["temporal"]["event_time_ms"] = json!(match (segment, ordinal) {
+                    (0, 0) => 20,
+                    (0, 118) => 300,
+                    _ => 100,
+                });
+                row["document"] = json!({"body": group,"private":"hidden","tags":["broad",group,id],
+                    "vector":vector});
+                row
+            }).collect();
+            write_mixed(&app, rows).await;
+        }
+        if segment == 0 {
+            assert_eq!(
+                build(&app, master_headers(), "window").await,
+                (StatusCode::OK, json!({"indexed_seq":120}))
+            );
+        } else {
+            assert_eq!(
+                anyseek::record::tests::seal_test_cache_tail(&partition).await,
+                2
+            );
+        }
+    }
+    let (status, response) = request_mixed(&app, "window", "tenant", request.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+    assert_eq!(response["visible_seq"], 240);
+    assert!(response["count_total"].is_null());
+    assert_eq!(
+        response["hits"][0]["record"]["document"],
+        json!({"body":"winner"})
+    );
+    assert_eq!(response["hits"][0]["record"]["record_id"], "s0-r000");
+    assert_eq!(response["hits"][1]["record"]["record_id"], "s0-r001");
+    assert_eq!(response["hits"][0]["channels"][1]["raw_score"], 1.0);
+    let embed =
+        |value| sdk.query_time_ann("tenant", "window", serde_json::from_value(value).unwrap());
+    let embedded = embed(request.clone()).await.unwrap();
+    let embedded: Value = serde_json::from_str(&serde_json::to_string(&embedded).unwrap()).unwrap();
+    assert_eq!(embedded["visible_seq"], response["visible_seq"]);
+    assert_eq!(embedded["hits"], response["hits"]);
+
+    let tags = |values: Vec<&str>| json!([{"StringSet":{"field":"tags","filter":values}}]);
+    let mut exact = request.clone();
+    exact.as_object_mut().unwrap().remove("nprobe");
+    exact["all"] = json!(true);
+    exact["filter"] = tags(vec!["winner"]);
+    let (status, exact_winners) = request_mixed(&app, "window", "tenant", exact.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{exact_winners}");
+    assert_eq!(exact_winners["hits"], response["hits"]);
+    let mut losers = request.clone();
+    losers["filter"] = tags(vec!["loser"]);
+    let (status, pruned) = request_mixed(&app, "window", "tenant", losers.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{pruned}");
+    assert_eq!(pruned["hits"], json!([]));
+    let mut all_clusters = losers.clone();
+    all_clusters["nprobe"] = json!(2);
+    let (status, probed) = request_mixed(&app, "window", "tenant", all_clusters).await;
+    assert_eq!(status, StatusCode::OK, "{probed}");
+    exact["filter"] = tags(vec!["loser"]);
+    let (status, exact_losers) = request_mixed(&app, "window", "tenant", exact).await;
+    assert_eq!(status, StatusCode::OK, "{exact_losers}");
+    assert_eq!(probed["hits"], exact_losers["hits"]);
+    assert_eq!(probed["hits"].as_array().unwrap().len(), 2);
+    losers["nprobe"] = json!(MAX_MIXED_NPROBE);
+    let (status, capped) = request_mixed(&app, "window", "tenant", losers).await;
+    assert_eq!(status, StatusCode::OK, "{capped}");
+    assert_eq!(capped["hits"], exact_losers["hits"]);
+
+    // Compare only vector-lane ranks first, without a matching time window.
+    // The tilted query prefers the winning medoid (0.8 vs 0.6), while
+    // two members of the other cluster have a cosine greater than 0.8.
+    let mut approximate = request.clone();
+    approximate["query_vector"] = embedding(0.8, 0.6);
+    approximate["recall"]["time"] = json!({"from_ms":500,"to_ms":501});
+    let mut exhaustive = approximate.clone();
+    exhaustive.as_object_mut().unwrap().remove("nprobe");
+    exhaustive["all"] = json!(true);
+    let (status, exact_top) = request_mixed(&app, "window", "tenant", exhaustive.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{exact_top}");
+    let (status, ann_top) = request_mixed(&app, "window", "tenant", approximate.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{ann_top}");
+    assert_eq!(exact_top["visible_seq"], ann_top["visible_seq"]);
+    for (body, ids) in [
+        (&exact_top, ["s0-r118", "s0-r119"]),
+        (&ann_top, ["s0-r000", "s0-r001"]),
+    ] {
+        for (rank, id) in ids.into_iter().enumerate() {
+            let hit = &body["hits"][rank];
+            assert_eq!(hit["record"]["record_id"], id, "{body}");
+            let channels = hit["channels"].as_array().unwrap();
+            assert_eq!(channels.len(), 1);
+            assert_eq!(channels[0]["channel"], "vector");
+            assert_eq!(channels[0]["rank"], rank);
+        }
+    }
+
+    let approximate_vector_only = approximate.clone();
+    // Now one omitted vector hit can only reach the page through time.
+    approximate["recall"]["time"] = json!({"from_ms":300,"to_ms":301});
+    approximate["length"] = json!(3);
+    approximate["rrf"] = json!({"constant":1,"time_weight":2});
+    let (status, rescued) = request_mixed(&app, "window", "tenant", approximate.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{rescued}");
+    assert_eq!(rescued["visible_seq"], ann_top["visible_seq"]);
+    let hits = rescued["hits"].as_array().unwrap();
+    assert_eq!(hits.len(), 3);
+    assert_eq!(hits[0]["record"]["record_id"], "s0-r118");
+    let rescued_channels = hits[0]["channels"].as_array().unwrap();
+    assert_eq!(rescued_channels.len(), 1);
+    assert_eq!(rescued_channels[0]["channel"], "time");
+    assert_eq!(rescued_channels[0]["rank"], 0);
+    assert!(rescued_channels[0]["raw_score"].is_null());
+    assert_eq!(rescued_channels[0]["rrf_contribution"], 2.0);
+    assert_eq!(hits[0]["score"], 2.0);
+    assert!(hits.iter().all(|hit| hit["record"]["record_id"] != "s0-r119"));
+    assert_eq!(hits[1]["record"]["record_id"], "s0-r000");
+    assert_eq!(hits[2]["record"]["record_id"], "s0-r001");
+    let rescued_sdk = embed(approximate).await.unwrap();
+    let rescued_sdk: Value =
+        serde_json::from_str(&serde_json::to_string(&rescued_sdk).unwrap()).unwrap();
+    assert_eq!(rescued_sdk["hits"], rescued["hits"]);
+
+    let mut triple = request.clone();
+    triple["query"] = json!("winner");
+    let (status, triple_http) = request_mixed(&app, "window", "tenant", triple.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{triple_http}");
+    assert_eq!(triple_http["visible_seq"], 240);
+    let triple_sdk = embed(triple).await.unwrap();
+    let channels = triple_sdk.hits[0]
+        .channels
+        .iter()
+        .map(|hit| hit.channel.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(channels, ["time", "lexical", "vector"]);
+    let triple_sdk: Value =
+        serde_json::from_str(&serde_json::to_string(&triple_sdk).unwrap()).unwrap();
+    assert_eq!(triple_sdk["hits"], triple_http["hits"]);
+
+    let mut expensive = request.clone();
+    expensive["filter"] = tags(vec!["broad"; 128]);
+    let (status, refused) = request_mixed(&app, "window", "tenant", expensive.clone()).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
+    assert!(
+        refused["message"]
+            .as_str()
+            .unwrap()
+            .contains("shared query work budget exhausted")
+    );
+    assert!(refused.get("hits").is_none());
+    assert_eq!(embed(expensive).await.unwrap_err().code(), "rejected");
+
+    assert_eq!(
+        request_mixed(&app, "window", "outside", request.clone())
+            .await
+            .0,
+        StatusCode::FORBIDDEN
+    );
+    assert!(
+        sdk.query_time_ann(
+            "outside",
+            "window",
+            serde_json::from_value(request.clone()).unwrap()
+        )
+        .await
+        .is_err()
+    );
+    drop(partition);
+    drop(sdk);
+    drop(app);
+    service.shutdown().wait().await.unwrap();
+
+    let service = open(&root).await;
+    let sdk = local::LocalEngine::from_test_service(service.clone());
+    let reopened = sdk
+        .query_time_ann(
+            "tenant",
+            "window",
+            serde_json::from_value(request.clone()).unwrap(),
+        )
+        .await
+        .unwrap();
+    let reopened: Value = serde_json::from_str(&serde_json::to_string(&reopened).unwrap()).unwrap();
+    assert_eq!(reopened["visible_seq"], 240);
+    assert_eq!(reopened["hits"], response["hits"]);
+
+    // Exercise the same protected response over an actual loopback connection.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (stop, stopped) = tokio::sync::oneshot::channel();
+    let app = router(service.clone());
+    let network_app = app.clone();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, network_app)
+            .with_graceful_shutdown(async {
+                let _ = stopped.await;
+            })
+            .await
+            .unwrap();
+    });
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let body = request.to_string();
+    let request = format!(
+        "POST {MIXED_QUERY} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\napikey: {}\r\nX-AnySeek-Tenant: tenant\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+        master_headers()["apikey"].to_str().unwrap(),
+        body.len()
+    );
+    let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
+    stream.write_all(request.as_bytes()).await.unwrap();
+    let mut network = String::new();
+    tokio::time::timeout(Duration::from_secs(5), stream.read_to_string(&mut network))
+        .await.unwrap().unwrap();
+    let (headers, body) = network.split_once("\r\n\r\n").unwrap();
+    assert!(headers.starts_with("HTTP/1.1 200 "), "{headers}");
+    assert!(!headers.contains(ERROR_CODE_HEADER), "{headers}");
+    let body = if headers.lines().any(|line| line == "transfer-encoding: chunked") {
+        // The protected response encodes the JSON as one guarded data frame.
+        let (length, remaining) = body.split_once("\r\n").unwrap();
+        let length = usize::from_str_radix(length, 16).unwrap();
+        assert_eq!(&remaining[length..], "\r\n0\r\n\r\n");
+        &remaining[..length]
+    } else {
+        body
+    };
+    let network: Value = serde_json::from_str(body).unwrap();
+    assert_eq!(network["visible_seq"], 240);
+    assert_eq!(network["hits"], response["hits"]);
+    stop.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), server).await.unwrap().unwrap();
+
+    // A real full compaction replaces the selected root. Rebuild the projection
+    // against that root and compare exact ranks as the logical control.
+    let (status, compacted) =
+        namespace_api(&app, "PATCH", "/api/v1/index/window", "tenant", None).await;
+    assert_eq!(status, StatusCode::OK, "{compacted}");
+    assert_eq!(
+        build(&app, master_headers(), "window").await,
+        (StatusCode::OK, json!({"indexed_seq":240}))
+    );
+    let (status, exact_after) = request_mixed(&app, "window", "tenant", exhaustive).await;
+    assert_eq!(status, StatusCode::OK, "{exact_after}");
+    assert_eq!(exact_after["visible_seq"], exact_top["visible_seq"]);
+    assert_eq!(exact_after["hits"], exact_top["hits"]);
+    let (status, ann_after) =
+        request_mixed(&app, "window", "tenant", approximate_vector_only).await;
+    assert_eq!(status, StatusCode::OK, "{ann_after}");
+    assert_eq!(ann_after["visible_seq"], exact_after["visible_seq"]);
+    let ann_ids = |body: &Value| {
+        body["hits"].as_array().unwrap().iter()
+            .map(|hit| hit["record"]["record_id"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>()
+    };
+    eprintln!(
+        "ANN top-2 before compaction: {:?}; after compaction: {:?}; exact: {:?}",
+        ann_ids(&ann_top),
+        ann_ids(&ann_after),
+        ann_ids(&exact_after),
+    );
+
+    drop(sdk);
+    drop(app);
+    service.shutdown().wait().await.unwrap();
+}
+
+#[tokio::test]
+async fn event_time_ann_rejects_ambiguous_requests_and_unsupported_layouts() {
+    let temp = tempfile::tempdir().unwrap();
+    let service = open(&temp.path().join("catalog")).await;
+    let app = router(service.clone());
+    let sdk = local::LocalEngine::from_test_service(service.clone());
+    create_mixed_collection(&app).await;
+    for (key, value) in [
+        ("all", json!(true)),
+        ("all", json!(false)),
+        ("all", json!(null)),
+        ("nprobe", json!(0)),
+        ("nprobe", json!(MAX_MIXED_NPROBE + 1)),
+        ("nprobe", json!(1.5)),
+        ("nprobe", json!("1")),
+        ("nprobe", json!(null)),
+        ("query", json!(null)),
+        ("count", json!(true)),
+    ] {
+        let mut request = ann_request();
+        request[key] = value;
+        let (status, error) = request_mixed(&app, "window", "tenant", request).await;
+        assert_eq!(
+            (status, error["code"].as_str()),
+            (StatusCode::BAD_REQUEST, Some("rejected")),
+            "{key}: {error}"
+        );
+        assert!(error.get("hits").is_none());
+    }
+    for nprobe in [0, MAX_MIXED_NPROBE + 1] {
+        let mut request: TimeAnnRequest = serde_json::from_value(ann_request()).unwrap();
+        request.nprobe = nprobe;
+        assert_eq!(
+            sdk.query_time_ann("tenant", "window", request)
+                .await
+                .unwrap_err()
+                .code(),
+            "rejected"
+        );
+    }
+    for (id, vector) in [
+        ("dot", json!({"dimensions":2,"metric":"Dot"})),
+        ("euclidean", json!({"dimensions":2,"metric":"Euclidean"})),
+        (
+            "quantized",
+            json!({"dimensions":2,"quantization":"ScalarQuantizationI8"}),
+        ),
+        ("i8", json!({"dimensions":2,"precision":"I8"})),
+    ] {
+        create_ann_fixture_collection(&service, id, vector).await;
+        let (status, error) = request_mixed(&app, id, "tenant", ann_request()).await;
+        assert_eq!(
+            (status, error["code"].as_str()),
+            (StatusCode::BAD_REQUEST, Some("rejected")),
+            "{id}: {error}"
+        );
+        assert!(
+            error["message"]
+                .as_str()
+                .unwrap()
+                .contains("unquantized F32 cosine")
+        );
+        assert_eq!(
+            sdk.query_time_ann("tenant", id, serde_json::from_value(ann_request()).unwrap())
+                .await
+                .unwrap_err()
+                .code(),
+            "rejected"
+        );
+    }
+    drop(sdk);
+    drop(app);
+    service.shutdown().wait().await.unwrap();
 }
 
 async fn wait_marker(marker: &FsPath) {
@@ -291,6 +736,12 @@ async fn event_time_vector_stringset_work_counts_tail_and_sealed_tags() {
 
 #[tokio::test]
 async fn event_time_vector_publication_timeout_remains_a_read_error() {
+    for ann in [false, true] {
+        check_vector_publication_timeout(ann).await;
+    }
+}
+
+async fn check_vector_publication_timeout(ann: bool) {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join("catalog");
     let service = open(&root).await;
@@ -319,20 +770,28 @@ async fn event_time_vector_publication_timeout_remains_a_read_error() {
     });
     wait_marker(&partition.join(".test-lexical-consumer-started")).await;
 
+    let request = if ann { ann_request() } else { mixed_request() };
     let http_wait = Arc::new(tokio::sync::Notify::new());
     let http_read = PUBLICATION_WAIT.scope(
         http_wait.clone(),
-        namespace_response(&app, "POST", MIXED_QUERY, "tenant", Some(mixed_request())),
+        namespace_response(&app, "POST", MIXED_QUERY, "tenant", Some(request.clone())),
     );
     let sdk_wait = Arc::new(tokio::sync::Notify::new());
-    let sdk_read = PUBLICATION_WAIT.scope(
-        sdk_wait.clone(),
-        sdk.query_time_vector("tenant", "window", serde_json::from_value(mixed_request()).unwrap()),
-    );
+    let sdk_read = PUBLICATION_WAIT.scope(sdk_wait.clone(), async {
+        if ann {
+            sdk.query_time_ann("tenant", "window", serde_json::from_value(request).unwrap())
+                .await
+        } else {
+            sdk.query_time_vector("tenant", "window", serde_json::from_value(request).unwrap())
+                .await
+        }
+    });
     let expire_reads = async {
         tokio::time::timeout(Duration::from_secs(5), async {
             tokio::join!(http_wait.notified(), sdk_wait.notified());
-        }).await.expect("HTTP and SDK must both reach the publication lock");
+        })
+        .await
+        .expect("HTTP and SDK must both reach the publication lock");
 
         // Setup uses the normal service deadline. Advance only after both
         // queries are blocked in the actual publication wait.
@@ -658,7 +1117,7 @@ async fn event_time_text_http_and_sdk_fuse_one_cut_and_reject_excess_work() {
 #[tokio::test]
 async fn event_time_zero_weight_candidates_do_not_fence_http_or_sdk_delivery() {
     // Cover the time-side and retrieval-side evidence independently.
-    for zero_time in [false, true] {
+    for (zero_time, ann) in [(false, false), (true, false), (false, true)] {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("catalog");
         let service = open(&root).await;
@@ -693,7 +1152,7 @@ async fn event_time_zero_weight_candidates_do_not_fence_http_or_sdk_delivery() {
         } else {
             "vector_weight"
         };
-        let mut positive = mixed_request();
+        let mut positive = if ann { ann_request() } else { mixed_request() };
         positive["query"] = json!("match");
         positive["length"] = json!(1);
         positive["rrf"] =
@@ -721,9 +1180,23 @@ async fn event_time_zero_weight_candidates_do_not_fence_http_or_sdk_delivery() {
         let start = |request| {
             let reader = sdk.clone();
             tokio::spawn(async move {
-                reader
-                    .query_time_text("tenant", "window", serde_json::from_value(request).unwrap())
-                    .await
+                if ann {
+                    reader
+                        .query_time_ann(
+                            "tenant",
+                            "window",
+                            serde_json::from_value(request).unwrap(),
+                        )
+                        .await
+                } else {
+                    reader
+                        .query_time_text(
+                            "tenant",
+                            "window",
+                            serde_json::from_value(request).unwrap(),
+                        )
+                        .await
+                }
             })
         };
         let zero_sdk = start(zero);
@@ -791,10 +1264,20 @@ async fn event_time_zero_weight_candidates_do_not_fence_http_or_sdk_delivery() {
 
 #[tokio::test]
 async fn event_time_http_authority_reopen_and_work_limits() {
+    async fn open_for_projection_damage(root: &FsPath) -> (Arc<Service>, Router) {
+        let service = open(root).await;
+        let app = router(service.clone());
+        // Logical expiry is exercised by the query. Keep the periodic sweep
+        // from replacing the selected projection while the test damages it.
+        let sweep = service.reclamation.lock().unwrap().take().unwrap();
+        sweep.abort();
+        assert!(sweep.await.unwrap_err().is_cancelled());
+        (service, app)
+    }
+
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("catalog");
-    let service = open(&root).await;
-    let app = router(service.clone());
+    let (service, app) = open_for_projection_damage(&root).await;
     let (status, create) = namespace_api(
         &app,
         "POST",
@@ -935,8 +1418,7 @@ async fn event_time_http_authority_reopen_and_work_limits() {
             Some(contents) => std::fs::write(&pages, contents).unwrap(),
             None => std::fs::remove_file(&pages).unwrap(),
         }
-        let service = open(&root).await;
-        let app = router(service.clone());
+        let (service, app) = open_for_projection_damage(&root).await;
         let (status, replayed) = window(&app, bounded_request()).await;
         if valid {
             assert_eq!(status, StatusCode::OK, "{replayed}");
@@ -983,8 +1465,7 @@ async fn event_time_http_authority_reopen_and_work_limits() {
 
     // The ordinary checkpoint selected a base without the projection. Reopen
     // that actual certificate before rebuilding through the same admin route.
-    let service = open(&root).await;
-    let app = router(service.clone());
+    let (service, app) = open_for_projection_damage(&root).await;
     let missing = window(&app, bounded_request()).await;
     assert_eq!(missing.0, StatusCode::BAD_REQUEST, "{:?}", missing.1);
     assert_eq!(missing.1["code"], "event_time_unavailable");

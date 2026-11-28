@@ -62,10 +62,7 @@ async fn ann_fixture(
             // A new full projection would rebuild both populations into one
             // component. Seal the committed suffix through the real cache
             // rotation so both clustered vector files belong to the view.
-            let mut inner = p.inner.lock().await;
-            let certificate = inner.anchor.as_ref().unwrap().identity().to_owned();
-            inner.replay_context().stage_stable_tail().await.unwrap();
-            assert_eq!(inner.anchor.as_ref().unwrap().identity(), certificate);
+            assert_eq!(super::super::tests::seal_test_cache_tail(&p).await, level + 1);
         }
     }
     p
@@ -1452,7 +1449,7 @@ async fn event_time_text_three_lane_holds_admission_through_the_last_worker() {
         },
         temporal: None,
         lexical: Some("alpha".into()),
-        vector: Some(Embedding::F32(vec![1.0, 0.0])),
+        vector: Some((Embedding::F32(vec![1.0, 0.0]), AnnMode::All)),
         facets: vec![],
         fields: vec![],
         offset: 0,

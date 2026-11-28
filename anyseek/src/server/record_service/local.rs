@@ -367,6 +367,13 @@ impl LocalEngine {
         self.query_mixed_time(tenant, collection, MixedTimeRequest::Text(request)).await
     }
 
+    /// Fuse time with bounded unquantized F32 cosine ANN on one authorized cut.
+    pub async fn query_time_ann(
+        &self, tenant: &str, collection: &str, request: TimeAnnRequest,
+    ) -> Result<TimeVectorResult, LocalError> {
+        self.query_mixed_time(tenant, collection, MixedTimeRequest::Ann(request)).await
+    }
+
     async fn query_mixed_time(
         &self, tenant: &str, collection: &str, request: MixedTimeRequest,
     ) -> Result<TimeVectorResult, LocalError> {
