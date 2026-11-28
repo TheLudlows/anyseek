@@ -117,6 +117,57 @@ pub struct TimeTextRequest {
     pub rrf: crate::search::TimeRrfOptions,
 }
 
+/// Explicit time window and one-hop entity selector for four-channel fusion.
+#[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TimeEntityRecall {
+    /// Nonempty half-open UTC event window for the time lane.
+    #[schema(value_type = Object)]
+    pub time: crate::record::TimeRange,
+    /// Same-collection directed edge lookup.
+    pub entity: crate::record::EntityRecall,
+}
+
+/// Opt-in time, bounded lexical, exact vector and one-hop relation fusion.
+#[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TimeEntityRequest {
+    /// Independent time and relation recall.
+    pub recall: TimeEntityRecall,
+    /// One positive analyzed term, at most 1024 input bytes.
+    #[serde(rename = "query")]
+    #[schema(min_length = 1, max_length = 1024)]
+    pub query_string: String,
+    /// Collection-format external embedding.
+    pub query_vector: serde_json::Value,
+    /// Required and true for exact-vector recall.
+    pub all: bool,
+    /// Optional temporal predicates shared by all lanes and proof roles.
+    #[serde(default)]
+    #[schema(value_type = Object)]
+    pub temporal: Option<crate::record::TemporalFilter>,
+    /// Skip this many fused records.
+    #[serde(default)]
+    pub offset: usize,
+    /// Offset plus length is at most 32 for four lanes.
+    #[serde(default = "length_api")]
+    #[schema(default = 10, minimum = 1, maximum = 32)]
+    pub length: usize,
+    /// Exact totals are unavailable. Must be false if supplied.
+    #[serde(default)]
+    pub count: bool,
+    /// Requested stored fields. An empty list selects all stored fields.
+    #[serde(default)]
+    pub fields: Vec<String>,
+    /// Metadata predicates shared by all lanes and proof roles.
+    #[serde(default, rename = "filter")]
+    #[schema(value_type = Vec<api_schema::FacetFilter>, max_items = 32)]
+    pub facet_filter: Vec<FacetFilter>,
+    /// Optional rank constant and weights.
+    #[serde(default)]
+    pub rrf: crate::search::TimeEntityRrfOptions,
+}
+
 /// Maximum requested cluster probes per sealed level in mixed recall.
 pub(crate) const MAX_MIXED_NPROBE: usize = 128;
 

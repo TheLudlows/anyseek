@@ -75,6 +75,10 @@ fn graph(neighbor: &str, expiry: Option<u64>) -> Value {
 }
 
 async fn build(app: &Router, tenant: &str, checkpoint: &str) {
+    build_at(app, tenant, checkpoint, 1).await;
+}
+
+async fn build_at(app: &Router, tenant: &str, checkpoint: &str, indexed_seq: u64) {
     let deadline = Instant::now() + WAIT;
     loop {
         let response = app
@@ -94,7 +98,7 @@ async fn build(app: &Router, tenant: &str, checkpoint: &str) {
         let (status, payload) = decode(response).await;
         if status != StatusCode::TOO_MANY_REQUESTS || Instant::now() >= deadline {
             assert_eq!(status, StatusCode::OK, "{payload}");
-            assert_eq!(payload, json!({"indexed_seq":1}));
+            assert_eq!(payload, json!({"indexed_seq":indexed_seq}));
             return;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
@@ -357,3 +361,7 @@ fn http_entity_openapi_describes_admission_and_payload() {
     assert!(schema["properties"].get("expires_at_ms").is_none());
     assert!(schema["properties"].get("_memory").is_none());
 }
+
+
+#[path = "fusion_http_tests.rs"]
+mod fusion;

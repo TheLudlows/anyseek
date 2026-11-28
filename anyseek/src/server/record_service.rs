@@ -18,7 +18,11 @@ mod diagnostic_tests;
 #[cfg(test)]
 #[path = "record_service/event_time_tests.rs"]
 mod event_time_tests;
-use super::api_types::{CreateIndexRequest, EventTimeRequest, FieldRequest, GetDocumentRequest, MAX_MIXED_NPROBE, SearchRequestObject, TimeAnnRequest, TimeTextRequest, TimeVectorRecall, TimeVectorRequest};
+use super::api_types::{
+    CreateIndexRequest, EventTimeRequest, FieldRequest, GetDocumentRequest, MAX_MIXED_NPROBE,
+    SearchRequestObject, TimeAnnRequest, TimeEntityRecall, TimeEntityRequest, TimeTextRequest,
+    TimeVectorRecall, TimeVectorRequest,
+};
 use axum::{
     Json, Router,
     body::{Body, Bytes},
@@ -1921,10 +1925,17 @@ struct QueryDispatch<'a> {
     nprobe: Option<&'a serde_json::value::RawValue>,
 }
 
+#[derive(Deserialize)]
+struct MixedRecallDispatch<'a> {
+    #[serde(borrow)]
+    entity: Option<&'a serde_json::value::RawValue>,
+}
+
 enum MixedTimeRequest {
     Vector(TimeVectorRequest),
     Text(TimeTextRequest),
     Ann(TimeAnnRequest),
+    Entity(TimeEntityRequest),
 }
 
 async fn query(
@@ -1934,8 +1945,11 @@ async fn query(
     bytes: Bytes,
 ) -> Result<Response, Error> {
     let dispatch: QueryDispatch<'_> = serde_json::from_slice(&bytes).map_err(bad)?;
-    if dispatch.recall.is_some() {
-        let request = if dispatch.nprobe.is_some() {
+    if let Some(recall) = dispatch.recall {
+        let recall: MixedRecallDispatch<'_> = serde_json::from_str(recall.get()).map_err(bad)?;
+        let request = if recall.entity.is_some() {
+            MixedTimeRequest::Entity(parse(&bytes)?)
+        } else if dispatch.nprobe.is_some() {
             MixedTimeRequest::Ann(parse(&bytes)?)
         } else if dispatch.query.is_some() {
             MixedTimeRequest::Text(parse(&bytes)?)
@@ -1946,7 +1960,9 @@ async fn query(
         let _ = EVENT_TIME_READ.try_with(|read| read.store(true, std::sync::atomic::Ordering::Release));
         let deadline = REQUEST_DEADLINE.with(|deadline| *deadline);
         let (result, data) = query_mixed_time_collection(&s, tenant, id, request, deadline).await?;
-        return protected_after_publication(result, data).await;
+        let response = encode_data_response(result, Some(data))?;
+        let data = transport_data(&response);
+        return deliver_after_publication(data.as_ref(), || response).await;
     }
     let request_id = diagnostics::REQUEST_ID.try_with(Clone::clone).unwrap_or_else(|_| diagnostics::new_id());
     let request: SearchRequestObject = parse(&bytes)?;
@@ -1961,13 +1977,16 @@ async fn query_mixed_time_collection(
     id: String,
     request: MixedTimeRequest,
     deadline: tokio::time::Instant,
-) -> Result<(Result<TimeVectorResult, Error>, DataOutputPermit), Error> {
+) -> Result<(Result<TimeVectorResult, Error>, TransportData), Error> {
     let p = s.record(&tenant, &id).await?;
     let publication = p.output_permit_after_publication();
     #[cfg(test)]
     let publication = event_time_tests::observe_publication_wait(publication);
     let data = publication.await?;
-    let result = s.catalog.authorized_generation(tenant, id, p.generation, move |entry| async move {
+    let generation = p.generation;
+    let entity_delivery = matches!(&request, MixedTimeRequest::Entity(_))
+        .then(|| (tenant.clone(), id.clone(), p.residency.clone()));
+    let mut result = s.catalog.authorized_generation(tenant, id, generation, move |entry| async move {
         match request {
             MixedTimeRequest::Vector(request) => {
                 if !request.all || request.count {
@@ -1989,7 +2008,7 @@ async fn query_mixed_time_collection(
                     .transpose().map_err(bad)?.map(|vector| (vector, AnnMode::All));
                 let fields = stored_fields(&entry, &request.fields);
                 let query = TimeMixedQuery { window: request.recall.time,
-                    temporal: request.temporal, lexical: Some(request.query_string), vector,
+                    temporal: request.temporal, lexical: Some(request.query_string), vector, entity: None,
                     facets: request.facet_filter, fields, offset: request.offset,
                     length: request.length, rrf: request.rrf };
                 p.query_time_mixed(query, deadline).await.map_err(Error::from)
@@ -2008,16 +2027,42 @@ async fn query_mixed_time_collection(
                 let fields = stored_fields(&entry, &request.fields);
                 let query = TimeMixedQuery { window: request.recall.time,
                     temporal: request.temporal, lexical: request.query_string,
-                    vector: Some((vector, AnnMode::Nprobe(request.nprobe))),
+                    vector: Some((vector, AnnMode::Nprobe(request.nprobe))), entity: None,
                     facets: request.facet_filter, fields, offset: request.offset,
                     length: request.length, rrf: request.rrf };
                 p.query_time_mixed(query, deadline).await.map_err(Error::from)
             }
+            MixedTimeRequest::Entity(request) => {
+                if !request.all || request.count {
+                    return Err(bad("four-channel recall requires all=true and count=false"));
+                }
+                let vector = anyseek::vector::parse_external_embedding(
+                    &request.query_vector, &entry.config.index.inference).map_err(bad)?;
+                let fields = stored_fields(&entry, &request.fields);
+                let query = TimeMixedQuery {
+                    window: request.recall.time, temporal: request.temporal, lexical: Some(request.query_string),
+                    vector: Some((vector, AnnMode::All)), entity: Some((request.recall.entity, request.rrf.entity_weight)),
+                    facets: request.facet_filter, fields, offset: request.offset, length: request.length, rrf: request.rrf.into(),
+                };
+                p.query_time_mixed(query, deadline).await.map_err(Error::from)
+            }
         }
     }).await?;
-    let data = match &result {
-        Ok(output) => data.with_time_fence(output.delivery_time.clone()),
-        Err(_) => data,
+    let data = match (&mut result, entity_delivery) {
+        (Ok(output), Some((tenant, id, residency))) => {
+            let frame = output
+                .entity_frame
+                .take()
+                .ok_or_else(|| storage("missing four-channel delivery proof"))?;
+            let catalog = s.catalog.frame_generation(&tenant, &id, generation)?;
+            TransportData::Entity(Arc::new(entity::Output::new(
+                frame, catalog, residency, deadline,
+            )))
+        }
+        (Ok(output), None) => {
+            TransportData::Record(data.with_time_fence(output.delivery_time.clone()))
+        }
+        (Err(_), _) => TransportData::Record(data),
     };
     #[cfg(test)]
     if result.is_ok() {
@@ -3480,8 +3525,8 @@ fn openapi_document() -> Value {
     #[openapi(components(schemas(
         CreateIndexRequest, SearchRequestObject, CollectionCreate, EventTimeRequest,
         EventTimeCheckpointRequest, TimeVectorRequest, TimeVectorRecall, TimeTextRequest,
-        TimeAnnRequest, entity::EntityPathRequest, entity::EntityCheckpointRequest,
-        anyseek::record::EntityCandidatePaths
+        TimeAnnRequest, TimeEntityRequest, TimeEntityRecall, entity::EntityPathRequest,
+        entity::EntityCheckpointRequest, anyseek::record::EntityCandidatePaths
     )))]
     struct Api;
     let mut doc = serde_json::to_value(Api::openapi()).unwrap();
@@ -3513,6 +3558,11 @@ fn openapi_document() -> Value {
         "type":"object","additionalProperties":false,"required":["from_ms","to_ms"],
         "properties":{"from_ms":{"type":"integer"},"to_ms":{"type":"integer"}}
     });
+    let time = schemas["TimeVectorRecall"]["properties"]["time"].clone();
+    schemas.get_mut("TimeEntityRecall").unwrap()["properties"]["time"] = time;
+    schemas.get_mut("TimeEntityRequest").unwrap()["properties"]["temporal"] = json!({"anyOf":[{"$ref":"#/components/schemas/TemporalFilter"},{"type":"null"}]});
+    schemas.get_mut("TimeEntityRequest").unwrap()["properties"]["all"] = json!({"const":true});
+    schemas.get_mut("TimeEntityRequest").unwrap()["properties"]["count"] = json!({"const":false,"default":false});
     schemas.get_mut("EventTimeRequest").unwrap()["properties"]["temporal"] = json!({
         "type":"object","additionalProperties":false,"required":["event"],"properties":{
             "event":{"type":"object","additionalProperties":false,"required":["from_ms","to_ms"],
@@ -3537,9 +3587,9 @@ fn openapi_document() -> Value {
             "visible_seq":{"type":"integer","minimum":0},"evaluation_time_ms":{"type":"integer","minimum":0},
             "count_total":{"type":"null"},"hits":{"type":"array","maxItems":64,"items":{
                 "type":"object","required":["record","score","channels"],"properties":{
-                    "record":record,"score":{"type":"number"},"channels":{"type":"array","minItems":1,"maxItems":3,
+                    "record":record,"score":{"type":"number"},"channels":{"type":"array","minItems":1,"maxItems":4,
                         "items":{"type":"object","required":["channel","rank","rank_basis","raw_score","rrf_contribution"],"properties":{
-                            "channel":{"enum":["time","lexical","vector"]},"rank":{"type":"integer","minimum":0},"rank_basis":{"enum":["window_time","score"]},
+                            "channel":{"enum":["time","lexical","vector","relation"]},"rank":{"type":"integer","minimum":0},"rank_basis":{"enum":["window_time","score"]},
                             "raw_score":{"type":["number","null"]},"rrf_contribution":{"type":"number"}}}}}}}}}));
     schemas.insert("GroupRecord".into(),json!({"type":"object","additionalProperties":false,"required":["record_id","document"],"properties":{
         "record_id":{"type":"string"},"document":{"type":"object"},"temporal":{"anyOf":[{"$ref":"#/components/schemas/TemporalMetadata"},{"type":"null"}]}}}));
@@ -3583,7 +3633,7 @@ fn openapi_document() -> Value {
             "/api/v1/index/{id}/query",
             "post",
             "Retrieve records and statistics from one view",
-            Some(json!({"oneOf":[{"$ref":"#/components/schemas/SearchRequestObject"},{"$ref":"#/components/schemas/TimeVectorRequest"},{"$ref":"#/components/schemas/TimeTextRequest"},{"$ref":"#/components/schemas/TimeAnnRequest"}]})),
+            Some(json!({"oneOf":[{"$ref":"#/components/schemas/SearchRequestObject"},{"$ref":"#/components/schemas/TimeVectorRequest"},{"$ref":"#/components/schemas/TimeTextRequest"},{"$ref":"#/components/schemas/TimeAnnRequest"},{"$ref":"#/components/schemas/TimeEntityRequest"}]})),
         ),
         (EVENT_TIME_QUERY_PATH, "post", "Query an opted-in pure event-time window",
             Some(json!({"$ref":"#/components/schemas/EventTimeRequest"}))),

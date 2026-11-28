@@ -43,7 +43,7 @@ mod entity_view;
 pub(crate) use entity_view::EntityFrameOutput;
 pub use entity_view::{
     EntityAdjacencyView, EntityCandidate, EntityCandidatePaths, EntityCandidates, EntityDirection,
-    EntityMember, EntityNeighborCandidates,
+    EntityMember, EntityNeighborCandidates, EntityRecall,
 };
 mod event_time_view;
 pub use event_time_view::{EventTimeResult, TimeVectorResult};

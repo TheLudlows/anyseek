@@ -97,6 +97,12 @@ fn event_time_vector_openapi_keeps_ordinary_and_mixed_query_shapes() {
     assert_eq!(input[1]["$ref"], "#/components/schemas/TimeVectorRequest");
     assert_eq!(input[2]["$ref"], "#/components/schemas/TimeTextRequest");
     assert_eq!(input[3]["$ref"], "#/components/schemas/TimeAnnRequest");
+    assert_eq!(input[4]["$ref"], "#/components/schemas/TimeEntityRequest");
+    let schemas = &doc["components"]["schemas"];
+    assert_eq!(schemas["TimeEntityRecall"]["properties"]["entity"]["$ref"], "#/components/schemas/EntityPathRequest");
+    assert_eq!(schemas["TimeEntityRequest"]["properties"]["all"]["const"], true);
+    assert!(schemas["TimeEntityRequest"]["properties"].get("nprobe").is_none());
+    assert_eq!(schemas["TimeEntityRrfOptions"]["properties"]["entity_weight"]["type"], "number");
     let ann = &doc["components"]["schemas"]["TimeAnnRequest"];
     assert_eq!(ann["properties"]["nprobe"]["minimum"], 1);
     assert_eq!(ann["properties"]["nprobe"]["maximum"], MAX_MIXED_NPROBE);
@@ -110,8 +116,8 @@ fn event_time_vector_openapi_keeps_ordinary_and_mixed_query_shapes() {
     assert_eq!(output[1]["$ref"], "#/components/schemas/TimeVectorResult");
     let channels = &doc["components"]["schemas"]["TimeVectorResult"]["properties"]["hits"]
         ["items"]["properties"]["channels"];
-    assert_eq!(channels["maxItems"], 3);
-    assert_eq!(channels["items"]["properties"]["channel"]["enum"], json!(["time", "lexical", "vector"]));
+    assert_eq!(channels["maxItems"], 4);
+    assert_eq!(channels["items"]["properties"]["channel"]["enum"], json!(["time", "lexical", "vector", "relation"]));
     assert_eq!(
         doc["components"]["schemas"]["TimeVectorRequest"]["properties"]["all"]["const"],
         true
