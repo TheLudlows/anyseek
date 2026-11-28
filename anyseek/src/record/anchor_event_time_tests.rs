@@ -2116,6 +2116,12 @@ async fn four_channel_read_budget_and_both_watermarks_share_the_certified_cut() 
     }
     assert_eq!(build(&p).await, 4);
     assert_eq!(p.build_entity_adjacency(DEADLINE).await.unwrap(), 4);
+    for id in ["tail-a", "tail-b", "tail-c"] {
+        let mut row = write(id, id, "ordinary", ExpectedVersion::Absent);
+        row.document.as_mut().unwrap().shift_remove("vector");
+        p.write(row).await.unwrap();
+    }
+    assert_eq!(p.inner.lock().await.state.records.recent_records().len(), 3);
     let request = |entity| TimeMixedQuery {
         window: TimeRange {
             from_ms: Some(25),

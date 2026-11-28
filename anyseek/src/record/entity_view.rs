@@ -718,7 +718,13 @@ impl PathView<'_> {
 
     fn shadowed(&self, id: &str, work: Option<&QueryWork>) -> Result<bool, RecordError> {
         if let Some(work) = work {
-            let comparisons = (usize::BITS - self.tail.len().leading_zeros()) as usize;
+            let comparisons = if self.tail.is_empty() {
+                0
+            } else {
+                // The slice search may use ceil(log2(n)) comparisons before
+                // its final equality check, even for a non-power-of-two tail.
+                1 + (usize::BITS - (self.tail.len() - 1).leading_zeros()) as usize
+            };
             work.charge(comparisons)?;
         }
         Ok(self
