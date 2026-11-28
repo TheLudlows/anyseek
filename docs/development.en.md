@@ -91,36 +91,39 @@ These lanes reflect [.github/workflows/ci.yml](../.github/workflows/ci.yml). `PR
 | Lane | Current checks |
 | --- | --- |
 | static (all changes) | S3 acceptance runner unit checks and lexical test source partition |
-| static (code changes) | Console build and unit tests, frontend/backend boundary, and retired dependencies |
-| core (Linux/Windows) | Exact core manifest, five deletion/ranking integration targets, synchronous and asynchronous HTTP, failure fencing and shutdown, service config and OpenAPI, and old generation reclamation on local and S3 fixture backends |
+| static (console or backend changes) | Frontend/backend boundary |
+| Console feedback (console-only changes, Linux) | Build the default service, run console unit tests, build, browser tests against the real API and bootstrap, and upload the console artifacts |
+| core (Linux/Windows) | Exact core manifest, five deletion/ranking integration targets, synchronous and asynchronous HTTP, service config and OpenAPI, and old generation reclamation on local and S3 fixture backends |
 | lexical (Linux/Windows) | Standalone lexical_correctness with small membership and scoring oracles |
-| write-path (Linux/Windows) | Exact fault-injection write manifest, one isolated process per case |
+| write-path (Linux/Windows) | Exact fault-injection write, publication fence, and shutdown manifest, one isolated process per case. Linux also exercises real SIGTERM. |
 
-Linux core also runs real SIGTERM and a separate browser suite including bootstrap. The core manifest is `scripts/ci_core_cases.json` and write manifest is `scripts/ci_write_path_cases.json`. Runners verify exact cases exist and pass.
+Backend and mixed changes run the matrix on both platforms. Linux core also checks retired dependencies and runs console verification. The core and write manifests are `scripts/ci_core_cases.json` and `scripts/ci_write_path_cases.json`. Runners verify exact cases exist and pass.
 
-Documentation changes skip the compile matrix, console build, boundary, and dependency graph checks, and keep the two static source checks. Check Markdown links and anchors separately. Fast lanes use generic x86-64 CPU flags to share artifacts on the same OS and cannot substitute for full native acceptance.
+Changes limited to documentation, project skills, benchmarks, the corpus, or the full acceptance workflow run only the two static checks. Manual quick runs and runs without a usable diff base use the entire quick matrix. Check Markdown links and anchors separately. Fast lanes use generic x86-64 CPU flags. Console-only runs can restore the Linux core build cache on the same runner label. Full acceptance uses native CPU configuration.
 
 ## Full acceptance
 
 Run manually against a pinned candidate ref.
 
 ```sh
-gh workflow run ci.yml --ref YOUR_CANDIDATE_REF -F full=true
+gh workflow run full-acceptance.yml --ref YOUR_CANDIDATE_REF
 ```
 
-You can also trigger `Full acceptance (manual)` directly. The command executes the selected commit's [.github/workflows/full-acceptance.yml](../.github/workflows/full-acceptance.yml). You can read the configuration without triggering a run. Verify the exact head SHA before relying on results and reassess later commits. Manual runs neither cancel each other nor get cancelled by ordinary PR feedback.
+The command executes the selected commit's [.github/workflows/full-acceptance.yml](../.github/workflows/full-acceptance.yml). The compatibility command `gh workflow run ci.yml --ref YOUR_CANDIDATE_REF -F full=true` also runs only the full matrix. Verify the exact head SHA before relying on results and reassess later commits. Each manual run proceeds independently.
 
 The complete workflow uses `ANYSEEK_TEST_SCALE=full`, native CPU configuration, and source-only caching. It expands to 11 jobs.
 
 | Coverage | Job |
 | --- | --- |
-| All default-feature Linux modules and integration tests, normal HTTP/browser, release panic, and OpenAPI | build-and-smoke |
+| All default-feature Linux modules and integration tests, normal HTTP and reclamation, browser and bootstrap, release panic, and OpenAPI | build-and-smoke |
 | Linux fault-injection persistence library/server, targeted no-default-feature checks and default/no-default doctests on both platforms, and Windows native default-feature unit tests | persistence-native × 2 |
 | Windows fault-injection library, binary, and integration tests | windows-fault-tests × 2 (library and binary, remaining integration cases) and four independent windows-lexical cases |
-| Windows normal HTTP and both platforms' fault HTTP, indexer/authorization, storage faults, and recovery | persistence-native |
+| Windows normal HTTP, OpenAPI and reclamation, both platforms' fault HTTP, indexer/authorization, storage faults and recovery, and Linux real SIGTERM | persistence-native |
 | S3 fixture object contracts and six cache-free semantic suites on both platforms | s3-native-acceptance × 2 |
 
 S3 remote-checkpoint unit tests run with matching features in `persistence-native` on Linux and `windows-fault-tests` on Windows. The S3 job covers fixture object contracts and HTTP semantics. `build-and-smoke` uses `--all-targets` for default-feature Linux unit and integration tests. Windows runs the native default-feature unit tests in one filtered invocation. The Windows fault-injection library and binary tests, integration tests, and HTTP crash recovery in `persistence-native` run in parallel.
+
+Both platforms run `ci_write_path_cases.py --isolated-only` after the fault library suite for the case that needs its own budget environment. Their fault library suites cover the other write cases.
 
 The no-default-feature step checks the binaries, embedded SDK, tokenizer and OpenAPI contracts, text normalization, snapshot encoding, and request diagnostics.
 
