@@ -615,6 +615,95 @@ async fn wait_marker(marker: &FsPath) {
 }
 
 #[tokio::test]
+async fn event_time_lexical_snapshot_stays_at_the_selected_cut() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("catalog");
+    let service = open(&root).await;
+    let app = router(service.clone());
+    let sdk = Arc::new(local::LocalEngine::from_test_service(service.clone()));
+    create_mixed_collection(&app).await;
+
+    let request = json!({"recall":{"time":{"from_ms":0,"to_ms":1}},"query":"sentinel","length":4});
+    let mut row = mixed_row("original", "row", None);
+    row["document"]["body"] = json!("sentinel original");
+    write_mixed(&app, vec![row]).await;
+    assert_eq!(
+        build(&app, master_headers(), "window").await,
+        (StatusCode::OK, json!({"indexed_seq":1}))
+    );
+    let partition = service.record("tenant", "window").await.unwrap();
+    let generation = service.catalog.collection_entry("tenant", "window").await.unwrap();
+    let record_dir = root.join(generation.directory());
+    let gate = record_dir.join(".test-event-time-lexical-worker-pause");
+    let entered = record_dir.join(".test-event-time-lexical-worker-pause-entered");
+
+    for (use_sdk, version) in [(false, 2), (true, 3)] {
+        std::fs::write(&gate, b"pause").unwrap();
+        let request_copy = request.clone();
+        let pending = if use_sdk {
+            let reader = sdk.clone();
+            tokio::spawn(async move {
+                reader
+                    .query_time_text("tenant", "window", serde_json::from_value(request_copy).unwrap())
+                    .await
+                    .unwrap_err()
+                    .code()
+                    .to_owned()
+            })
+        } else {
+            let router = app.clone();
+            tokio::spawn(async move {
+                let (status, body) = request_mixed(&router, "window", "tenant", request_copy).await;
+                assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
+                assert!(body.get("hits").is_none(), "{body}");
+                body["code"].as_str().unwrap().to_owned()
+            })
+        };
+        wait_marker(&entered).await;
+        let mut update = mixed_row(&format!("patch-{version}"), "row", None);
+        update["expected"] = json!({"Match":version - 1});
+        update["document"]["body"] = json!(format!("sentinel version {version}"));
+        write_mixed(&app, vec![update]).await;
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let progress = partition.committed_progress().await;
+                assert!(!progress.recovery_required);
+                if progress.committed_seq == Some(version) && progress.lexical_seq == version
+                    && progress.vector_seq == version
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        }).await.unwrap();
+        std::fs::remove_file(&gate).unwrap();
+        std::fs::remove_file(&entered).unwrap();
+        assert_eq!(pending.await.unwrap(), "busy", "sdk={use_sdk}, cut={version}");
+
+        let fresh = if use_sdk {
+            let output = sdk
+                .query_time_text("tenant", "window", serde_json::from_value(request.clone()).unwrap())
+                .await
+                .unwrap();
+            serde_json::to_value(output).unwrap()
+        } else {
+            let (status, body) = request_mixed(&app, "window", "tenant", request.clone()).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            body
+        };
+        assert_eq!(fresh["visible_seq"], version);
+        assert_eq!(fresh["hits"].as_array().unwrap().len(), 1);
+        assert_eq!(fresh["hits"][0]["record"]["record_id"], "row");
+        assert_eq!(fresh["hits"][0]["record"]["version"], version);
+    }
+    assert_eq!(request_mixed(&app, "window", "outside", request).await.0, StatusCode::FORBIDDEN);
+    drop(partition);
+    drop(sdk);
+    drop(app);
+    service.shutdown().wait().await.unwrap();
+}
+
+#[tokio::test]
 async fn event_time_public_handoffs_keep_point_observed_expiry_after_rollback() {
     for mixed in [true, false] {
         let tmp = tempfile::tempdir().unwrap();

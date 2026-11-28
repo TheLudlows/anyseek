@@ -13,6 +13,46 @@ use crate::{
     vector::Embedding,
 };
 
+/// The native readers selected while the Record cut is still held by its caller.
+pub(in crate::record) struct PinnedCorpus {
+    index: VectorIndexArc,
+    cut: Cut,
+    snapshots: Vec<Arc<Snapshot>>,
+    _memory: crate::resources::MemoryReservation,
+}
+
+impl PinnedCorpus {
+    pub(in crate::record) async fn capture(
+        index: &VectorIndexArc,
+        cut: Cut,
+    ) -> Result<Self, RecordError> {
+        let root = index.read().await;
+        let bytes = size_of::<Arc<Snapshot>>() * root.segments.len();
+        let memory = crate::record::build_budget::admit_memory(
+            bytes as u64,
+            crate::resources::Scope::current().as_ref(),
+        )?;
+        let mut snapshots = Vec::with_capacity(root.segments.len());
+        for segment in &root.segments {
+            snapshots.push(segment.lexical.snapshot().await?);
+        }
+        Ok(Self { index: index.clone(), cut, snapshots, _memory: memory })
+    }
+
+    pub(in crate::record) async fn search(
+        &self,
+        text: String,
+        length: usize,
+        filters: Vec<FacetFilter>,
+    ) -> Result<ResultObject, RecordError> {
+        search_corpus(
+            &self.index, text, None, SearchMode::Lexical, QueryType::Union,
+            0, length, ResultType::TopkCount, vec![], filters, vec![],
+            self.cut, Some(&self.snapshots),
+        ).await
+    }
+}
+
 pub(crate) async fn search(
     index: &VectorIndexArc,
     text: String,
@@ -26,6 +66,27 @@ pub(crate) async fn search(
     filters: Vec<FacetFilter>,
     sort: Vec<ResultSort>,
     cut: Cut,
+) -> Result<ResultObject, RecordError> {
+    search_corpus(
+        index, text, vector, mode, query_type, offset, length, result_type,
+        fields, filters, sort, cut, None,
+    ).await
+}
+
+async fn search_corpus(
+    index: &VectorIndexArc,
+    text: String,
+    vector: Option<Embedding>,
+    mode: SearchMode,
+    query_type: QueryType,
+    offset: usize,
+    length: usize,
+    result_type: ResultType,
+    fields: Vec<String>,
+    filters: Vec<FacetFilter>,
+    sort: Vec<ResultSort>,
+    cut: Cut,
+    pinned: Option<&[Arc<Snapshot>]>,
 ) -> Result<ResultObject, RecordError> {
     let work = QueryWork::current();
     if let Some(work) = &work {
@@ -114,7 +175,10 @@ pub(crate) async fn search(
 
     // The field layout is fixed for the captured topology. Compile the query
     // before taking component guards, then capture membership and native cuts.
-    let native_fields = first.lexical.snapshot().await?.fields.clone();
+    let native_fields = match pinned {
+        Some(snapshots) => snapshots.first().ok_or_else(|| storage("empty native corpus"))?.fields.clone(),
+        None => first.lexical.snapshot().await?.fields.clone(),
+    };
     let names = config
         .schema
         .iter()
@@ -176,17 +240,28 @@ pub(crate) async fn search(
         }
         active_shards.push(active);
     }
-    let mut snapshots = Vec::with_capacity(root.segments.len());
-    for segment in &root.segments {
-        snapshots.push(segment.lexical.snapshot().await?);
-    }
+    let current;
+    let snapshots = if let Some(snapshots) = pinned {
+        // A fixed reader does not suppress a newly reported runtime failure.
+        for segment in &root.segments {
+            segment.lexical.visible_status()?;
+        }
+        snapshots
+    } else {
+        let mut latest = Vec::with_capacity(root.segments.len());
+        for segment in &root.segments {
+            latest.push(segment.lexical.snapshot().await?);
+        }
+        current = latest;
+        &current
+    };
     let views = snapshots.iter().map(Arc::as_ref).collect::<Vec<_>>();
     scoring::validate_bounds(&plan.scores, &boosts, native_fields.len())?;
     let strict = if let Some(work) = &work {
         work.charge(snapshots.len())?;
         // An exact-cut consumer may use a published pair or an aligned bounded
         // tail, but cannot scan the whole corpus to rejoin mismatched identities.
-        Some(capture_aligned(&root.segments, &snapshots, &active_shards, Some(work))?
+        Some(capture_aligned(&root.segments, snapshots, &active_shards, Some(work))?
             .ok_or(RecordError::Busy)?)
     } else {
         None
@@ -202,7 +277,7 @@ pub(crate) async fn search(
 
     let selections = match strict {
         Some(selections) => Some(selections),
-        None => capture_aligned(&root.segments, &snapshots, &active_shards, None)?,
+        None => capture_aligned(&root.segments, snapshots, &active_shards, None)?,
     };
     let aligned = selections.is_some();
     let mut vectors = BTreeMap::new();

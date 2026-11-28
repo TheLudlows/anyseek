@@ -190,6 +190,7 @@ struct View {
     base: Arc<state_rows::Base>,
     dependencies: IndexDependencies,
     retrieval: Option<query::Handle>,
+    lexical: Option<lexical::runtime_query::PinnedCorpus>,
     entity: bool,
     // Stable ID order from Records, used even for tombstones or moves outside
     // the requested window. Owning only the changed rows bounds the pin.
@@ -840,27 +841,12 @@ impl RecordPartition {
                 let mut filters = facets;
                 filters.push(temporal::expiry_filter(view.evaluation));
                 let index = &view.retrieval.as_ref().unwrap().index;
+                let corpus = view.lexical.as_ref();
                 timeout_at(deadline, async move {
                     match lane {
                         RetrievalLane::Lexical(text) => {
-                            work.with_async_reads(lexical::runtime_query::search(
-                                index,
-                                text,
-                                None,
-                                SearchMode::Lexical,
-                                QueryType::Union,
-                                0,
-                                limit,
-                                ResultType::TopkCount,
-                                vec![],
-                                filters,
-                                vec![],
-                                lexical::Cut {
-                                    sequence: view.cut,
-                                    evaluation_time_ms: view.evaluation,
-                                },
-                            ))
-                            .await
+                            let corpus = corpus.expect("captured lexical channel");
+                            work.with_async_reads(corpus.search(text, limit, filters)).await
                         }
                         RetrievalLane::Vector(vector, ann_mode) => {
                             crate::search::search_with_counts(
@@ -1211,6 +1197,18 @@ impl View {
         } else {
             Some(inner.index.capture_query(limit).await?)
         };
+        // The handles fix the component topology, but a mutable component can
+        // replace its published Searcher. Pin the lexical snapshots before
+        // releasing the Record guard that selected this cut.
+        let lexical = if dependencies == IndexDependencies::LexicalWithVectorMetadata {
+            let index = &retrieval.as_ref().expect("captured retrieval").index;
+            Some(lexical::runtime_query::PinnedCorpus::capture(index, lexical::Cut {
+                sequence: cut,
+                evaluation_time_ms: evaluation,
+            }).await?)
+        } else {
+            None
+        };
         let view = Self {
             #[cfg(test)]
             root: inner.journal.root().to_owned(),
@@ -1225,6 +1223,7 @@ impl View {
             base: base.clone(),
             dependencies,
             retrieval,
+            lexical,
             entity: entity.is_some(),
             suffix: records.recent_records().cloned().collect(),
             max_base_visits: MAX_BASE_VISITS.min(inner.config.max_candidates),
