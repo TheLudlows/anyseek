@@ -1971,6 +1971,12 @@ pub(crate) mod tests {
         let clock=Arc::new(TestClock(std::sync::atomic::AtomicU64::new(now)));
         p.inner.lock().await.set_clock(clock.clone()); (clock,now)
     }
+    pub(crate) async fn test_has_sealed_record_source(p: &RecordPartition, id: &str) -> bool {
+        matches!(
+            p.inner.lock().await.state.records.source(id).unwrap(),
+            Some(state_values::RecordSource::Sealed(_))
+        )
+    }
     pub(crate) async fn seal_test_cache_tail(p: &RecordPartition) -> usize {
         let _writer = p.writer.lock().await;
         let mut inner = p.inner.lock().await;
