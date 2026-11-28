@@ -253,10 +253,23 @@ async fn four_channel_http_sdk_prove_same_cut_dedup_filters_and_withdrawal() {
         embedded(&sdk, request()).await.unwrap()["hits"],
         body["hits"]
     );
-    assert_eq!(
-        round_trip_tcp(app.clone(), &request()).await["hits"],
-        body["hits"]
-    );
+    let tcp = round_trip_tcp(app.clone(), &request()).await;
+    assert_eq!(tcp["hits"], body["hits"]);
+
+    let schema = openapi_document();
+    let properties = &schema["components"]["schemas"]["TimeVectorResult"]["properties"]["hits"]
+        ["items"]["properties"]["channels"]["items"]["properties"];
+    for hit in tcp["hits"].as_array().unwrap() {
+        for explanation in hit["channels"].as_array().unwrap() {
+            for field in ["channel", "rank_basis"] {
+                let allowed = properties[field]["enum"].as_array().unwrap();
+                assert!(
+                    allowed.contains(&explanation[field]),
+                    "OpenAPI rejects {field} in TCP response {explanation}"
+                );
+            }
+        }
+    }
 
     // Common predicates must qualify the proof as well as the target.
     for role in PROOF_ROLES {

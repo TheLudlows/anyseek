@@ -119,6 +119,10 @@ fn event_time_vector_openapi_keeps_ordinary_and_mixed_query_shapes() {
     assert_eq!(channels["maxItems"], 4);
     assert_eq!(channels["items"]["properties"]["channel"]["enum"], json!(["time", "lexical", "vector", "relation"]));
     assert_eq!(
+        channels["items"]["properties"]["rank_basis"]["enum"],
+        json!(["window_time", "score", "stable_adjacency"])
+    );
+    assert_eq!(
         doc["components"]["schemas"]["TimeVectorRequest"]["properties"]["all"]["const"],
         true
     );

@@ -3589,7 +3589,7 @@ fn openapi_document() -> Value {
                 "type":"object","required":["record","score","channels"],"properties":{
                     "record":record,"score":{"type":"number"},"channels":{"type":"array","minItems":1,"maxItems":4,
                         "items":{"type":"object","required":["channel","rank","rank_basis","raw_score","rrf_contribution"],"properties":{
-                            "channel":{"enum":["time","lexical","vector","relation"]},"rank":{"type":"integer","minimum":0},"rank_basis":{"enum":["window_time","score"]},
+                            "channel":{"enum":["time","lexical","vector","relation"]},"rank":{"type":"integer","minimum":0},"rank_basis":{"enum":["window_time","score","stable_adjacency"]},
                             "raw_score":{"type":["number","null"]},"rrf_contribution":{"type":"number"}}}}}}}}}));
     schemas.insert("GroupRecord".into(),json!({"type":"object","additionalProperties":false,"required":["record_id","document"],"properties":{
         "record_id":{"type":"string"},"document":{"type":"object"},"temporal":{"anyOf":[{"$ref":"#/components/schemas/TemporalMetadata"},{"type":"null"}]}}}));
