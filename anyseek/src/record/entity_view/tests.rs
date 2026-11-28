@@ -1,4 +1,5 @@
 use super::*;
+use crate::record::event_time_view::IndexDependencies;
 use serde_json::{Value, json};
 use std::time::Duration;
 
@@ -7,21 +8,50 @@ const DEADLINE: Duration = Duration::from_secs(30);
 #[tokio::test]
 async fn entity_adjacency_build_preserves_selected_event_time_projection() {
     let directory = tempfile::tempdir().unwrap();
-    let p = RecordPartition::create(&directory.path().join("records"), settings())
+    let root = directory.path().join("records");
+    let config = settings();
+    let p = RecordPartition::create(&root, config.clone())
         .await
         .unwrap();
     let mut dated = row("ab", vec![edge("app:A", "link", "app:B")]);
     dated["temporal"] = json!({"event_time_ms":25});
     replace(&p, "dated", 0, vec![dated]).await;
-    assert_eq!(
-        p.start_event_time_checkpoint(DEADLINE)
-            .unwrap()
-            .finish()
-            .await
-            .unwrap(),
-        1
-    );
+    assert_eq!(refresh_time(&p).await.unwrap(), 1);
     assert_eq!(p.build_entity_adjacency(DEADLINE).await.unwrap(), 1);
+    let initial = dual_root(&p, 1).await;
+    let old_root = root.join(format!("anchor-{initial}"));
+    let old = p.capture_entity_adjacency().await.unwrap();
+
+    assert_eq!(refresh_time(&p).await.unwrap(), old.visible_seq());
+    let refreshed = dual_root(&p, 1).await;
+    assert_ne!(refreshed, initial);
+    expect(&old, EntityDirection::Out, "app:A", &[("app:B", "ab", 1)]).await;
+    p.inner.lock().await.reclaim_anchor_objects().await.unwrap();
+    assert!(old_root.is_dir());
+    drop(old);
+    p.inner.lock().await.reclaim_anchor_objects().await.unwrap();
+    assert!(!old_root.exists());
+
+    p.finish_service_shutdown().await.unwrap();
+    drop(p);
+    let p = RecordPartition::open(&root, config.max_journal_bytes)
+        .await
+        .unwrap();
+    assert_eq!(dual_root(&p, 1).await, refreshed);
+    let window = p
+        .read_event_time_window(
+            24..26,
+            8,
+            IndexDependencies::None,
+            Instant::now() + DEADLINE,
+        )
+        .await
+        .unwrap();
+    assert_eq!(window.hits.len(), 1);
+    assert_eq!(
+        (window.hits[0].id.as_str(), window.hits[0].version),
+        ("ab", 1)
+    );
     expect(
         &p.capture_entity_adjacency().await.unwrap(),
         EntityDirection::Out,
@@ -29,15 +59,29 @@ async fn entity_adjacency_build_preserves_selected_event_time_projection() {
         &[("app:B", "ab", 1)],
     )
     .await;
+
+    assert_eq!(p.index_committed(DEADLINE).await.unwrap(), 1);
+    let inner = p.inner.lock().await;
+    assert!(inner.state.records.event_time_base().is_none());
+    assert!(inner.state.records.entity_base().is_none());
+    drop(inner);
+    p.finish_service_shutdown().await.unwrap();
+}
+
+async fn refresh_time(p: &RecordPartition) -> Result<u64, RecordError> {
+    p.start_event_time_checkpoint(DEADLINE)?.finish().await
+}
+
+async fn dual_root(p: &RecordPartition, cut: u64) -> String {
     let inner = p.inner.lock().await;
     let base = inner.state.records.event_time_base().unwrap();
-    assert_eq!(base.event_time.as_ref().unwrap().cut(), 1);
+    assert_eq!(base.event_time.as_ref().unwrap().cut(), cut);
+    assert_eq!(base.entity.as_ref().unwrap().cut(), cut);
     assert!(Arc::ptr_eq(
         base,
         inner.state.records.entity_base().unwrap()
     ));
-    drop(inner);
-    p.finish_service_shutdown().await.unwrap();
+    inner.anchor.as_ref().unwrap().identity().to_owned()
 }
 
 fn settings() -> RecordConfig {
@@ -274,33 +318,30 @@ async fn entity_adjacency_rejects_hot_fanout_without_a_partial_range() {
 #[tokio::test]
 async fn entity_adjacency_invalid_declaration_keeps_canonical_write_and_selected_sidecar() {
     let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("records");
     let config = settings();
-    let p = RecordPartition::create(&directory.path().join("records"), config)
+    let p = RecordPartition::create(&root, config.clone())
         .await
         .unwrap();
-    replace(
-        &p,
-        "valid",
-        0,
-        vec![row("valid", vec![edge("app:A", "link", "app:B")])],
-    )
-    .await;
+    let mut valid = row("valid", vec![edge("app:A", "link", "app:B")]);
+    valid["temporal"] = json!({"event_time_ms":25});
+    replace(&p, "valid", 0, vec![valid]).await;
     assert_eq!(p.build_entity_adjacency(DEADLINE).await.unwrap(), 1);
+    assert_eq!(refresh_time(&p).await.unwrap(), 1);
+    let certified = dual_root(&p, 1).await;
     let old = p.capture_entity_adjacency().await.unwrap();
-    assert_eq!(
-        replace(
-            &p,
-            "invalid",
-            0,
-            vec![row("invalid", vec![edge("no_namespace", "link", "app:B")])]
-        )
-        .await,
-        2
-    );
+    let mut invalid = row("invalid", vec![edge("no_namespace", "link", "app:B")]);
+    invalid["temporal"] = json!({"event_time_ms":25});
+    assert_eq!(replace(&p, "invalid", 0, vec![invalid]).await, 2);
     assert!(matches!(
         p.build_entity_adjacency(DEADLINE).await,
         Err(RecordError::Rejected(_))
     ));
+    assert!(matches!(
+        refresh_time(&p).await,
+        Err(RecordError::Rejected(reason)) if reason == "invalid entity declaration endpoint or type"
+    ));
+    assert_eq!(dual_root(&p, 1).await, certified);
     assert_eq!(p.get("invalid").await.unwrap().unwrap().version, 1);
     expect(
         &old,
@@ -317,5 +358,25 @@ async fn entity_adjacency_invalid_declaration_keeps_canonical_write_and_selected
             .await,
         Err(RecordError::Rejected(_))
     ));
+    drop(current);
+    drop(old);
+    p.finish_service_shutdown().await.unwrap();
+    drop(p);
+
+    let p = RecordPartition::open(&root, config.max_journal_bytes)
+        .await
+        .unwrap();
+    assert_eq!(dual_root(&p, 1).await, certified);
+    assert_eq!(p.get("invalid").await.unwrap().unwrap().version, 1);
+    assert_eq!(replace(&p, "invalid", 1, vec![]).await, 3);
+    assert_eq!(refresh_time(&p).await.unwrap(), 3);
+    assert_ne!(dual_root(&p, 3).await, certified);
+    expect(
+        &p.capture_entity_adjacency().await.unwrap(),
+        EntityDirection::Out,
+        "app:A",
+        &[("app:B", "valid", 1)],
+    )
+    .await;
     p.finish_service_shutdown().await.unwrap();
 }
