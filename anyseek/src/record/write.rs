@@ -273,11 +273,7 @@ impl RecordPartition {
                     );
                     return Err(RecordError::DurablePending(inner.state.seq));
                 }
-                inner
-                    .output
-                    .write()
-                    .map_err(|_| RecordError::RecoveryRequired)?
-                    .fenced = false;
+                inner.publish_point_view(Some(false))?;
                 interrupted.map_or(Ok(batch), Err)
             })
             .catch_unwind()
@@ -372,7 +368,7 @@ impl RecordPartition {
                 }
                 drop(inner);
                 #[cfg(test)]
-                pause_encoding(&root).await;
+                pause_write(&root, "encode").await;
                 let plan = mutation::prepare_input(
                     &input,
                     &config,
@@ -382,6 +378,8 @@ impl RecordPartition {
                     evaluation_time_ms,
                 )?;
                 let mut inner = self.inner.lock().await;
+                #[cfg(test)]
+                pause_write(&root, "admission").await;
                 let mutation::PreparedWrite::Append {
                     applied,
                     bytes,
@@ -615,6 +613,7 @@ impl RecordPartition {
                 .write()
                 .map_err(|_| RecordError::RecoveryRequired)?;
             output.fenced = true;
+            output.point_pending = true;
         }
         scope.persistence_attempted = result
             .results
@@ -678,17 +677,17 @@ impl RecordPartition {
 }
 
 #[cfg(test)]
-async fn pause_encoding(root: &std::path::Path) {
-    let pause = root.join(".test-write-encode-pause");
+async fn pause_write(root: &std::path::Path, stage: &str) {
+    let pause = root.join(format!(".test-write-{stage}-pause"));
     if pause.exists() {
-        std::fs::write(root.join(".test-write-encode-started"), b"started").unwrap();
+        std::fs::write(root.join(format!(".test-write-{stage}-started")), b"started").unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(20), async {
             while pause.exists() {
                 tokio::time::sleep(std::time::Duration::from_millis(5)).await;
             }
         })
         .await
-        .expect("encoding test gate released");
+        .expect("write test gate released");
     }
 }
 
@@ -726,7 +725,7 @@ mod tests {
         let root=tempfile::tempdir().unwrap();let path=root.path().join("records");
         let settings=config();let p=RecordPartition::create(&path,settings.clone()).await.unwrap();
         let clock=Arc::new(Clock(std::sync::atomic::AtomicU64::new(1000)));
-        p.inner.lock().await.clock=clock.clone();
+        p.inner.lock().await.set_clock(clock.clone());
         p.write(write("first","a","alpha",ExpectedVersion::Absent)).await.unwrap();
         std::fs::write(path.join(".test-write-encode-pause"),b"pause").unwrap();
         let request=write("second","b","beta",ExpectedVersion::Absent);
@@ -837,7 +836,7 @@ mod tests {
         struct Clock(std::sync::atomic::AtomicU64);
         impl temporal::Clock for Clock {fn now_ms(&self)->Result<u64,RecordError>{Ok(self.0.load(std::sync::atomic::Ordering::SeqCst))}}
         let now=SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64;
-        let clock=Arc::new(Clock(std::sync::atomic::AtomicU64::new(now)));p.inner.lock().await.clock=clock.clone();
+        let clock=Arc::new(Clock(std::sync::atomic::AtomicU64::new(now)));p.inner.lock().await.set_clock(clock.clone());
         let mut initial=write("temporal-large","large",&"alpha ".repeat(50_000),ExpectedVersion::Absent);
         initial.document.as_mut().unwrap().remove("vector");
         initial.temporal=Some(TemporalMetadata{event_time_ms:Some(now as i64-1_000),valid_from_ms:Some(now as i64-2_000),

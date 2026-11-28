@@ -39,6 +39,8 @@ impl RecordPartition {
         if matches!(&result,Err(RecordError::OutcomeUnknown(_)|RecordError::DurablePending(_)|RecordError::RecoveryRequired)) {
             inner.healthy=false;inner.index.abort_batch();
             if let Ok(mut output)=inner.output.write(){output.fenced=true;}
+        } else if inner.healthy {
+            inner.publish_point_view(None)?;
         }
         result
     }
@@ -98,6 +100,7 @@ impl RecordPartition {
             if deadline.is_some_and(|t|t<=inner.evaluation_time_ms){return Err(RecordError::Busy);}
             let clock=inner.clock.clone();
             let min_time_ms=inner.evaluation_time_ms.max(inner.state.time_watermark_ms);
+            inner.output.write().map_err(|_| RecordError::RecoveryRequired)?.point_pending = true;
             uploaded.publish_checked(inner.remote.as_mut().ok_or(RecordError::RecoveryRequired)?,move || {
                 let now=temporal::checked_time(clock.as_ref(),min_time_ms)?;
                 if deadline.is_some_and(|t|t<=now){return Err(RecordError::Busy);}
@@ -105,6 +108,7 @@ impl RecordPartition {
             }).await?;
         }
         let inner=guard.as_mut().unwrap();
+        inner.output.write().map_err(|_| RecordError::RecoveryRequired)?.point_pending = true;
         inner.append_operation(&payload,seq).await?;
         #[cfg(test)] if std::env::var("ANYSEEK_GROUP_CRASH_ROOT").ok().as_deref()==inner.journal.root().to_str(){std::process::exit(72);}
         #[cfg(test)] if inner.fail_after_durable {return Err(RecordError::DurablePending(seq));}

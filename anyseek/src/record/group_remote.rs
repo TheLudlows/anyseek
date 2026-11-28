@@ -47,7 +47,7 @@ mod tests {
         let bytes=encode_entry(&Entry::Checkpoint{config:inner.config.clone(),state:inner.state.try_clone().unwrap()}).unwrap();
         let mut a=r.authority.lock().await;a.create_partition("groups",1).unwrap();
         r.store.publish_bootstrap(&mut a,"groups",1,&bytes,unix_time_ms_i64()).await.unwrap();drop(a);
-        let clock=Arc::new(Clock(AtomicU64::new(unix_time_ms_i64() as u64)));inner.clock=clock.clone();inner.remote=Some(r);drop(inner);
+        let clock=Arc::new(Clock(AtomicU64::new(unix_time_ms_i64() as u64)));inner.set_clock(clock.clone());inner.remote=Some(r);drop(inner);
         (p,store,clock)
     }
     fn request(nonce:&str,version:u64,ids:&[&str])->GroupReplace {
@@ -56,7 +56,7 @@ mod tests {
     }
     async fn cold(p:RecordPartition,path:&Path,clock:Arc<Clock>)->RecordPartition {
         let r=p.inner.lock().await.remote.take().unwrap();p.finish_service_shutdown().await.unwrap();drop(p);
-        let p=RecordPartition::open_s3_with_remote(path,config().max_journal_bytes,r).await.unwrap();p.inner.lock().await.clock=clock;p
+        let p=RecordPartition::open_s3_with_remote(path,config().max_journal_bytes,r).await.unwrap();p.inner.lock().await.set_clock(clock);p
     }
     #[tokio::test]
     async fn group_remote_one_sequence_cache_failure_and_cold_receipt() {
@@ -108,7 +108,7 @@ mod tests {
         p.compact_journal().await.unwrap();let (bundle,seq,_)=p.create_s3_backup("group-cut",100,1024*1024).await.unwrap();assert_eq!(seq,1);
         p.replace_group(request("next",1,&["c"])).await.unwrap();
         let restored=RecordPartition::restore_s3_with_remote(&temp.path().join("restore"),config(),remote(store,&temp.path().join("restore.sqlite"),"restored"),&bundle,1024*1024,10000,16*1024*1024).await.unwrap();
-        restored.inner.lock().await.clock=clock;assert_eq!(restored.group_version("g").await.unwrap(),Some(1));
+        restored.inner.lock().await.set_clock(clock);assert_eq!(restored.group_version("g").await.unwrap(),Some(1));
         assert_eq!(restored.replace_group(first).await.unwrap(),receipt);assert!(restored.get("a").await.unwrap().is_some());assert!(restored.get("c").await.unwrap().is_none());
         restored.finish_service_shutdown().await.unwrap();p.finish_service_shutdown().await.unwrap();
     }

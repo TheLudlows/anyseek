@@ -825,7 +825,7 @@ mod tests {
             .unwrap();
         drop(authority);
         let clock = Arc::new(Clock(AtomicU64::new(unix_time_ms_i64() as u64)));
-        inner.clock = clock.clone();
+        inner.set_clock(clock.clone());
         inner.remote = Some(remote);
         drop(inner);
         (p, store, root, db, clock)
@@ -1256,7 +1256,7 @@ mod tests {
         p.collect_s3_garbage().await.unwrap();
         let target=path();let db=path();
         let restored=RecordPartition::restore_s3_with_remote(&target,config(),remote(store.clone(),&db,"restored"),&bundle,1024*1024,10000,16*1024*1024).await.unwrap();
-        restored.inner.lock().await.clock=clock.clone();
+        restored.inner.lock().await.set_clock(clock.clone());
         assert_eq!(scores(&restored).await,expected);
         assert_eq!(restored.write(request).await.unwrap(),receipt);
         p.release_s3_backup_pins("index-cut").await.unwrap();
@@ -1576,7 +1576,7 @@ mod tests {
         let p = RecordPartition::open_s3_with_remote(root, config().max_journal_bytes, remote)
             .await
             .unwrap();
-        p.inner.lock().await.clock = clock;
+        p.inner.lock().await.set_clock(clock);
         p
     }
     async fn scores(p: &RecordPartition) -> Vec<serde_json::Value> {
@@ -1863,7 +1863,7 @@ mod tests {
             let p = RecordPartition::open_s3_with_remote(&root, config().max_journal_bytes, r)
                 .await
                 .unwrap();
-            p.inner.lock().await.clock = clock;
+            p.inner.lock().await.set_clock(clock);
             assert_eq!(
                 p.get("a").await.unwrap().unwrap().document.unwrap()["body"],
                 "alpha durable"
@@ -1913,7 +1913,7 @@ mod tests {
         )
         .await
         .unwrap();
-        restored.inner.lock().await.clock = clock.clone();
+        restored.inner.lock().await.set_clock(clock.clone());
         assert_eq!(
             restored.get("a").await.unwrap().unwrap().document.unwrap()["body"],
             "alpha saved"
@@ -1971,7 +1971,7 @@ mod tests {
             authority.create_partition("tenant/shared/0000000000000002",1).unwrap();
             persistence.store.publish_bootstrap(&mut authority,"tenant/shared/0000000000000002",1,&initial,unix_time_ms_i64()).await.unwrap();
             drop(authority);
-            inner.clock=clock.clone();
+            inner.set_clock(clock.clone());
             inner.remote=Some(persistence);
         }
         second.write(write("tenant/shared/0000000000000002","b","beta private",ExpectedVersion::Absent)).await.unwrap();
@@ -1992,7 +1992,7 @@ mod tests {
         assert_ne!(first_bundle,second_bundle);
         let restored_root=path();
         let restored=RecordPartition::restore_s3_with_remote(&restored_root,config(),remote(store.clone(),&db,"tenant/shared/0000000000000003"),&first_bundle,1024*1024,10000,16*1024*1024).await.unwrap();
-        restored.inner.lock().await.clock=clock.clone();
+        restored.inner.lock().await.set_clock(clock.clone());
         assert!(restored.get("a").await.unwrap().is_some());
         assert!(restored.get("b").await.unwrap().is_none());
         // Another partition's registered but unpublished upload is not protected
@@ -2015,7 +2015,7 @@ mod tests {
         assert!(restored.get("a").await.unwrap().is_some());
         assert_eq!(second.create_s3_backup("second-cut",102,1024*1024).await.unwrap().0,second_bundle);
         let other=RecordPartition::restore_s3_with_remote(&path(),config(),remote(store,&db,"tenant/shared/0000000000000004"),&second_bundle,1024*1024,10000,16*1024*1024).await.unwrap();
-        other.inner.lock().await.clock=clock;
+        other.inner.lock().await.set_clock(clock);
         assert!(other.get("b").await.unwrap().is_some());
         assert!(other.get("a").await.unwrap().is_none());
     }

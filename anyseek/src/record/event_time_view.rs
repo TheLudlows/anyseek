@@ -566,7 +566,7 @@ impl RecordPartition {
             .take(length)
             .map(|(id, hit)| {
                 work.charge(1)?;
-                let source = inner.state.records.source(&id).ok_or(RecordError::Busy)?;
+                let source = inner.state.records.source(&id)?.ok_or(RecordError::Busy)?;
                 Ok::<_, RecordError>((id, hit, source))
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -1166,22 +1166,24 @@ impl View {
                 "event-time limit exceeds the collection candidate budget",
             ));
         }
-        let recent = records.recent_records();
-        if recent.len() > MAX_OVERLAY_ROWS {
-            return Err(EventTimeError::Budget(
-                "record suffix exceeds its row budget",
-            ));
-        }
-        let overlay_bytes = recent
-            .map(|row| row.wire_bytes())
-            .try_fold(0usize, |sum, n| {
-                sum.checked_add(n)
-                    .filter(|bytes| *bytes <= MAX_OVERLAY_BYTES)
-                    .ok_or(EventTimeError::Budget(
-                        "record suffix exceeds its byte budget",
-                    ))
-            })?;
-        let count = records.recent_records().len();
+        let (count, overlay_bytes) = {
+            let recent = records.recent_rows()?;
+            if recent.len() > MAX_OVERLAY_ROWS {
+                return Err(EventTimeError::Budget(
+                    "record suffix exceeds its row budget",
+                ));
+            }
+            let overlay_bytes = recent.values()
+                .map(|row| row.wire_bytes())
+                .try_fold(0usize, |sum, n| {
+                    sum.checked_add(n)
+                        .filter(|bytes| *bytes <= MAX_OVERLAY_BYTES)
+                        .ok_or(EventTimeError::Budget(
+                            "record suffix exceeds its byte budget",
+                        ))
+                })?;
+            (recent.len(), overlay_bytes)
+        };
         let buffers =
             1024 + count * (size_of::<state_memory::Shared<Record>>() + size_of::<TailHit<'_>>());
         let memory = reserve_memory(buffers as u64).map_err(memory_error)?;
@@ -1225,7 +1227,7 @@ impl View {
             retrieval,
             lexical,
             entity: entity.is_some(),
-            suffix: records.recent_records().cloned().collect(),
+            suffix: records.recent_rows()?.values().cloned().collect(),
             max_base_visits: MAX_BASE_VISITS.min(inner.config.max_candidates),
             barrier: partition.output_permit()?,
             _memory: memory,

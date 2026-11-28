@@ -327,14 +327,14 @@ impl RecordPartition {
         {
             return Err(RecordError::RecoveryRequired);
         }
-        let mut recent = records.recent_records();
+        let recent = records.recent_rows()?;
         let count = recent.len();
         if count > MAX_TAIL_ROWS || cut - base_cut > MAX_TAIL_SEQUENCE {
             return Err(RecordError::Rejected(
                 "entity adjacency tail exceeds its row or sequence budget".into(),
             ));
         }
-        let bytes = recent.try_fold(0usize, |sum, row| sum.checked_add(row.wire_bytes()));
+        let bytes = recent.values().try_fold(0usize, |sum, row| sum.checked_add(row.wire_bytes()));
         let Some(bytes) = bytes.filter(|&bytes| bytes <= MAX_TAIL_BYTES) else {
             return Err(RecordError::Rejected(
                 "entity adjacency tail exceeds its byte budget".into(),
@@ -357,7 +357,7 @@ impl RecordPartition {
                 evaluation,
                 observed_at,
                 base,
-                tail: records.recent_records().cloned().collect(),
+                tail: recent.values().cloned().collect(),
                 max_visits: entity::MAX_VISITS.min(inner.config.max_candidates),
                 barrier: self.output_permit()?,
                 _memory: memory,

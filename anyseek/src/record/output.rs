@@ -6,16 +6,19 @@ use std::sync::{Arc, RwLock, Weak};
 pub(super) struct OutputState {
     pub revision: u64,
     pub fenced: bool,
+    pub(super) point: Option<super::point::PointView>,
+    pub(super) point_pending: bool,
 }
 /// A bounded response may use an old complete read view, but may not cross a
 /// failed authority publication boundary. Combine with authorization at handoff.
 #[derive(Clone)]
 pub struct DataOutputPermit {
-    states: Vec<(Arc<RwLock<OutputState>>, u64)>,
+    states: Vec<(Arc<RwLock<OutputState>>, u64, bool)>,
     // Only transport permits opt into waiting. Internal callers already holding
     // Inner must continue using synchronous deliver. Weak owners preserve the
     // rule that a saved response cannot keep a retired partition alive.
     publications: Vec<Weak<tokio::sync::Mutex<super::Inner>>>,
+    point_publication: Option<Weak<tokio::sync::Mutex<super::Inner>>>,
     residency: Vec<crate::resources::residency::Pin>,
     time_fences: Vec<ReadTimeFence>,
 }
@@ -51,8 +54,9 @@ impl ReadTimeFence {
 impl DataOutputPermit {
     pub(super) fn new(state: Arc<RwLock<OutputState>>, revision: u64) -> Self {
         Self {
-            states: vec![(state, revision)],
+            states: vec![(state, revision, false)],
             publications: Vec::new(),
+            point_publication: None,
             residency: Vec::new(),
             time_fences: Vec::new(),
         }
@@ -67,22 +71,30 @@ impl DataOutputPermit {
         for permit in permits {
             residency.extend(permit.residency);
             time_fences.extend(permit.time_fences);
-            for owner in permit.publications {
+            for owner in permit.publications.into_iter().chain(permit.point_publication) {
                 publications.insert(owner.as_ptr() as usize, owner);
             }
-            for (state, revision) in permit.states {
+            for (state, revision, point) in permit.states {
                 let entry = states
                     .entry(Arc::as_ptr(&state) as usize)
-                    .or_insert((state, revision));
+                    .or_insert((state, revision, point));
                 entry.1 = entry.1.min(revision);
+                entry.2 |= point;
             }
         }
         Self {
             states: states.into_values().collect(),
             publications: publications.into_values().collect(),
+            point_publication: None,
             residency,
             time_fences,
         }
+    }
+
+    pub(super) fn for_point(mut self, owner: Weak<tokio::sync::Mutex<super::Inner>>) -> Self {
+        self.point_publication = Some(owner);
+        self.states[0].2 = true;
+        self
     }
 
     pub(crate) fn with_residency(mut self, pin: crate::resources::residency::Pin) -> Self {
@@ -98,12 +110,25 @@ impl DataOutputPermit {
     /// Receipt and progress responses keep residency without adding a new
     /// publication fence to their existing contracts.
     pub(crate) fn residency_only(pin: crate::resources::residency::Pin) -> Self {
-        Self { states: Vec::new(), publications: Vec::new(), residency: vec![pin], time_fences: Vec::new() }
+        Self { states: Vec::new(), publications: Vec::new(), point_publication: None, residency: vec![pin], time_fences: Vec::new() }
     }
     /// Wait for an in-progress publication before checking the unchanged failure
     /// barrier and handing off. No lock is retained after the synchronous callback.
     /// Do not call from inside a partition operation or reenter it in the callback.
     pub async fn deliver_after_publication<T>(&self, handoff: impl FnOnce() -> T) -> Result<T, RecordError> {
+        if let Some(owner) = &self.point_publication {
+            // Exact point capture is independent of write preparation. The
+            // same health/owner fence still runs at every handoff.
+            let mut handoff = Some(handoff);
+            return match self.deliver(|| handoff.take().unwrap()()) {
+                Err(RecordError::RecoveryRequired) => {
+                    let owner = owner.upgrade().ok_or(RecordError::RecoveryRequired)?;
+                    let _publication = owner.lock_owned().await;
+                    self.deliver(handoff.take().unwrap())
+                }
+                result => result,
+            };
+        }
         let mut guards = Vec::with_capacity(self.publications.len());
         for owner in &self.publications {
             let owner = owner.upgrade().ok_or(RecordError::RecoveryRequired)?;
@@ -117,10 +142,10 @@ impl DataOutputPermit {
         let guards = self
             .states
             .iter()
-            .map(|(state, _)| state.read().map_err(|_| RecordError::RecoveryRequired))
+            .map(|(state, _, _)| state.read().map_err(|_| RecordError::RecoveryRequired))
             .collect::<Result<Vec<_>, _>>()?;
-        for (guard, (_, revision)) in guards.iter().zip(&self.states) {
-            if guard.fenced || guard.revision != *revision {
+        for (guard, (_, revision, point)) in guards.iter().zip(&self.states) {
+            if guard.fenced || (*point && guard.point_pending) || guard.revision != *revision {
                 return Err(RecordError::RecoveryRequired);
             }
         }

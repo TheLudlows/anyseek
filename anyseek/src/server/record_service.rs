@@ -1059,9 +1059,11 @@ async fn read_collection(
     service: &Arc<Service>, tenant: String, collection: String, record: String,
 ) -> Result<(Option<anyseek::record::Record>, DataOutputPermit), Error> {
     let partition = service.record(&tenant, &collection).await?;
-    let data = partition.output_permit_after_publication().await?;
-    let value = service.catalog.authorized_generation(
-        tenant, collection, partition.generation, move |_| async move { partition.get(&record).await },
+    let (value, data) = service.catalog.authorized_generation(
+        tenant, collection, partition.generation, move |_| async move {
+            let (value, data) = partition.get_with_output(&record).await?;
+            Ok::<_, RecordError>((value, data.with_residency(partition.residency.clone())))
+        },
     ).await??;
     Ok((value, data))
 }
@@ -2607,6 +2609,75 @@ mod tests {
         app.clone().oneshot(request).await.unwrap()
     }
     #[tokio::test]
+    async fn point_reads_return_published_rows_while_batch_holds_admission() {
+        use std::time::Duration;
+
+        let (service, path, headers) = setup().await;
+        let key = headers["apikey"].to_str().unwrap();
+        let app = router(service.clone());
+        let sdk = local::LocalEngine::from_test_service(service.clone());
+        let record = service.record("tenant", "c").await.unwrap();
+        let root = path.join(service.catalog.collection_entry("tenant", "c").await.unwrap().directory());
+        let batch = "/api/v1/index/c/batch";
+        let doc = "/api/v1/index/c/doc/r";
+        let write = |nonce: &str, expected: Value, body: Option<&str>| {
+            json!({"writes": [{
+                "operation_id": OperationId::new(nonce.into()),
+                "record_id": "r",
+                "expected": expected,
+                "document": body.map(|value| json!({"body":value})),
+            }]})
+        };
+        let (status, response) = tenant_api(&app, "POST", batch, key, Some(write("seed", json!("Absent"), Some("sealed")))).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(response["results"][0]["receipt"]["version"], 1);
+        record.compact_journal().await.unwrap();
+
+        let gate = root.join(".test-write-admission-pause");
+        let marker = root.join(".test-write-admission-started");
+        std::fs::write(&gate, b"pause").unwrap();
+        let app_writer = app.clone();
+        let writer_key = key.to_owned();
+        let update = write("update", json!({"Match":1}), Some("confirmed"));
+        let writer = tokio::spawn(async move {
+            tenant_api(&app_writer, "POST", batch, &writer_key, Some(update)).await
+        });
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !marker.exists() { tokio::task::yield_now().await; }
+        }).await.unwrap();
+        let reads = tokio::time::timeout(Duration::from_secs(2), async {
+            tokio::join!(tenant_api(&app, "GET", doc, key, None), sdk.get("tenant", "c", "r"))
+        }).await;
+        assert!(!writer.is_finished());
+        std::fs::remove_file(gate).unwrap();
+        let (status, response) = writer.await.unwrap();
+        let ((http, body), sdk_row) = reads.expect("both GETs must finish while the writer owns Inner");
+        assert_eq!(http, StatusCode::OK);
+        assert_eq!(body["document"]["body"], "sealed");
+        assert_eq!(sdk_row.unwrap().unwrap().version, 1);
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(response["results"][0]["receipt"]["version"], 2);
+        assert_eq!(tenant_api(&app, "GET", doc, key, None).await.1["document"]["body"], "confirmed");
+        assert_eq!(sdk.get("tenant", "c", "r").await.unwrap().unwrap().version, 2);
+
+        let delete = write("delete", json!({"Match":2}), None);
+        let (_, response) = tenant_api(&app, "POST", batch, key, Some(delete.clone())).await;
+        assert_eq!(response["results"][0]["receipt"]["version"], 3);
+        assert_eq!(tenant_api(&app, "POST", batch, key, Some(delete)).await.1, response);
+        assert_eq!(tenant_api(&app, "GET", doc, key, None).await.0, StatusCode::NOT_FOUND);
+        assert!(sdk.get("tenant", "c", "r").await.unwrap().is_none());
+
+        drop(record);
+        drop(app);
+        drop(service);
+        tokio::time::timeout(Duration::from_secs(5), sdk.shutdown()).await.unwrap().unwrap();
+        let sdk = local::LocalEngine::open(&path, false).await.unwrap();
+        assert!(sdk.get("tenant", "c", "r").await.unwrap().is_none());
+        tokio::time::timeout(Duration::from_secs(5), sdk.shutdown()).await.unwrap().unwrap();
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[tokio::test]
     async fn group_http_replaces_replays_clears_and_preserves_independent_routes() {
         let (service,path,headers)=setup().await;
         let app=router(service.clone());let key=headers["apikey"].to_str().unwrap();
@@ -2625,8 +2696,14 @@ mod tests {
         let (status,replay)=tenant_api(&app,"POST","/api/v1/index/c/group/replace",key,Some(first)).await;
         assert_eq!(status,StatusCode::OK);assert_eq!(replay,receipt);
         let partition=service.record("tenant","c").await.unwrap();
-        assert!(partition.get("b").await.unwrap().is_none());assert!(partition.get("c").await.unwrap().is_none());
-        assert!(partition.get("a").await.unwrap().is_some());assert!(partition.get("d").await.unwrap().is_some());
+        let sdk = local::LocalEngine::from_test_service(service.clone());
+        for (member, visible) in [("a", true), ("b", false), ("c", false), ("d", true)] {
+            let point = format!("/api/v1/index/c/doc/{member}");
+            assert_eq!(tenant_api(&app, "GET", &point, key, None).await.0,
+                if visible { StatusCode::OK } else { StatusCode::NOT_FOUND });
+            assert_eq!(sdk.get("tenant", "c", member).await.unwrap().is_some(), visible);
+        }
+        drop(sdk);
         let (status,current)=tenant_api(&app,"GET",uri,key,None).await;
         assert_eq!(status,StatusCode::OK);assert_eq!(current,json!({"group_id":id,"group_version":2}));
         for (route,array) in [("batch","writes"),("ingest","records")] {
@@ -3104,6 +3181,9 @@ mod tests {
         let value: Value = serde_json::from_slice(&axum::body::to_bytes(response.into_body(), MAX_RESPONSE).await.unwrap()).unwrap();
         assert_eq!(value["code"], "recovery_required");
         assert!(value.get("document").is_none());
+        let sdk = local::LocalEngine::from_test_service(service.clone());
+        assert_eq!(sdk.get("tenant", "c", "existing").await.unwrap_err().code(), "recovery_required");
+        drop(sdk);
         assert!(protected_data(Ok(json!({"body":"must not escape"})),Some(data.clone())).is_err());
         assert!(protected_data::<Value>(Err(bad("ordinary error")),Some(data.clone())).is_err());
         for mut body in prepared_bodies {

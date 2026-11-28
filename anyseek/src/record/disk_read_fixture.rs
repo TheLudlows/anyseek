@@ -1,60 +1,10 @@
-//! Runs the normal GET/search entry points against an explicitly selected test
-//! checkpoint. Live authority never selects this fixture.
+//! Exercises the detached disk tail next to the production group write path.
 use super::*;
 use crate::storage::{
     build_budget::File,
     disk_records::{Checkpoint, CommittedChange, Limits, Root, View, primary, rows},
     segment,
 };
-
-pub(super) struct Pinned {
-    view: Arc<View>,
-    _owner: Arc<std::fs::File>,
-    evaluation: u64,
-}
-
-impl Pinned {
-    pub(super) fn capture(inner: &Inner) -> Result<Option<Self>, RecordError> {
-        let Some(view) = &inner.disk_read_fixture else {
-            return Ok(None);
-        };
-        if view.stamp().2 != inner.state.seq {
-            return Err(RecordError::Busy);
-        }
-        Ok(Some(Self {
-            view: view.clone(),
-            _owner: inner.journal.owner_guard(),
-            evaluation: inner.evaluation_time_ms,
-        }))
-    }
-
-    pub(super) fn validate(&self, inner: &mut Inner) -> Result<(), RecordError> {
-        inner.observe_time()?;
-        if !inner.healthy {
-            return Err(RecordError::RecoveryRequired);
-        }
-        if inner.state.seq != self.view.stamp().2
-            || !inner
-                .disk_read_fixture
-                .as_ref()
-                .is_some_and(|selected| Arc::ptr_eq(selected, &self.view))
-        {
-            return Err(RecordError::Busy);
-        }
-        Ok(())
-    }
-
-    pub(super) fn read(&self, id: &str) -> Result<Option<Record>, RecordError> {
-        let Some(row) = self
-            .view
-            .get(id, self.evaluation)
-            .map_err(state_rows::read_error)?
-        else {
-            return Ok(None);
-        };
-        state_rows::decode(id, row, |record| Ok(Some(record)))
-    }
-}
 
 pub(super) fn prepare_group(
     inner: &Inner,

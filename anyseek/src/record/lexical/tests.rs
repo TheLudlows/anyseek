@@ -606,6 +606,7 @@ async fn native_unigram_bm25f_matches_record_scores_at_the_vector_cut() {
         let inputs = inner
             .state
             .records
+            .recent_rows().unwrap()
             .values()
             .map(|r| Input {
                 identity: Identity {

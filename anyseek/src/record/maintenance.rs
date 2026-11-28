@@ -104,7 +104,7 @@ mod tests {
             }
             let now=SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64;
             let clock=Arc::new(ProofClock(std::sync::atomic::AtomicU64::new(now)));
-            p.inner.lock().await.clock=clock.clone();
+            p.inner.lock().await.set_clock(clock.clone());
             let mut first=super::super::tests::write("first","a","alpha",ExpectedVersion::Absent);
             if events {first.temporal=Some(TemporalMetadata{expire_at_ms:Some(now+100),..Default::default()});}
             p.write(first).await.unwrap();

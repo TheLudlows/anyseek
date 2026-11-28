@@ -215,6 +215,7 @@ pub(super) fn replay_checkpoint_size(state: &State, before: usize, applied: &App
         return Err(storage("invalid ordinary replay size transition"));
     }
     let previous=state.records.get(&applied.request.record_id);
+    let previous=previous.as_deref();
     let document=enrichment::document(previous,&applied.request)?;
     let temporal=temporal::retained(previous,&applied.request,applied.observed_time_ms)?;
     snapshot_after(state,before,applied,&projected_record(previous,applied,document,temporal))

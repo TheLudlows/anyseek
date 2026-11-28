@@ -351,10 +351,7 @@ impl Inner {
         checkpoint_codec::assert_full_length(&self.config, &self.state, snapshot_bytes).await?;
         self.snapshot_bytes = snapshot_bytes;
         self.evaluation_time_ms = evaluation;
-        self.output
-            .write()
-            .map_err(|_| RecordError::DurablePending(seq))?
-            .fenced = false;
+        self.publish_point_view(Some(false)).map_err(|_| RecordError::DurablePending(seq))?;
         self.healthy = true;
         #[cfg(feature = "fault-injection")]
         if std::env::var("ANYSEEK_TEMPORAL_FAULT").ok().as_deref() == Some("crash_after_visible")
