@@ -3,6 +3,7 @@
   "server::record_service::event_time_tests::event_time_http_original_deadline_returns_busy",
   "server::record_service::event_time_tests::event_time_http_query_busy_keeps_its_error_header",
   "server::record_service::event_time_tests::event_time_vector_http_respects_authorization_and_publication",
+  "server::record_service::event_time_tests::event_time_lexical_snapshot_stays_at_the_selected_cut",
   "server::record_service::event_time_tests::event_time_public_handoffs_keep_point_observed_expiry_after_rollback",
   "server::record_service::event_time_tests::event_time_vector_stringset_work_counts_tail_and_sealed_tags",
   "server::record_service::event_time_tests::event_time_vector_publication_timeout_remains_a_read_error",
