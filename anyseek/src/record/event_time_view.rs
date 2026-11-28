@@ -191,6 +191,7 @@ struct View {
     dependencies: IndexDependencies,
     retrieval: Option<query::Handle>,
     lexical: Option<lexical::runtime_query::PinnedCorpus>,
+    fixed_lexical: bool,
     entity: bool,
     // Stable ID order from Records, used even for tombstones or moves outside
     // the requested window. Owning only the changed rows bounds the pin.
@@ -416,6 +417,7 @@ impl RecordPartition {
             fields: None,
         };
         let entity_selection = entity.is_some().then(|| selection.clone());
+        let fixed_lexical = lanes == 2 && lexical.is_some();
         let (mut view, time) = self
             .capture_and_read(
                 window,
@@ -426,6 +428,7 @@ impl RecordPartition {
                 Some(work.clone()),
                 lanes,
                 entity.as_ref().map(|(request, _)| request),
+                fixed_lexical,
             )
             .await?;
         let mut ranks = Vec::new();
@@ -537,10 +540,15 @@ impl RecordPartition {
             }
         }
         let ranked = rank_fused(fused, &work)?;
-        let inner = timeout_at(deadline, self.inner.lock())
-            .await
-            .map_err(|_| RecordError::Busy)?;
-        view.recheck(self, &inner)?;
+        let inner = if view.fixed_lexical {
+            None
+        } else {
+            let inner = timeout_at(deadline, self.inner.lock())
+                .await
+                .map_err(|_| RecordError::Busy)?;
+            view.recheck(self, &inner)?;
+            Some(inner)
+        };
         let entity_frame = if view.entity {
             let retrieval = RetrievalPublication::capture(
                 self,
@@ -566,7 +574,10 @@ impl RecordPartition {
             .take(length)
             .map(|(id, hit)| {
                 work.charge(1)?;
-                let source = inner.state.records.source(&id)?.ok_or(RecordError::Busy)?;
+                let source = match &inner {
+                    Some(inner) => inner.state.records.source(&id)?.ok_or(RecordError::Busy)?,
+                    None => view.source_at(&id, &work)?,
+                };
                 Ok::<_, RecordError>((id, hit, source))
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -715,6 +726,7 @@ impl RecordPartition {
                 Some(work.clone()),
                 2,
                 None,
+                false,
             )
             .await
             .map_err(EventTimeError::record_error)?;
@@ -763,6 +775,7 @@ impl RecordPartition {
                 Some(work.clone()),
                 2,
                 None,
+                false,
             )
             .await
             .map_err(EventTimeError::record_error)?;
@@ -820,7 +833,7 @@ impl RecordPartition {
     }
 
     async fn score_retrieval_lane(
-        view: View,
+        mut view: View,
         lane: RetrievalLane,
         facets: Vec<FacetFilter>,
         limit: usize,
@@ -841,7 +854,7 @@ impl RecordPartition {
                 let mut filters = facets;
                 filters.push(temporal::expiry_filter(view.evaluation));
                 let index = &view.retrieval.as_ref().unwrap().index;
-                let corpus = view.lexical.as_ref();
+                let corpus = view.lexical.as_mut();
                 timeout_at(deadline, async move {
                     match lane {
                         RetrievalLane::Lexical(text) => {
@@ -894,22 +907,30 @@ impl RecordPartition {
         let (view, scored) =
             Self::score_retrieval_lane(view, lane, facets, limit, deadline, work.clone()).await?;
         let hits = scored.results;
-        let candidates = timeout_at(deadline, view.retrieval.as_ref().unwrap().candidates(hits))
+        let retrieval = view.retrieval.as_ref().unwrap();
+        let expected_lexical = if view.fixed_lexical { view.lexical.as_ref() } else { None };
+        let candidates = timeout_at(deadline, retrieval.candidates_from(hits, expected_lexical))
             .await
             .map_err(|_| RecordError::Busy)??;
-        let inner = timeout_at(deadline, self.inner.lock())
-            .await
-            .map_err(|_| RecordError::Busy)?;
-        view.recheck(self, &inner)?;
+        let inner = if view.fixed_lexical {
+            None
+        } else {
+            let inner = timeout_at(deadline, self.inner.lock())
+                .await
+                .map_err(|_| RecordError::Busy)?;
+            view.recheck(self, &inner)?;
+            Some(inner)
+        };
         let mut pinned = Vec::with_capacity(candidates.len());
         for (rank, candidate) in candidates.into_iter().enumerate() {
             work.charge(1)?;
-            pinned.push(
-                timeout_at(deadline, candidate.pin(rank, &inner))
+            pinned.push(match &inner {
+                Some(inner) => timeout_at(deadline, candidate.pin(rank, inner))
                     .await
                     .map_err(|_| RecordError::Busy)??
                     .ok_or(RecordError::Busy)?,
-            );
+                None => candidate.pin_source(rank, |id| view.source_at(id, &work))?,
+            });
         }
         drop(inner);
         let worker = crate::resources::spawn_blocking(move || {
@@ -946,6 +967,7 @@ impl RecordPartition {
                 None,
                 1,
                 None,
+                false,
             )
             .await?;
         self.deliver_window(view, output, deadline, None).await
@@ -961,6 +983,7 @@ impl RecordPartition {
         work: Option<Arc<crate::search::QueryWork>>,
         lanes: usize,
         entity: Option<&EntityRecall>,
+        fixed_lexical: bool,
     ) -> Result<(View, Window), EventTimeError> {
         if window.is_empty() || limit == 0 || limit > MAX_RESULTS {
             return Err(
@@ -994,7 +1017,10 @@ impl RecordPartition {
         }
         let view = timeout_at(
             deadline,
-            View::capture(self, &mut inner, admission, limit, dependencies, entity),
+            View::capture(
+                self, &mut inner, admission, limit, dependencies, entity,
+                if fixed_lexical { work.as_deref() } else { None },
+            ),
         )
         .await
         .map_err(|_| RecordError::Busy)??;
@@ -1045,7 +1071,17 @@ impl RecordPartition {
         if Deadline::now() >= deadline {
             return Err(RecordError::Busy.into());
         }
-        view.recheck(self, &inner)?;
+        if view.fixed_lexical {
+            if !inner.healthy || self.indexes.error().is_some() {
+                return Err(RecordError::RecoveryRequired.into());
+            }
+            // Group publication retains its existing delivery boundary.
+            if inner.state.group_publication_revision() != view.group_revision {
+                return Err(RecordError::Busy.into());
+            }
+        } else {
+            view.recheck(self, &inner)?;
+        }
         if expiry.is_some_and(|expiry| expiry <= evaluation) {
             return Err(RecordError::Busy.into());
         }
@@ -1099,6 +1135,7 @@ impl View {
         limit: usize,
         dependencies: IndexDependencies,
         entity: Option<&EntityRecall>,
+        fixed: Option<&QueryWork>,
     ) -> Result<Self, EventTimeError> {
         let evaluation = inner.observe_time()?;
         let observed_at = Deadline::now();
@@ -1202,12 +1239,13 @@ impl View {
         // The handles fix the component topology, but a mutable component can
         // replace its published Searcher. Pin the lexical snapshots before
         // releasing the Record guard that selected this cut.
+        let fixed_lexical = fixed.is_some();
         let lexical = if dependencies == IndexDependencies::LexicalWithVectorMetadata {
             let index = &retrieval.as_ref().expect("captured retrieval").index;
             Some(lexical::runtime_query::PinnedCorpus::capture(index, lexical::Cut {
                 sequence: cut,
                 evaluation_time_ms: evaluation,
-            }).await?)
+            }, fixed).await?)
         } else {
             None
         };
@@ -1226,6 +1264,7 @@ impl View {
             dependencies,
             retrieval,
             lexical,
+            fixed_lexical,
             entity: entity.is_some(),
             suffix: records.recent_rows()?.values().cloned().collect(),
             max_base_visits: MAX_BASE_VISITS.min(inner.config.max_candidates),
@@ -1236,6 +1275,14 @@ impl View {
         };
         view.recheck(partition, inner)?;
         Ok(view)
+    }
+
+    fn source_at(&self, id: &str, work: &QueryWork) -> Result<state_values::RecordSource, RecordError> {
+        work.charge(1 + self.suffix.len().checked_ilog2().unwrap_or(0) as usize)?;
+        Ok(match self.suffix.binary_search_by(|record| record.record_id.as_str().cmp(id)) {
+            Ok(index) => state_values::RecordSource::Recent(self.suffix[index].clone()),
+            Err(_) => state_values::RecordSource::Sealed(self.base.clone()),
+        })
     }
 
     fn recheck(&self, partition: &RecordPartition, inner: &Inner) -> Result<(), RecordError> {

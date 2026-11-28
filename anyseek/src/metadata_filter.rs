@@ -241,7 +241,16 @@ pub(crate) fn is_facet_filter(
     filters: &[FilterSparse],
     doc_id: usize,
 ) -> Result<bool, crate::record::RecordError> {
-    for (filter, field) in filters.iter().zip(&reader.segment.facets) {
+    is_facet_filter_at(reader, filters, doc_id, None)
+}
+
+pub(crate) fn is_facet_filter_at(
+    reader: &mut FacetReader<'_>,
+    filters: &[FilterSparse],
+    doc_id: usize,
+    dictionary_limits: Option<&[usize]>,
+) -> Result<bool, RecordError> {
+    for (slot, (filter, field)) in filters.iter().zip(&reader.segment.facets).enumerate() {
         if matches!(filter, FilterSparse::None) {
             continue;
         }
@@ -250,7 +259,7 @@ pub(crate) fn is_facet_filter(
             return Ok(true);
         }
         if matches!(field.field_type, FieldType::String | FieldType::StringSet)
-            && read_u32(&bytes, 0) as usize >= field.values.len()
+            && read_u32(&bytes, 0) as usize >= dictionary_limits.map_or(field.values.len(), |limits| limits[slot])
         {
             return Err(crate::record::RecordError::Storage(
                 "invalid metadata dictionary index".into(),
