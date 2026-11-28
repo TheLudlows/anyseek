@@ -5,7 +5,7 @@ use super::*;
 use crate::search::{ChannelExplanation, QueryWork, rrf_contribution};
 use crate::storage::{
     build_budget::{MemoryLease, reserve_memory},
-    disk_records::event_time,
+    disk_records::{entity, event_time},
 };
 use std::{cmp::Reverse, ops::Range, sync::atomic::Ordering};
 use tokio::{
@@ -41,6 +41,7 @@ pub(crate) struct TimeMixedQuery {
     pub temporal: Option<TemporalFilter>,
     pub lexical: Option<String>,
     pub vector: Option<(Embedding, crate::vector_similarity::AnnMode)>,
+    pub entity: Option<(EntityRecall, f32)>,
     pub facets: Vec<FacetFilter>,
     pub fields: Vec<String>,
     pub offset: usize,
@@ -55,6 +56,7 @@ impl From<TimeVectorQuery> for TimeMixedQuery {
             temporal: query.temporal,
             lexical: None,
             vector: Some((query.vector, crate::vector_similarity::AnnMode::All)),
+            entity: None,
             facets: query.facets,
             fields: query.fields,
             offset: query.offset,
@@ -82,6 +84,8 @@ pub struct TimeVectorResult {
     pub hits: Vec<RecordHit>,
     #[serde(skip)]
     pub(crate) delivery_time: output::ReadTimeFence,
+    #[serde(skip)]
+    pub(crate) entity_frame: Option<EntityFrameOutput>,
 }
 impl std::fmt::Debug for TimeVectorResult {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -144,7 +148,7 @@ impl std::fmt::Debug for EventTimeResult {
     }
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct Selection {
     temporal: Vec<FacetFilter>,
     facets: Vec<FacetFilter>,
@@ -186,6 +190,7 @@ struct View {
     base: Arc<state_rows::Base>,
     dependencies: IndexDependencies,
     retrieval: Option<query::Handle>,
+    entity: bool,
     // Stable ID order from Records, used even for tombstones or moves outside
     // the requested window. Owning only the changed rows bounds the pin.
     suffix: Vec<state_memory::Shared<Record>>,
@@ -221,7 +226,7 @@ impl EventTimeError {
 }
 
 fn published_cut(
-    partition: &RecordPartition,
+    indexes: &index_consumers::Cursors,
     inner: &Inner,
     dependencies: IndexDependencies,
 ) -> Result<u64, RecordError> {
@@ -233,14 +238,14 @@ fn published_cut(
         return Ok(cut);
     }
     // Index publication failures still fence the shared index pipeline.
-    if partition.indexes.error().is_some() {
+    if indexes.error().is_some() {
         return Err(RecordError::RecoveryRequired);
     }
     // Even lexical-only retrieval uses vector/metadata membership. A pure
     // vector consumer has no reciprocal dependency on the lexical cursor.
-    if partition.indexes.vector.load(Ordering::Acquire) != cut
+    if indexes.vector.load(Ordering::Acquire) != cut
         || (dependencies == IndexDependencies::LexicalWithVectorMetadata
-            && partition.indexes.lexical.load(Ordering::Acquire) != cut)
+            && indexes.lexical.load(Ordering::Acquire) != cut)
     {
         return Err(RecordError::Busy);
     }
@@ -283,15 +288,16 @@ fn add_channel(
     raw_score: Option<f32>,
     constant: f32,
     weight: f32,
+    lane_bound: usize,
     work: &QueryWork,
 ) -> Result<(), RecordError> {
     work.charge(1)?;
     if weight == 0.0 {
         return Ok(());
     }
-    // Prepay a lookup against every resident identity and the fixed maximum
-    // of three channel checks. At most MAX_RESULTS contributions reach fusion.
-    work.charge(fused.len() + 3)?;
+    // Prepay comparisons against every resident identity and enabled lane.
+    // At most MAX_RESULTS contributions reach fusion.
+    work.charge(fused.len() + lane_bound)?;
     let hit = fused.entry(id).or_insert_with(|| FusedHit {
         version,
         score: 0.0,
@@ -361,19 +367,25 @@ impl RecordPartition {
             temporal,
             lexical,
             vector,
+            entity,
             facets,
             fields,
             offset,
             length,
             rrf,
         } = request;
-        let lanes = 1 + usize::from(lexical.is_some()) + usize::from(vector.is_some());
+        let lanes = 1
+            + usize::from(lexical.is_some())
+            + usize::from(vector.is_some())
+            + usize::from(entity.is_some());
+        let lane_bound = lanes.max(3);
+        let entity_weight = entity.as_ref().map(|(_, weight)| *weight);
         if lanes == 1 {
             return Err(
                 RecordError::Rejected("mixed query requires a retrieval channel".into()).into(),
             );
         }
-        rrf.validate(lexical.is_some(), vector.is_some())
+        rrf.validate(lexical.is_some(), vector.is_some(), entity_weight)
             .map_err(RecordError::Rejected)?;
         let limit = offset
             .checked_add(length)
@@ -402,6 +414,7 @@ impl RecordPartition {
             facets,
             fields: None,
         };
+        let entity_selection = entity.is_some().then(|| selection.clone());
         let (mut view, time) = self
             .capture_and_read(
                 window,
@@ -411,6 +424,7 @@ impl RecordPartition {
                 selection,
                 Some(work.clone()),
                 lanes,
+                entity.as_ref().map(|(request, _)| request),
             )
             .await?;
         let mut ranks = Vec::new();
@@ -441,6 +455,16 @@ impl RecordPartition {
                 ranks.push((candidates, channel, weight));
             }
         }
+        let entity_hits = if let (Some((request, _)), Some(selection)) = (entity, entity_selection)
+        {
+            let (next, hits) =
+                Self::read_entity_lane(view, selection, request, limit, deadline, work.clone())
+                    .await?;
+            view = next;
+            Some(hits)
+        } else {
+            None
+        };
         // Qualify every supplied lane at the same cut. Only candidates that
         // can contribute ranks affect delivery, including ones off this page.
         let expiry = time
@@ -453,6 +477,12 @@ impl RecordPartition {
                     .iter()
                     .filter(|(_, _, weight)| *weight > 0.0)
                     .flat_map(|(hits, _, _)| hits.iter().filter_map(|hit| hit.expiry)),
+            )
+            .chain(
+                entity_hits
+                    .iter()
+                    .filter(|_| entity_weight.unwrap_or_default() > 0.0)
+                    .flat_map(|hits| hits.hits.iter().filter_map(|hit| hit.expires)),
             )
             .min();
         let mut fused = BTreeMap::new();
@@ -467,6 +497,7 @@ impl RecordPartition {
                 None,
                 rrf.constant,
                 rrf.time_weight,
+                lane_bound,
                 &work,
             )?;
         }
@@ -482,6 +513,24 @@ impl RecordPartition {
                     Some(hit.score),
                     rrf.constant,
                     weight,
+                    lane_bound,
+                    &work,
+                )?;
+            }
+        }
+        if let Some(hits) = entity_hits {
+            for (rank, hit) in hits.hits.into_iter().enumerate() {
+                add_channel(
+                    &mut fused,
+                    hit.id,
+                    hit.version,
+                    "relation",
+                    "stable_adjacency",
+                    rank,
+                    None,
+                    rrf.constant,
+                    entity_weight.expect("entity weight"),
+                    lane_bound,
                     &work,
                 )?;
             }
@@ -491,6 +540,25 @@ impl RecordPartition {
             .await
             .map_err(|_| RecordError::Busy)?;
         view.recheck(self, &inner)?;
+        let entity_frame = if view.entity {
+            let retrieval = RetrievalPublication::capture(
+                self,
+                view.retrieval.as_ref().expect("four-way retrieval"),
+                work.clone(),
+            )?;
+            Some(EntityFrameOutput::mixed(
+                self,
+                &view.base,
+                view.cut,
+                view.group_revision,
+                view.anchor.clone(),
+                view.barrier.clone(),
+                view.time_fence(deadline, expiry),
+                retrieval,
+            ))
+        } else {
+            None
+        };
         let winners = ranked
             .into_iter()
             .skip(offset)
@@ -527,6 +595,7 @@ impl RecordPartition {
                     count_total: None,
                     hits,
                     delivery_time: view.time_fence(deadline, expiry),
+                    entity_frame,
                 };
                 Ok::<_, RecordError>((view, output))
             })
@@ -644,6 +713,7 @@ impl RecordPartition {
                 },
                 Some(work.clone()),
                 2,
+                None,
             )
             .await
             .map_err(EventTimeError::record_error)?;
@@ -691,6 +761,7 @@ impl RecordPartition {
                 },
                 Some(work.clone()),
                 2,
+                None,
             )
             .await
             .map_err(EventTimeError::record_error)?;
@@ -709,6 +780,42 @@ impl RecordPartition {
             .await
             .map_err(EventTimeError::record_error)?;
         Ok((window, scored, after_time))
+    }
+
+    async fn read_entity_lane(
+        view: View,
+        selection: Selection,
+        request: EntityRecall,
+        limit: usize,
+        deadline: Deadline,
+        work: Arc<QueryWork>,
+    ) -> Result<(View, entity_view::MixedEntityCandidates), RecordError> {
+        let worker = crate::resources::spawn_blocking(move || {
+            let hits = work.clone().with_reads(|| {
+                let path = entity_view::PathView {
+                    base: &view.base,
+                    tail: &view.suffix,
+                    evaluation: view.evaluation,
+                    filters: entity_view::PathFilters {
+                        temporal: &selection.temporal,
+                        facets: &selection.facets,
+                    },
+                };
+                path.ranked(
+                    request.direction,
+                    &request.anchor,
+                    &request.kind,
+                    request.visit_limit,
+                    limit,
+                    &work,
+                )
+            })?;
+            Ok::<_, RecordError>((view, hits))
+        });
+        timeout_at(deadline, worker)
+            .await
+            .map_err(|_| RecordError::Busy)?
+            .map_err(storage)?
     }
 
     async fn score_retrieval_lane(
@@ -844,7 +951,16 @@ impl RecordPartition {
         selection: Selection,
     ) -> Result<Window, EventTimeError> {
         let (view, output) = self
-            .capture_and_read(window, limit, dependencies, deadline, selection, None, 1)
+            .capture_and_read(
+                window,
+                limit,
+                dependencies,
+                deadline,
+                selection,
+                None,
+                1,
+                None,
+            )
             .await?;
         self.deliver_window(view, output, deadline, None).await
     }
@@ -858,6 +974,7 @@ impl RecordPartition {
         selection: Selection,
         work: Option<Arc<crate::search::QueryWork>>,
         lanes: usize,
+        entity: Option<&EntityRecall>,
     ) -> Result<(View, Window), EventTimeError> {
         if window.is_empty() || limit == 0 || limit > MAX_RESULTS {
             return Err(
@@ -891,7 +1008,7 @@ impl RecordPartition {
         }
         let view = timeout_at(
             deadline,
-            View::capture(self, &mut inner, admission, limit, dependencies),
+            View::capture(self, &mut inner, admission, limit, dependencies, entity),
         )
         .await
         .map_err(|_| RecordError::Busy)??;
@@ -950,6 +1067,44 @@ impl RecordPartition {
     }
 }
 
+pub(super) struct RetrievalPublication {
+    indexes: std::sync::Weak<index_consumers::Cursors>,
+    topology: view::QueryTopology,
+    work: Arc<QueryWork>,
+}
+
+impl RetrievalPublication {
+    fn capture(
+        partition: &RecordPartition,
+        handle: &query::Handle,
+        work: Arc<QueryWork>,
+    ) -> Result<Self, RecordError> {
+        Ok(Self {
+            indexes: Arc::downgrade(&partition.indexes),
+            topology: view::QueryTopology::capture(handle, &work)?,
+            work,
+        })
+    }
+
+    pub(super) fn check(&self, inner: &Inner, cut: u64) -> Result<(), RecordError> {
+        self.work.charge(1 + self.topology.comparison_bound())?;
+        let indexes = self
+            .indexes
+            .upgrade()
+            .ok_or(RecordError::RecoveryRequired)?;
+        if published_cut(
+            &indexes,
+            inner,
+            IndexDependencies::LexicalWithVectorMetadata,
+        )? != cut
+            || !inner.index.matches_topology_witness(&self.topology)
+        {
+            return Err(RecordError::Busy);
+        }
+        Ok(())
+    }
+}
+
 impl View {
     async fn capture(
         partition: &RecordPartition,
@@ -957,10 +1112,11 @@ impl View {
         admission: OwnedSemaphorePermit,
         limit: usize,
         dependencies: IndexDependencies,
+        entity: Option<&EntityRecall>,
     ) -> Result<Self, EventTimeError> {
         let evaluation = inner.observe_time()?;
         let observed_at = Deadline::now();
-        let cut = published_cut(partition, inner, dependencies)?;
+        let cut = published_cut(&partition.indexes, inner, dependencies)?;
         let records = &inner.state.records;
         let base = records
             .event_time_base()
@@ -990,6 +1146,31 @@ impl View {
             return Err(EventTimeError::Unavailable(
                 "base, manifest, and published cuts are inconsistent",
             ));
+        }
+        if let Some(request) = entity {
+            if !(1..=entity::MAX_VISITS.min(inner.config.max_candidates))
+                .contains(&request.visit_limit)
+            {
+                return Err(
+                    RecordError::Rejected("invalid entity adjacency visit limit".into()).into(),
+                );
+            }
+            RecordPartition::validate_entity_path_keys(&request.anchor, &request.kind)?;
+            let same_base = |records: &state_values::Records| {
+                records
+                    .entity_base()
+                    .is_some_and(|pinned| Arc::ptr_eq(pinned, base))
+            };
+            if !same_base(records)
+                || !same_base(&certified.records)
+                || !base.entity.as_ref().is_some_and(|projection| {
+                    projection.cut() == base_cut && projection.has_members()
+                })
+            {
+                return Err(EventTimeError::Unavailable(
+                    "no entity member projection at the selected event-time base",
+                ));
+            }
         }
         if cut - base_cut > MAX_SUFFIX_SEQUENCES {
             return Err(EventTimeError::Budget("sequence suffix exceeds its budget"));
@@ -1044,6 +1225,7 @@ impl View {
             base: base.clone(),
             dependencies,
             retrieval,
+            entity: entity.is_some(),
             suffix: records.recent_records().cloned().collect(),
             max_base_visits: MAX_BASE_VISITS.min(inner.config.max_candidates),
             barrier: partition.output_permit()?,
@@ -1056,7 +1238,7 @@ impl View {
     }
 
     fn recheck(&self, partition: &RecordPartition, inner: &Inner) -> Result<(), RecordError> {
-        if published_cut(partition, inner, self.dependencies)? != self.cut
+        if published_cut(&partition.indexes, inner, self.dependencies)? != self.cut
             || inner.state.group_publication_revision() != self.group_revision
             || inner
                 .anchor
@@ -1066,6 +1248,15 @@ impl View {
                 .state
                 .records
                 .event_time_base()
+                .is_some_and(|base| Arc::ptr_eq(base, &self.base))
+        {
+            return Err(RecordError::Busy);
+        }
+        if self.entity
+            && !inner
+                .state
+                .records
+                .entity_base()
                 .is_some_and(|base| Arc::ptr_eq(base, &self.base))
         {
             return Err(RecordError::Busy);

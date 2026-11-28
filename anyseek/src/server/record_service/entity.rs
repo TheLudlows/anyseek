@@ -9,17 +9,7 @@ use tokio::time::{Instant, timeout_at};
 pub(super) const QUERY_PATH: &str = "/api/v1/index/{id}/entity/query";
 pub(super) const CHECKPOINT_PATH: &str = "/api/v1/entity-checkpoints";
 
-#[derive(Deserialize, utoipa::ToSchema)]
-#[serde(deny_unknown_fields)]
-pub(super) struct EntityPathRequest {
-    direction: EntityDirection,
-    /// Namespaced entity ID, 1 to 256 UTF-8 bytes.
-    anchor: String,
-    /// Edge type, 1 to 128 UTF-8 bytes.
-    kind: String,
-    #[schema(minimum = 1, maximum = 256)]
-    visit_limit: usize,
-}
+pub(super) type EntityPathRequest = crate::record::EntityRecall;
 
 #[derive(Deserialize, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
@@ -36,6 +26,11 @@ pub(super) struct Output {
 }
 
 impl Output {
+    pub(super) fn new(record: EntityFrameOutput, catalog: CatalogFrameGeneration,
+        residency: ResidencyPin, deadline: Instant) -> Self {
+        Self { record, catalog, _residency: residency, deadline }
+    }
+
     pub(super) fn deliver<T>(&self, handoff: impl FnOnce() -> T) -> Result<T, Error> {
         let record = self.record.try_pin()?.ok_or(RecordError::Busy)?;
         let _catalog = self.catalog.try_pin()?.ok_or(CatalogError::Busy)?;
@@ -107,15 +102,7 @@ pub(super) async fn query_collection(
             found.deliver(&partition).await
         })
         .await??;
-    Ok((
-        paths,
-        Output {
-            record,
-            catalog,
-            _residency: residency,
-            deadline,
-        },
-    ))
+    Ok((paths, Output::new(record, catalog, residency, deadline)))
 }
 
 pub(super) async fn query(

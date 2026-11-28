@@ -17,7 +17,7 @@ fn path_work(deadline: Instant) -> Arc<QueryWork> {
 }
 
 /// Direction of one edge relative to the requested anchor entity.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, utoipa::ToSchema)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum EntityDirection {
     /// Edges declared from the anchor.
@@ -33,6 +33,22 @@ impl EntityDirection {
             Self::In => (to, from),
         }
     }
+}
+
+/// One explicit, directed entity edge lookup in the current collection.
+#[derive(Clone, Debug, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
+#[schema(as = EntityPathRequest)]
+pub struct EntityRecall {
+    /// Edge direction from the requested anchor.
+    pub direction: EntityDirection,
+    /// Stable namespaced seed entity ID, 1 to 256 UTF-8 bytes.
+    pub anchor: String,
+    /// Exact edge type, 1 to 128 UTF-8 bytes.
+    pub kind: String,
+    /// Combined seed, edge and target visits.
+    #[schema(minimum = 1, maximum = 256)]
+    pub visit_limit: usize,
 }
 
 /// A derived edge declaration. Its canonical version is relative to the pinned cut.
@@ -192,6 +208,7 @@ pub(crate) struct EntityFrameOutput {
     owner: Weak<Mutex<Inner>>,
     barrier: DataOutputPermit,
     time: output::ReadTimeFence,
+    retrieval: Option<super::event_time_view::RetrievalPublication>,
 }
 
 pub(crate) struct EntityFrameGuard<'a> {
@@ -200,6 +217,30 @@ pub(crate) struct EntityFrameGuard<'a> {
 }
 
 impl EntityFrameOutput {
+    pub(super) fn mixed(
+        partition: &RecordPartition,
+        base: &Arc<state_rows::Base>,
+        cut: u64,
+        group_revision: u64,
+        selected_owner: String,
+        barrier: DataOutputPermit,
+        time: output::ReadTimeFence,
+        retrieval: super::event_time_view::RetrievalPublication,
+    ) -> Self {
+        Self {
+            publication: EntityPublication {
+                cut,
+                group_revision,
+                selected_owner,
+                base: Arc::downgrade(base),
+            },
+            owner: Arc::downgrade(&partition.inner),
+            barrier,
+            time,
+            retrieval: Some(retrieval),
+        }
+    }
+
     pub(crate) fn try_pin(&self) -> Result<Option<EntityFrameGuard<'_>>, RecordError> {
         let owner = self.owner.upgrade().ok_or(RecordError::RecoveryRequired)?;
         let Ok(inner) = owner.try_lock_owned() else {
@@ -226,6 +267,9 @@ impl EntityFrameOutput {
 impl EntityFrameGuard<'_> {
     pub(crate) fn deliver<T>(&self, handoff: impl FnOnce() -> T) -> Result<T, RecordError> {
         self.output.publication.check(&self.inner)?;
+        if let Some(retrieval) = &self.output.retrieval {
+            retrieval.check(&self.inner, self.output.publication.cut)?;
+        }
         self.output.barrier.deliver(|| {
             self.output.time.check()?;
             Ok(handoff())
@@ -394,6 +438,7 @@ impl PreparedEntityPaths {
                     publication: snapshot.publication.clone(),
                     owner: self.owner,
                     barrier: snapshot.barrier.clone(),
+                    retrieval: None,
                     time: output::ReadTimeFence {
                         clock: inner.clock.clone(),
                         observed: inner.observed_time.clone(),
@@ -488,8 +533,15 @@ impl EntityAdjacencyView {
         let anchor = anchor.to_owned();
         let task = crate::resources::spawn_blocking(move || {
             let _permit = permit;
-            work.clone()
-                .with_reads(|| snapshot.paths(&anchor, &seeds, &edges, visit_limit, &work))
+            work.clone().with_reads(|| {
+                let candidates =
+                    snapshot
+                        .paths()
+                        .discover(&anchor, &seeds, &edges, visit_limit, &work)?;
+                snapshot
+                    .barrier
+                    .deliver(|| candidates.into_public(snapshot.publication.cut))
+            })
         });
         timeout_at(deadline, task)
             .await
@@ -525,22 +577,115 @@ fn include_expiry(earliest: &mut Option<u64>, expiry: Option<u64>) {
     *earliest = (*earliest).into_iter().chain(expiry).min();
 }
 
-impl Snapshot {
-    fn projection(&self) -> &entity::Projection {
-        self.base.entity.as_ref().expect("selected sidecar")
-    }
+#[derive(Clone, Copy, Default)]
+pub(super) struct PathFilters<'a> {
+    pub temporal: &'a [FacetFilter],
+    pub facets: &'a [FacetFilter],
+}
 
-    fn shadowed(&self, id: &str) -> bool {
-        self.tail
-            .binary_search_by(|row| row.record_id.as_str().cmp(id))
-            .is_ok()
+impl PathFilters<'_> {
+    fn matches(
+        self,
+        record: &Record,
+        document: &Document,
+        work: &QueryWork,
+    ) -> Result<bool, RecordError> {
+        work.charge(self.temporal.len() + self.facets.len())?;
+        if !self.temporal.is_empty()
+            && !temporal::matches_indexed_time(
+                self.temporal,
+                &record.temporal,
+                record.ingested_at_ms,
+            )
+        {
+            return Ok(false);
+        }
+        crate::metadata_filter::matches_document(document, self.facets, |units| work.charge(units))
+    }
+}
+
+struct MemberEvidence {
+    member: EntityMember,
+    expires: Option<u64>,
+}
+
+struct NeighborEvidence {
+    id: String,
+    declarations: Vec<EdgeEvidence>,
+    members: Vec<MemberEvidence>,
+}
+
+struct DiscoveredPaths {
+    seeds: Vec<MemberEvidence>,
+    neighbors: Vec<NeighborEvidence>,
+    memory: MemoryLease,
+}
+
+impl DiscoveredPaths {
+    fn into_public(self, cut: u64) -> EntityCandidatePaths {
+        let mut expires_at_ms = None;
+        let seeds = self
+            .seeds
+            .into_iter()
+            .map(|seed| {
+                include_expiry(&mut expires_at_ms, seed.expires);
+                seed.member
+            })
+            .collect();
+        let neighbors = self
+            .neighbors
+            .into_iter()
+            .map(|neighbor| EntityNeighborCandidates {
+                entity_id: neighbor.id,
+                declarations: neighbor
+                    .declarations
+                    .into_iter()
+                    .map(|edge| {
+                        include_expiry(&mut expires_at_ms, edge.expires_at_ms);
+                        edge.candidate
+                    })
+                    .collect(),
+                members: neighbor
+                    .members
+                    .into_iter()
+                    .map(|member| {
+                        include_expiry(&mut expires_at_ms, member.expires);
+                        member.member
+                    })
+                    .collect(),
+            })
+            .collect();
+        EntityCandidatePaths {
+            visible_seq: cut,
+            seeds,
+            neighbors,
+            expires_at_ms,
+            _memory: self.memory,
+        }
+    }
+}
+
+pub(super) struct PathView<'a> {
+    pub base: &'a state_rows::Base,
+    pub tail: &'a [state_memory::Shared<Record>],
+    pub evaluation: u64,
+    pub filters: PathFilters<'a>,
+}
+
+impl Snapshot {
+    fn paths(&self) -> PathView<'_> {
+        PathView {
+            base: &self.base,
+            tail: &self.tail,
+            evaluation: self.evaluation,
+            filters: PathFilters::default(),
+        }
     }
 
     fn read(&self, range: &entity::Range, limit: usize) -> Result<EntityCandidates, RecordError> {
-        // Owned candidate strings, sort slots and per-record tail key workspace.
         let _scratch = reserve_memory(256 * 1024).map_err(memory_error)?;
         let memory = reserve_memory(limit as u64 * 4096).map_err(memory_error)?;
-        let candidates = self.edges(
+        let candidates = self.paths().edges(
             range,
             &mut RangeWork {
                 remaining: limit,
@@ -550,6 +695,88 @@ impl Snapshot {
         self.barrier.deliver(|| EntityCandidates {
             candidates: candidates.into_iter().map(|edge| edge.candidate).collect(),
             _memory: memory,
+        })
+    }
+}
+
+pub(super) struct MixedEntityCandidates {
+    // Preserve the path owners and their reservation through fusion.
+    _proof: DiscoveredPaths,
+    pub hits: Vec<MixedEntityCandidate>,
+}
+
+pub(super) struct MixedEntityCandidate {
+    pub id: String,
+    pub version: u64,
+    pub expires: Option<u64>,
+}
+
+impl PathView<'_> {
+    fn projection(&self) -> &entity::Projection {
+        self.base.entity.as_ref().expect("selected sidecar")
+    }
+
+    fn shadowed(&self, id: &str, work: Option<&QueryWork>) -> Result<bool, RecordError> {
+        if let Some(work) = work {
+            let comparisons = if self.tail.is_empty() {
+                0
+            } else {
+                // The slice search may use ceil(log2(n)) comparisons before
+                // its final equality check, even for a non-power-of-two tail.
+                1 + (usize::BITS - (self.tail.len() - 1).leading_zeros()) as usize
+            };
+            work.charge(comparisons)?;
+        }
+        Ok(self
+            .tail
+            .binary_search_by(|row| row.record_id.as_str().cmp(id))
+            .is_ok())
+    }
+
+    pub(super) fn ranked(
+        &self,
+        direction: EntityDirection,
+        anchor: &str,
+        kind: &str,
+        visit_limit: usize,
+        limit: usize,
+        work: &QueryWork,
+    ) -> Result<MixedEntityCandidates, RecordError> {
+        let edges =
+            entity::Range::new(direction, anchor, kind).map_err(state_rows::entity_error)?;
+        let seeds = entity::MemberRange::new(anchor).map_err(state_rows::entity_error)?;
+        let proof = self.discover(anchor, &seeds, &edges, visit_limit, work)?;
+        let mut by_id = BTreeMap::new();
+        if let Some(seed) = proof.seeds.first() {
+            for neighbor in &proof.neighbors {
+                let edge = &neighbor.declarations[0];
+                for target in &neighbor.members {
+                    work.charge(1 + by_id.len())?;
+                    let expiry = [seed.expires, edge.expires_at_ms, target.expires]
+                        .into_iter()
+                        .flatten()
+                        .min();
+                    // Ranges and their declarations are already stable. Keep
+                    // the first complete proof when another neighbor repeats a target.
+                    by_id
+                        .entry(target.member.record_id.as_str())
+                        .or_insert((target.member.version, expiry));
+                }
+            }
+        }
+        work.charge(by_id.len())?;
+        let hits = by_id
+            .into_iter()
+            .take(limit)
+            .map(|(id, (version, expires))| MixedEntityCandidate {
+                id: id.to_owned(),
+                version,
+                expires,
+            })
+            .collect();
+        Ok(MixedEntityCandidates {
+            _proof: proof,
+            hits,
         })
     }
 
@@ -569,7 +796,7 @@ impl Snapshot {
                 budget.take()?;
                 let (neighbor, record_id) =
                     range.identity(key).map_err(state_rows::entity_error)?;
-                if !self.shadowed(&record_id) {
+                if !self.shadowed(&record_id, work)? {
                     let row = adjacency
                         .locate(&self.base.checkpoint, &record_id, reference)
                         .map_err(state_rows::entity_error)?;
@@ -584,16 +811,20 @@ impl Snapshot {
                                     .document
                                     .as_ref()
                                     .ok_or_else(|| storage("missing entity declaration body"))?;
-                                range
+                                if !range
                                     .matches_neighbor(&record_id, document, &neighbor, || {
                                         work.charge(1).map_err(std::io::Error::other)
                                     })
-                                    .map_err(state_rows::entity_error)
+                                    .map_err(state_rows::entity_error)?
+                                {
+                                    return Err(storage(
+                                        "entity edge posting disagrees with its canonical Record",
+                                    ));
+                                }
+                                self.filters.matches(&record, document, work)
                             })?;
                             if !matched {
-                                return Err(storage(
-                                    "entity edge posting disagrees with its canonical Record",
-                                ));
+                                return Ok(());
                             }
                         }
                         output.push(EdgeEvidence {
@@ -609,7 +840,7 @@ impl Snapshot {
                 Ok(())
             },
         )?;
-        for row in &self.tail {
+        for row in self.tail {
             examine(work)?;
             let Some(document) = &row.document else {
                 continue;
@@ -622,6 +853,11 @@ impl Snapshot {
             {
                 budget.take()?;
                 if temporal::visible(row, self.evaluation) {
+                    if let Some(work) = work
+                        && !self.filters.matches(row, document, work)?
+                    {
+                        continue;
+                    }
                     let (neighbor, record_id) =
                         range.identity(&key).map_err(state_rows::entity_error)?;
                     output.push(EdgeEvidence {
@@ -635,10 +871,15 @@ impl Snapshot {
                 }
             }
         }
-        output.sort_unstable_by(|a, b| {
+        let order = |a: &EdgeEvidence, b: &EdgeEvidence| {
             let (a, b) = (&a.candidate, &b.candidate);
             (&a.neighbor, &a.record_id).cmp(&(&b.neighbor, &b.record_id))
-        });
+        };
+        if let Some(work) = work {
+            crate::search::sort_with_work(&mut output, work, order)?;
+        } else {
+            output.sort_unstable_by(order);
+        }
         Ok(output)
     }
 
@@ -646,20 +887,19 @@ impl Snapshot {
         &self,
         range: &entity::MemberRange,
         budget: &mut RangeWork<'_>,
-        earliest: &mut Option<u64>,
-    ) -> Result<Vec<EntityMember>, RecordError> {
-        let work = budget.work;
-        let check = || examine(work).map_err(std::io::Error::other);
+    ) -> Result<Vec<MemberEvidence>, RecordError> {
+        let work = budget.work.expect("member discovery is metered");
+        let check = || work.charge(1).map_err(std::io::Error::other);
         let mut output = Vec::new();
         let adjacency = self.projection();
         adjacency.visit(
             &range.bounds,
             state_rows::entity_error,
-            || examine(work),
+            || work.charge(1),
             |key, reference| {
                 budget.take()?;
                 let record_id = range.record_id(key).map_err(state_rows::entity_error)?;
-                if self.shadowed(&record_id) {
+                if self.shadowed(&record_id, Some(work))? {
                     return Ok(());
                 }
                 let row = adjacency
@@ -675,22 +915,27 @@ impl Snapshot {
                         .document
                         .as_ref()
                         .ok_or_else(|| storage("missing entity member body"))?;
-                    range
+                    if !range
                         .matches(&record_id, document, check)
-                        .map_err(state_rows::entity_error)
+                        .map_err(state_rows::entity_error)?
+                    {
+                        return Err(storage(
+                            "entity member posting disagrees with its canonical Record",
+                        ));
+                    }
+                    self.filters.matches(&record, document, work)
                 })?;
-                if !matched {
-                    return Err(storage(
-                        "entity member posting disagrees with its canonical Record",
-                    ));
+                if matched {
+                    output.push(MemberEvidence {
+                        member: EntityMember { record_id, version },
+                        expires: expiry,
+                    });
                 }
-                include_expiry(earliest, expiry);
-                output.push(EntityMember { record_id, version });
                 Ok(())
             },
         )?;
-        for row in &self.tail {
-            examine(work)?;
+        for row in self.tail {
+            work.charge(1)?;
             let Some(document) = &row.document else {
                 continue;
             };
@@ -699,27 +944,33 @@ impl Snapshot {
                 .map_err(state_rows::entity_error)?
             {
                 budget.take()?;
-                if temporal::visible(row, self.evaluation) {
-                    include_expiry(earliest, row.temporal.expire_at_ms);
-                    output.push(EntityMember {
-                        record_id: row.record_id.clone(),
-                        version: row.version,
+                if temporal::visible(row, self.evaluation)
+                    && self.filters.matches(row, document, work)?
+                {
+                    output.push(MemberEvidence {
+                        member: EntityMember {
+                            record_id: row.record_id.clone(),
+                            version: row.version,
+                        },
+                        expires: row.temporal.expire_at_ms,
                     });
                 }
             }
         }
-        output.sort_unstable_by(|a, b| a.record_id.cmp(&b.record_id));
+        crate::search::sort_with_work(&mut output, work, |a, b| {
+            a.member.record_id.cmp(&b.member.record_id)
+        })?;
         Ok(output)
     }
 
-    fn paths(
+    fn discover(
         &self,
         anchor: &str,
         seeds: &entity::MemberRange,
         edges: &entity::Range,
         limit: usize,
         work: &QueryWork,
-    ) -> Result<EntityCandidatePaths, RecordError> {
+    ) -> Result<DiscoveredPaths, RecordError> {
         work.charge(0)?;
         if !self.projection().has_members() {
             return Err(RecordError::Rejected(
@@ -732,13 +983,12 @@ impl Snapshot {
             remaining: limit,
             work: Some(work),
         };
-        let mut expires_at_ms = None;
-        let seeds = self.members(seeds, &mut budget, &mut expires_at_ms)?;
+        let seeds = self.members(seeds, &mut budget)?;
         let mut neighbors = Vec::new();
         if !seeds.is_empty() {
             let mut ranges = BTreeMap::<String, Vec<EdgeEvidence>>::new();
             for edge in self.edges(edges, &mut budget)? {
-                work.charge(1)?;
+                work.charge(1 + ranges.len())?;
                 if edge.candidate.neighbor != anchor {
                     ranges
                         .entry(edge.candidate.neighbor.clone())
@@ -746,21 +996,13 @@ impl Snapshot {
                         .push(edge);
                 }
             }
-            for (entity_id, declarations) in ranges {
+            for (id, declarations) in ranges {
                 work.charge(1)?;
-                let range =
-                    entity::MemberRange::new(&entity_id).map_err(state_rows::entity_error)?;
-                let members = self.members(&range, &mut budget, &mut expires_at_ms)?;
+                let range = entity::MemberRange::new(&id).map_err(state_rows::entity_error)?;
+                let members = self.members(&range, &mut budget)?;
                 if !members.is_empty() {
-                    let declarations = declarations
-                        .into_iter()
-                        .map(|edge| {
-                            include_expiry(&mut expires_at_ms, edge.expires_at_ms);
-                            edge.candidate
-                        })
-                        .collect();
-                    neighbors.push(EntityNeighborCandidates {
-                        entity_id,
+                    neighbors.push(NeighborEvidence {
+                        id,
                         declarations,
                         members,
                     });
@@ -768,12 +1010,10 @@ impl Snapshot {
             }
         }
         work.charge(0)?;
-        self.barrier.deliver(|| EntityCandidatePaths {
-            visible_seq: self.publication.cut,
+        Ok(DiscoveredPaths {
             seeds,
             neighbors,
-            expires_at_ms,
-            _memory: memory,
+            memory,
         })
     }
 }

@@ -374,6 +374,13 @@ impl LocalEngine {
         self.query_mixed_time(tenant, collection, MixedTimeRequest::Ann(request)).await
     }
 
+    /// Fuse event time, one term, exact vectors and one declared entity hop.
+    pub async fn query_time_entity(
+        &self, tenant: &str, collection: &str, request: TimeEntityRequest,
+    ) -> Result<TimeVectorResult, LocalError> {
+        self.query_mixed_time(tenant, collection, MixedTimeRequest::Entity(request)).await
+    }
+
     async fn query_mixed_time(
         &self, tenant: &str, collection: &str, request: MixedTimeRequest,
     ) -> Result<TimeVectorResult, LocalError> {
@@ -381,7 +388,7 @@ impl LocalEngine {
         tokio::time::timeout_at(deadline, self.run(tenant, collection, Lane::Foreground,
             async move |service, tenant, collection| {
                 let (result, data) = query_mixed_time_collection(&service, tenant, collection, request, deadline).await?;
-                Ok(data.deliver_after_publication(|| result).await??)
+                Ok(deliver_after_publication(Some(&data), || result).await??)
             })).await.map_err(|_| LocalError::unavailable("busy"))?
     }
 

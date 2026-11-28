@@ -1450,6 +1450,7 @@ async fn event_time_text_three_lane_holds_admission_through_the_last_worker() {
         temporal: None,
         lexical: Some("alpha".into()),
         vector: Some((Embedding::F32(vec![1.0, 0.0]), AnnMode::All)),
+        entity: None,
         facets: vec![],
         fields: vec![],
         offset: 0,
@@ -2057,4 +2058,143 @@ async fn event_time_window_refuses_oversize_suffix_without_changing_ordinary_rea
     );
     assert!(matches!(read_window(&p, 1000..1200, 2).await,
         Err(RecordError::Rejected(reason)) if reason.contains("base candidate budget")));
+}
+
+#[tokio::test]
+async fn four_channel_read_budget_and_both_watermarks_share_the_certified_cut() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut settings = config();
+    settings.schema.extend(
+        serde_json::from_value::<Vec<crate::index::SchemaField>>(serde_json::json!([
+            {"field":"entity_ids","field_type":"StringSet","store":true,"index_lexical":false},
+            {"field":"relations","field_type":"Json","store":true,"index_lexical":false}
+        ]))
+        .unwrap(),
+    );
+    let p = RecordPartition::create(&temp.path().join("records"), settings)
+        .await
+        .unwrap();
+    for (id, body, field, value) in [
+        (
+            "text-vector-time",
+            "alpha",
+            "vector",
+            serde_json::json!([1, 0]),
+        ),
+        (
+            "seed",
+            "identity",
+            "entity_ids",
+            serde_json::json!(["app:A"]),
+        ),
+        (
+            "edge",
+            "declaration",
+            "relations",
+            serde_json::json!({"edges":[
+                {"from":"app:A","type":"link","to":"app:B"}
+            ]}),
+        ),
+        (
+            "relation-only",
+            "manual",
+            "entity_ids",
+            serde_json::json!(["app:B"]),
+        ),
+    ] {
+        let mut row = write(id, id, body, ExpectedVersion::Absent);
+        let doc = row.document.as_mut().unwrap();
+        doc.shift_remove("vector");
+        doc.insert(field.into(), value);
+        if id == "text-vector-time" {
+            row.temporal = Some(TemporalMetadata {
+                event_time_ms: Some(25),
+                ..Default::default()
+            });
+        }
+        p.write(row).await.unwrap();
+    }
+    assert_eq!(build(&p).await, 4);
+    assert_eq!(p.build_entity_adjacency(DEADLINE).await.unwrap(), 4);
+    for id in ["tail-a", "tail-b", "tail-c"] {
+        let mut row = write(id, id, "ordinary", ExpectedVersion::Absent);
+        row.document.as_mut().unwrap().shift_remove("vector");
+        p.write(row).await.unwrap();
+    }
+    assert_eq!(p.inner.lock().await.state.records.recent_records().len(), 3);
+    let request = |entity| TimeMixedQuery {
+        window: TimeRange {
+            from_ms: Some(25),
+            to_ms: Some(26),
+        },
+        temporal: None,
+        lexical: Some("alpha".into()),
+        vector: Some((Embedding::F32(vec![1., 0.]), AnnMode::All)),
+        entity: if entity {
+            Some((
+                crate::record::EntityRecall {
+                    direction: crate::record::EntityDirection::Out,
+                    anchor: "app:A".into(),
+                    kind: "link".into(),
+                    visit_limit: 16,
+                },
+                1.0,
+            ))
+        } else {
+            None
+        },
+        facets: vec![],
+        fields: vec![],
+        offset: 0,
+        length: 4,
+        rrf: Default::default(),
+    };
+    let run = |entity, ranges, bytes| {
+        let deadline = native_deadline();
+        let work = Arc::new(QueryWork::new(65_536, ranges, bytes, deadline));
+        let plan = request(entity);
+        let partition = &p;
+        async move {
+            let result = partition
+                .query_time_mixed_with_work(plan, deadline, work.clone())
+                .await;
+            (result, work)
+        }
+    };
+    let (three, three_work) = run(false, ANN_RANGES, ANN_BYTES).await;
+    let three = three.unwrap_or_else(|error| panic!("{}", error.record_error()));
+    let (four, four_work) = run(true, ANN_RANGES, ANN_BYTES).await;
+    let mut four = four.unwrap_or_else(|error| panic!("{}", error.record_error()));
+    assert_eq!(three.visible_seq, four.visible_seq);
+    assert_eq!(three.hits.len(), 1);
+    assert_eq!(four.hits.len(), 2);
+    let spent = |work: &QueryWork| {
+        let (ranges, bytes) = work.remaining_io();
+        (
+            65_536 - work.remaining(),
+            ANN_RANGES - ranges,
+            ANN_BYTES - bytes,
+        )
+    };
+    let before = spent(&three_work);
+    let after = spent(&four_work);
+    assert!(after.0 > before.0 && after.1 > before.1 && after.2 > before.2);
+    eprintln!("three channels work/ranges/bytes={before:?}, four channels={after:?}");
+    for (ranges, bytes) in [(before.1, ANN_BYTES), (ANN_RANGES, before.2)] {
+        let (error, _) = run(true, ranges, bytes).await;
+        let error = error.unwrap_err().record_error();
+        assert!(
+            matches!(&error, RecordError::Rejected(reason) if reason.contains("positioned read budget")),
+            "{error}"
+        );
+    }
+
+    let output = four.entity_frame.take().unwrap();
+    for cursor in [&p.indexes.vector, &p.indexes.lexical] {
+        let guard = output.pin().await.unwrap();
+        guard.deliver(|| ()).unwrap();
+        cursor.store(four.visible_seq - 1, std::sync::atomic::Ordering::Release);
+        assert!(matches!(guard.deliver(|| ()), Err(RecordError::Busy)));
+        cursor.store(four.visible_seq, std::sync::atomic::Ordering::Release);
+    }
 }

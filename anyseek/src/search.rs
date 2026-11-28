@@ -350,12 +350,52 @@ impl Default for TimeRrfOptions {
     }
 }
 
+/// Rank-fusion weights for the four-channel entity request.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct TimeEntityRrfOptions {
+    /// Finite positive smoothing constant.
+    pub constant: f32,
+    /// Finite nonnegative event-time weight.
+    pub time_weight: f32,
+    /// Finite nonnegative lexical weight.
+    pub keyword_weight: f32,
+    /// Finite nonnegative exact-vector weight.
+    pub vector_weight: f32,
+    /// Finite nonnegative one-hop relation weight.
+    pub entity_weight: f32,
+}
+
+impl Default for TimeEntityRrfOptions {
+    fn default() -> Self {
+        let time = TimeRrfOptions::default();
+        Self {
+            constant: time.constant,
+            time_weight: time.time_weight,
+            keyword_weight: time.keyword_weight,
+            vector_weight: time.vector_weight,
+            entity_weight: 1.0,
+        }
+    }
+}
+
+impl From<TimeEntityRrfOptions> for TimeRrfOptions {
+    fn from(value: TimeEntityRrfOptions) -> Self {
+        Self {
+            constant: value.constant,
+            time_weight: value.time_weight,
+            keyword_weight: value.keyword_weight,
+            vector_weight: value.vector_weight,
+        }
+    }
+}
+
 impl TimeRrfOptions {
-    pub(crate) fn validate(self, lexical: bool, vector: bool) -> std::result::Result<(), String> {
+    pub(crate) fn validate(self, lexical: bool, vector: bool, entity: Option<f32>) -> std::result::Result<(), String> {
         if !self.constant.is_finite() || self.constant <= 0.0 {
             return Err("RRF constant must be finite and positive".into());
         }
-        let weights = [self.time_weight, self.keyword_weight, self.vector_weight];
+        let weights = [self.time_weight, self.keyword_weight, self.vector_weight, entity.unwrap_or_default()];
         if weights
             .iter()
             .any(|weight| !weight.is_finite() || *weight < 0.0)
@@ -366,6 +406,7 @@ impl TimeRrfOptions {
             self.time_weight,
             if lexical { self.keyword_weight } else { 0.0 },
             if vector { self.vector_weight } else { 0.0 },
+            entity.unwrap_or_default(),
         ];
         if enabled.iter().all(|&weight| weight == 0.0) {
             return Err("at least one participating RRF weight must be positive".into());
@@ -439,11 +480,11 @@ pub enum ResultType {
 /// Explanation of one candidate channel; ranks are zero-based in its bounded window.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct ChannelExplanation {
-    /// lexical, vector, relation, or browse.
+    /// time, lexical, vector, relation, or browse.
     pub channel: String,
     /// Position before final fusion pagination (not a corpus-wide recall guarantee).
     pub rank: usize,
-    /// score, requested_order, stable_adjacency, or browse_order.
+    /// window_time, score, requested_order, stable_adjacency, or browse_order.
     pub rank_basis: String,
     /// Unmodified channel engine score; absent for adjacency/browse.
     pub raw_score: Option<f32>,

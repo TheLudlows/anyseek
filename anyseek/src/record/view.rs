@@ -29,6 +29,38 @@ pub(super) struct RetrievalView {
     cursors: Option<Arc<index_consumers::Cursors>>,
     owner: std::sync::Weak<Mutex<Inner>>,
 }
+type WeakQueryComponent = (
+    std::sync::Weak<tokio::sync::RwLock<crate::component::VectorSegment>>,
+    std::sync::Weak<lexical::runtime::Runtime>,
+);
+
+/// Weak ordered identities let a transport recheck topology without pinning retired files.
+pub(super) struct QueryTopology {
+    components: Vec<WeakQueryComponent>,
+    _memory: crate::storage::build_budget::MemoryLease,
+}
+
+impl QueryTopology {
+    pub(super) fn comparison_bound(&self) -> usize {
+        self.components.len().saturating_mul(2)
+    }
+
+    pub(super) fn capture(handle: &super::query::Handle, work: &crate::search::QueryWork) -> Result<Self, RecordError> {
+        let captured = handle.index.try_read().map_err(|_| RecordError::Busy)?;
+        let components = captured.segments.len();
+        work.charge(components.saturating_mul(4))?;
+        let memory = crate::storage::build_budget::reserve_memory(
+            components.saturating_mul(size_of::<WeakQueryComponent>()) as u64,
+        ).map_err(memory_error)?;
+        Ok(Self {
+            components: captured.segments.iter().map(|segment| {
+                (Arc::downgrade(&segment.vector), Arc::downgrade(&segment.lexical))
+            }).collect(),
+            _memory: memory,
+        })
+    }
+}
+
 impl RetrievalView {
     pub(super) async fn reserve_visible(&self,document:&Document,config:&RecordConfig,id:&str,owner:Arc<std::fs::File>)->Result<lexical::memory::Reservation,RecordError>{
         let mut reservation=lexical::memory::Reservation::new(document,config,id)?;
@@ -111,6 +143,15 @@ impl RetrievalView {
             && selected.segments.iter().zip(&captured.segments).all(|(a, b)| {
                 Arc::ptr_eq(&a.vector, &b.vector) && Arc::ptr_eq(&a.lexical, &b.lexical)
             })
+    }
+    pub(super) fn matches_topology_witness(&self, witness: &QueryTopology) -> bool {
+        self.query.try_read().is_ok_and(|selected| {
+            selected.segments.len() == witness.components.len()
+                && selected.segments.iter().zip(&witness.components).all(|(a, (vector, lexical))| {
+                    std::ptr::eq(Arc::as_ptr(&a.vector), vector.as_ptr())
+                        && std::ptr::eq(Arc::as_ptr(&a.lexical), lexical.as_ptr())
+                })
+        })
     }
     pub(super) async fn component_count(&self) -> usize {
         self.query.read().await.segments.len()
