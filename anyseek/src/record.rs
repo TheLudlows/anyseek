@@ -27,6 +27,7 @@ mod history;
 pub use history::HistoryRetention;
 pub use temporal::{TemporalMetadata, TemporalFilter, TimeRange};
 mod output;
+mod point;
 pub use output::DataOutputPermit;
 mod group_plan;
 pub use group_plan::{GroupReplace,GroupRecord,GroupReceipt};
@@ -360,7 +361,10 @@ struct Inner {
 // release and permit old data to be delivered after a new owner deletes it.
 impl Drop for Inner {
     fn drop(&mut self) {
-        if let Ok(mut state) = self.output.write() { state.fenced = true; }
+        if let Ok(mut state) = self.output.write() {
+            state.fenced = true;
+            state.point = None;
+        }
     }
 }
 struct RemotePersistence {
@@ -1374,36 +1378,38 @@ impl RecordPartition {
             .map_err(creation_error)?;
         let (index, ordinals) = build(path, &config, &state).await?;
         let output = Arc::new(std::sync::RwLock::new(output::OutputState::default()));
+        let inner = Inner {
+            background:None,maintenance_requested:None,maintenance_scheduled:false,maintenance_pending:false,maintenance_compacted_bytes:None,maintenance_trim:None,anchor:None,payloads:Default::default(),
+            journal,
+            config,
+            state,
+            index,
+            locations: ordinals
+                .iter()
+                .enumerate()
+                .map(|(id, key)| (key.clone(), id))
+                .collect(),
+            ordinals,
+            snapshot_bytes: entry.len(),
+            healthy: true,
+            clock: temporal::clock()?,
+            evaluation_time_ms: 0,
+            observed_time: temporal::ObservedTime::default(),
+            output: output.clone(),
+            remote: None,
+            archive: None,
+            #[cfg(test)]
+            fail_after_durable: false,
+            #[cfg(test)]
+            fail_publication_stage: 0,
+            #[cfg(test)]
+            disk_read_fixture: None,
+        };
+        inner.publish_point_view(Some(false))?;
         Ok(Self {
             indexes: index_consumers::Cursors::recovered(0),
             output: output.clone(),
-            inner: Arc::new(Mutex::new(Inner {
-                background:None,maintenance_requested:None,maintenance_scheduled:false,maintenance_pending:false,maintenance_compacted_bytes:None,maintenance_trim:None,anchor:None,payloads:Default::default(),
-                journal,
-                config,
-                state,
-                index,
-                locations: ordinals
-                    .iter()
-                    .enumerate()
-                    .map(|(id, key)| (key.clone(), id))
-                    .collect(),
-                ordinals,
-                snapshot_bytes: entry.len(),
-                healthy: true,
-                clock: temporal::clock()?,
-                evaluation_time_ms: 0,
-                observed_time: temporal::ObservedTime::default(),
-                output,
-                remote: None,
-                archive: None,
-                #[cfg(test)]
-                fail_after_durable: false,
-                #[cfg(test)]
-                fail_publication_stage: 0,
-                #[cfg(test)]
-                disk_read_fixture: None,
-            })),
+            inner: Arc::new(Mutex::new(inner)),
             writer: Arc::new(Mutex::new(())),
             committed_queue: Arc::default(),
             admission: Arc::new(Semaphore::new(16)),
@@ -1514,9 +1520,7 @@ impl RecordPartition {
             };
             index.rotate_tail(tail,&mut ordinals,&mut locations,budget).await?;
         }
-        let output = Arc::new(std::sync::RwLock::new(output::OutputState {
-            revision: 0, fenced: false,
-        }));
+        let output = Arc::new(std::sync::RwLock::new(output::OutputState::default()));
         let mut inner=Inner {
                 background:None,maintenance_requested:None,maintenance_scheduled:false,maintenance_pending:false,maintenance_compacted_bytes:None,maintenance_trim:None,anchor:selected,payloads,
                 journal,
@@ -1565,6 +1569,7 @@ impl RecordPartition {
         validate_open_authority(&inner.config, &inner.state).await?;
         inner.reclaim_anchor_objects().await?;
         let indexes = index_consumers::Cursors::recovered(inner.state.seq);
+        inner.publish_point_view(Some(false))?;
         Ok(Self {output,indexes,committed_queue:Arc::default(),writer:Arc::new(Mutex::new(())),inner:Arc::new(Mutex::new(inner)),admission:Arc::new(Semaphore::new(16))})
     }
     /// Execute a one-item synchronous batch: success is durable and searchable.
@@ -1607,57 +1612,7 @@ impl RecordPartition {
     }
     /// Get the exact live record from a complete published view.
     pub async fn get(&self, id: &str) -> Result<Option<Record>, RecordError> {
-        let _permit = self
-            .admission
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| RecordError::Busy)?;
-        let mut inner = self.inner.lock().await;
-        inner.observe_time()?;
-        if !inner.healthy {
-            return Err(RecordError::RecoveryRequired);
-        }
-        #[cfg(test)]
-        if let Some(pin) = disk_read_fixture::Pinned::capture(&inner)? {
-            let barrier = self.output_permit()?;
-            drop(inner);
-            let id = id.to_owned();
-            let (pin, row) = crate::resources::spawn_blocking(move || {
-                let row = pin.read(&id)?;
-                Ok::<_, RecordError>((pin, row))
-            }).await.map_err(storage)??;
-            let mut inner = self.inner.lock().await;
-            pin.validate(&mut inner)?;
-            return barrier.deliver(|| row.filter(|row| temporal::visible(row, inner.evaluation_time_ms)));
-        }
-        if !inner.locations.contains_key(id) {
-            return Ok(None);
-        }
-        if let Some(base) = inner.state.records.sealed_source(id) {
-            let barrier = self.output_permit()?;
-            let cut = inner.state.seq;
-            let evaluation = inner.evaluation_time_ms;
-            let read_id = id.to_owned();
-            let pinned = base.clone();
-            drop(inner);
-            let record = crate::resources::spawn_blocking(move || {
-                let row = pinned.checkpoint.find_sealed(&read_id).map_err(state_rows::read_error)?
-                    .ok_or_else(|| storage("published record missing from sealed directory"))?;
-                if !row.metadata.visible(evaluation) { return Ok(None); }
-                state_rows::decode(&read_id, row, |record| Ok(Some(record)))
-            }).await.map_err(storage)??;
-            let mut inner = self.inner.lock().await;
-            inner.observe_time()?;
-            // An unrelated write cannot change this key in a still selected
-            // base. A changed key or newer base requires a fresh observation.
-            if inner.state.seq != cut && !inner.state.records.sealed_source(id)
-                .is_some_and(|selected| Arc::ptr_eq(&base, &selected)) {
-                return Err(RecordError::Busy);
-            }
-            return barrier.deliver(|| record.filter(|row| temporal::visible(row, inner.evaluation_time_ms)));
-        }
-        Ok(inner.state.records.load(id)?.as_deref()
-            .filter(|row| temporal::visible(row, inner.evaluation_time_ms)).cloned())
+        Ok(self.get_with_output(id).await?.0)
     }
     /// Inspect visibility without returning stale/deleted original content.
     pub async fn record_status(&self, id: &str) -> Result<Option<RecordStatus>, RecordError> {
@@ -2014,7 +1969,13 @@ pub(crate) mod tests {
     pub(crate) async fn test_clock(p:&RecordPartition) -> (Arc<TestClock>,u64) {
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64;
         let clock=Arc::new(TestClock(std::sync::atomic::AtomicU64::new(now)));
-        p.inner.lock().await.clock=clock.clone(); (clock,now)
+        p.inner.lock().await.set_clock(clock.clone()); (clock,now)
+    }
+    pub(crate) async fn test_has_sealed_record_source(p: &RecordPartition, id: &str) -> bool {
+        matches!(
+            p.inner.lock().await.state.records.source(id).unwrap(),
+            Some(state_values::RecordSource::Sealed(_))
+        )
     }
     pub(crate) async fn seal_test_cache_tail(p: &RecordPartition) -> usize {
         let _writer = p.writer.lock().await;
@@ -2430,7 +2391,7 @@ pub(crate) mod tests {
 
         // Reopen the WAL, including both ordinary decisions and an atomic group.
         let p = RecordPartition::open(&root, budget).await.unwrap();
-        p.inner.lock().await.clock = clock.clone();
+        p.inner.lock().await.set_clock(clock.clone());
         assert_eq!(p.write(extension).await.unwrap(), extended);
         assert_eq!(p.replace_group(replacement).await.unwrap(), replaced);
         check(&p, 4, now, replaced.seq).await;
@@ -2442,7 +2403,7 @@ pub(crate) mod tests {
         let writer = p.writer.lock().await;
         {
             let mut inner = p.inner.lock().await;
-            inner.clock = clock.clone();
+            inner.set_clock(clock.clone());
             assert!(inner.state.records.has_sealed_base());
             assert_eq!(inner.state.records.recent_count(), 0);
             assert_eq!(inner.state.records.live_ttl_count(), 2);
@@ -4297,7 +4258,7 @@ pub(crate) mod tests {
             let mut inner = recovered.inner.lock().await;
             let future = inner.state.time_watermark_ms
                 .saturating_add(9 * 86_400_000);
-            inner.clock = Arc::new(TestClock(std::sync::atomic::AtomicU64::new(future)));
+            inner.set_clock(Arc::new(TestClock(std::sync::atomic::AtomicU64::new(future))));
             assert!(matches!(inner.trim_history(future).await, Err(RecordError::Busy)));
         }
         recovered.kick_maintenance().await;

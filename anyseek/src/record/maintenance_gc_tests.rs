@@ -66,7 +66,7 @@ async fn receipt_gc_background_catchup_keeps_newly_expired_history_receipt() {
     drop(PartitionJournal::create(&path, settings.max_journal_bytes, &bytes).unwrap());
     let p = RecordPartition::open(&path, settings.max_journal_bytes).await.unwrap();
     let clock = Arc::new(Clock(std::sync::atomic::AtomicU64::new(now)));
-    p.inner.lock().await.clock = clock.clone();
+    p.inner.lock().await.set_clock(clock.clone());
     std::fs::write(path.join(".test-indexer-pause"), b"pause").unwrap();
     let job = p.start_index_job(std::time::Duration::from_secs(30), true).unwrap();
     tokio::time::timeout(std::time::Duration::from_secs(5), async {

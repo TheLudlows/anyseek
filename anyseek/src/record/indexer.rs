@@ -466,7 +466,7 @@ impl RecordPartition {
                 inner.anchor = Some(reference);
                 inner.payloads = payloads;
                 inner.healthy = true;
-                inner.output.write().map_err(|_|RecordError::RecoveryRequired)?.fenced = fenced;
+                inner.publish_point_view(Some(fenced))?;
                 #[cfg(feature="fault-injection")]
                 if intent.trims_history() {
                     match std::env::var("ANYSEEK_HISTORY_TRIM_FAULT").ok().as_deref() {
@@ -833,9 +833,9 @@ mod tests {
         struct Fixed(u64);
         impl temporal::Clock for Fixed {fn now_ms(&self)->Result<u64,RecordError>{Ok(self.0)}}
         let root=path();let p=RecordPartition::create(&root,config()).await.unwrap();
-        p.inner.lock().await.clock=Arc::new(Fixed(1_000));
+        p.inner.lock().await.set_clock(Arc::new(Fixed(1_000)));
         p.write(write("first","a","alpha",ExpectedVersion::Absent)).await.unwrap();
-        p.inner.lock().await.clock=Arc::new(Fixed(1_001+config().history.retention_ms));
+        p.inner.lock().await.set_clock(Arc::new(Fixed(1_001+config().history.retention_ms)));
         std::fs::write(root.join(".test-indexer-pause"),b"pause").unwrap();
         let job=p.start_compact_job().unwrap();wait_started(&root).await;
         {let inner=p.inner.lock().await;assert_eq!(inner.state.time_watermark_ms,1_000);assert_eq!(inner.state.history.floor,0);}
@@ -889,7 +889,7 @@ mod tests {
         impl temporal::Clock for Fixed {fn now_ms(&self)->Result<u64,RecordError>{Ok(self.0)}}
         let root=path();let mut settings=config();settings.max_record_bytes=256*1024;settings.max_journal_bytes=8*1024*1024;
         let p=RecordPartition::create(&root,settings.clone()).await.unwrap();
-        p.inner.lock().await.clock=Arc::new(Fixed(1_000));
+        p.inner.lock().await.set_clock(Arc::new(Fixed(1_000)));
         p.write(write("first","a",&"alpha ".repeat(15000),ExpectedVersion::Absent)).await.unwrap();
         std::fs::write(root.join(".test-source-chunk-pause"),b"pause").unwrap();
         let job=p.start_index_job(Duration::from_secs(30),true).unwrap();
@@ -898,7 +898,7 @@ mod tests {
         }).await.unwrap();
         let request=write("second","b","beta",ExpectedVersion::Absent);
         let receipt=tokio::time::timeout(Duration::from_secs(2),p.write(request.clone())).await.unwrap().unwrap();
-        p.inner.lock().await.clock=Arc::new(Fixed(1_001+settings.history.retention_ms));
+        p.inner.lock().await.set_clock(Arc::new(Fixed(1_001+settings.history.retention_ms)));
         {let _writer=p.writer.lock().await;let mut inner=p.inner.lock().await;let at=inner.observe_time().unwrap();inner.trim_history(at).await.unwrap();}
         {let inner=p.inner.lock().await;assert_eq!(inner.state.seq,2);assert_eq!(inner.state.history.floor,2);assert_eq!(inner.background.as_ref().unwrap().revision,2);}
         let completion=job.handle.abort_handle();drop(job);drop(p);
@@ -937,7 +937,7 @@ mod tests {
         struct Fixed(u64);
         impl temporal::Clock for Fixed {fn now_ms(&self)->Result<u64,RecordError>{Ok(self.0)}}
         let root=path();let p=RecordPartition::create(&root,config()).await.unwrap();
-        p.inner.lock().await.clock=Arc::new(Fixed(1_000));
+        p.inner.lock().await.set_clock(Arc::new(Fixed(1_000)));
         p.write(write("first","a","alpha",ExpectedVersion::Absent)).await.unwrap();
         std::fs::write(root.join(".test-indexer-catchup-pause"),b"pause").unwrap();
         let job=p.start_index_committed(Duration::from_secs(20)).unwrap();
@@ -945,7 +945,7 @@ mod tests {
             while !root.join(".test-indexer-catchup-started").exists(){tokio::time::sleep(Duration::from_millis(5)).await;}
         }).await.unwrap();
         let seq=p.inner.lock().await.state.seq;
-        p.inner.lock().await.clock=Arc::new(Fixed(1_001+config().history.retention_ms));
+        p.inner.lock().await.set_clock(Arc::new(Fixed(1_001+config().history.retention_ms)));
         {let _writer=p.writer.lock().await;let mut inner=p.inner.lock().await;let at=inner.observe_time().unwrap();inner.trim_history(at).await.unwrap();}
         {let inner=p.inner.lock().await;assert_eq!(inner.state.seq,seq);assert_eq!(inner.state.history.floor,seq);assert_eq!(inner.background.as_ref().unwrap().revision,1);}
         std::fs::remove_file(root.join(".test-indexer-catchup-pause")).unwrap();

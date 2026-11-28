@@ -578,7 +578,7 @@ mod tests {
         let temp=tempfile::tempdir().unwrap();let root=temp.path().join("records");
         let mut cfg=config();cfg.schema.push(serde_json::from_value(serde_json::json!({"field":"rank","field_type":"Int","store":false,"facet":true,"index_lexical":false})).unwrap());
         let p=RecordPartition::create(&root,cfg.clone()).await.unwrap();
-        let clock=Arc::new(Clock(std::sync::atomic::AtomicU64::new(1000)));p.inner.lock().await.clock=clock.clone();
+        let clock=Arc::new(Clock(std::sync::atomic::AtomicU64::new(1000)));p.inner.lock().await.set_clock(clock.clone());
         for id in ["base","updated","deleted"] {let mut r=write(id,id,"alpha old",ExpectedVersion::Absent);r.document.as_mut().unwrap().insert("rank".into(),3.into());p.write(r).await.unwrap();}
         let native=p.inner.lock().await.index.test_index().read().await.segments[0].lexical.clone();native.join_visible().await.unwrap();
         let pause=native.package_path().join(".test-visible-pause");std::fs::write(&pause,b"pause").unwrap();
@@ -622,7 +622,7 @@ mod tests {
         assert!(native.visible_bytes.load(std::sync::atomic::Ordering::Acquire)>0);drop(held);assert_eq!(native.visible_bytes.load(std::sync::atomic::Ordering::Acquire),0);
         assert_vector_visibility(&p).await;
         p.finish_service_shutdown().await.unwrap();drop(native);drop(p);
-        let p=RecordPartition::open(&root,cfg.max_journal_bytes).await.unwrap();p.inner.lock().await.clock=clock;
+        let p=RecordPartition::open(&root,cfg.max_journal_bytes).await.unwrap();p.inner.lock().await.set_clock(clock);
         for (text,field,order,count,hits) in before {let result=p.query(query(text,field,order)).await.unwrap();assert_eq!(count,result.count_total);assert_eq!(hits,result.hits.iter().map(|h|(h.record.record_id.clone(),h.score)).collect::<Vec<_>>());}
         assert_vector_visibility(&p).await;
         p.finish_service_shutdown().await.unwrap();

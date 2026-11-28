@@ -1059,9 +1059,11 @@ async fn read_collection(
     service: &Arc<Service>, tenant: String, collection: String, record: String,
 ) -> Result<(Option<anyseek::record::Record>, DataOutputPermit), Error> {
     let partition = service.record(&tenant, &collection).await?;
-    let data = partition.output_permit_after_publication().await?;
-    let value = service.catalog.authorized_generation(
-        tenant, collection, partition.generation, move |_| async move { partition.get(&record).await },
+    let (value, data) = service.catalog.authorized_generation(
+        tenant, collection, partition.generation, move |_| async move {
+            let (value, data) = partition.get_with_output(&record).await?;
+            Ok::<_, RecordError>((value, data.with_residency(partition.residency.clone())))
+        },
     ).await??;
     Ok((value, data))
 }
@@ -2606,6 +2608,185 @@ mod tests {
             .header("content-type","application/json").body(Body::from(body)).unwrap();
         app.clone().oneshot(request).await.unwrap()
     }
+    // Reading to EOF and checking the terminal chunk exercises the protected
+    // body and the socket handoff as well as the status returned by the router.
+    async fn point_tcp_get(address: std::net::SocketAddr, key: &str, path: &str) -> (StatusCode, Value) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let mut socket = tokio::net::TcpStream::connect(address).await.unwrap();
+        let request = format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\napikey: {key}\r\nX-AnySeek-Tenant: tenant\r\n\r\n");
+        socket.write_all(request.as_bytes()).await.unwrap();
+        let mut response = String::new();
+        socket.read_to_string(&mut response).await.unwrap();
+        let (headers, body) = response.split_once("\r\n\r\n").unwrap();
+        let status = headers.lines().next().unwrap().split_whitespace().nth(1).unwrap();
+        let body = if headers.lines().any(|line| line == "transfer-encoding: chunked") {
+            let (size, bytes) = body.split_once("\r\n").unwrap();
+            let size = usize::from_str_radix(size, 16).unwrap();
+            assert_eq!(&bytes[size..], "\r\n0\r\n\r\n");
+            &bytes[..size]
+        } else {
+            body
+        };
+        (StatusCode::from_bytes(status.as_bytes()).unwrap(), serde_json::from_str(body).unwrap())
+    }
+
+    #[tokio::test]
+    async fn point_reads_return_published_rows_while_batch_holds_admission() {
+        use std::time::Duration;
+
+        let (service, path, headers) = setup().await;
+        let key = headers["apikey"].to_str().unwrap();
+        let app = router(service.clone());
+        let sdk = local::LocalEngine::from_test_service(service.clone());
+        let record = service.record("tenant", "c").await.unwrap();
+        let root = path.join(service.catalog.collection_entry("tenant", "c").await.unwrap().directory());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (stop, stopped) = tokio::sync::oneshot::channel();
+        let network_app = app.clone();
+        let transport = tokio::spawn(async move {
+            axum::serve(listener, network_app).with_graceful_shutdown(async {
+                let _ = stopped.await;
+            }).await.unwrap();
+        });
+        let batch = "/api/v1/index/c/batch";
+        let doc = "/api/v1/index/c/doc/r";
+        let missing = "/api/v1/index/c/doc/missing";
+        let write = |nonce: &str, id: &str, expected: Value, body: Option<&str>| {
+            json!({"writes": [{
+                "operation_id": OperationId::new(nonce.into()),
+                "record_id": id,
+                "expected": expected,
+                "document": body.map(|value| json!({"body":value})),
+            }]})
+        };
+        let wait_marker = |marker: PathBuf| async move {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while !marker.exists() { tokio::time::sleep(Duration::from_millis(1)).await; }
+            }).await.unwrap();
+        };
+        let (status, response) = tenant_api(&app, "POST", batch, key,
+            Some(write("seed", "r", json!("Absent"), Some("sealed")))).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(response["results"][0]["receipt"]["version"], 1);
+        record.compact_journal().await.unwrap();
+        assert!(crate::record::tests::test_has_sealed_record_source(&record, "r").await);
+
+        let gate = root.join(".test-write-admission-pause");
+        std::fs::write(&gate, b"pause").unwrap();
+        let app_writer = app.clone();
+        let writer_key = key.to_owned();
+        let update = write("update", "r", json!({"Match":1}), Some("confirmed"));
+        let writer = tokio::spawn(async move {
+            tenant_api(&app_writer, "POST", batch, &writer_key, Some(update)).await
+        });
+        wait_marker(root.join(".test-write-admission-started")).await;
+        let reads = tokio::time::timeout(Duration::from_secs(2), async {
+            tokio::join!(
+                point_tcp_get(address, key, doc),
+                point_tcp_get(address, key, missing),
+                sdk.get("tenant", "c", "r"),
+                sdk.get("tenant", "c", "missing"),
+            )
+        }).await;
+        assert!(!writer.is_finished());
+        std::fs::remove_file(gate).unwrap();
+        let (status, response) = writer.await.unwrap();
+        let ((http, body), (http_miss, miss), sdk_row, sdk_miss) =
+            reads.expect("all four point reads must finish before write admission resumes");
+        assert_eq!(http, StatusCode::OK);
+        assert_eq!(body["document"]["body"], "sealed");
+        assert_eq!(http_miss, StatusCode::NOT_FOUND);
+        assert_eq!(miss["code"], "not_found");
+        assert_eq!(sdk_row.unwrap().unwrap().version, 1);
+        assert!(sdk_miss.unwrap().is_none());
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(response["results"][0]["receipt"]["version"], 2);
+        assert_eq!(point_tcp_get(address, key, doc).await.1["document"]["body"], "confirmed");
+        assert_eq!(sdk.get("tenant", "c", "r").await.unwrap().unwrap().version, 2);
+
+        let delete = write("delete", "r", json!({"Match":2}), None);
+        let (_, response) = tenant_api(&app, "POST", batch, key, Some(delete.clone())).await;
+        assert_eq!(response["results"][0]["receipt"]["version"], 3);
+        assert_eq!(tenant_api(&app, "POST", batch, key, Some(delete)).await.1, response);
+        assert_eq!(point_tcp_get(address, key, doc).await.0, StatusCode::NOT_FOUND);
+        assert!(sdk.get("tenant", "c", "r").await.unwrap().is_none());
+
+        let (clock, now) = crate::record::tests::test_clock(&record).await;
+        let mut ttl = write("ttl", "ttl", json!("Absent"), Some("expiring"));
+        ttl["writes"][0]["temporal"] = json!({"expire_at_ms": now + 50});
+        let (_, receipt) = tenant_api(&app, "POST", batch, key, Some(ttl)).await;
+        assert_eq!(receipt["results"][0]["receipt"]["version"], 1);
+        let ttl_doc = "/api/v1/index/c/doc/ttl";
+        assert_eq!(point_tcp_get(address, key, ttl_doc).await.0, StatusCode::OK);
+        assert!(sdk.get("tenant", "c", "ttl").await.unwrap().is_some());
+        for at in [now + 50, now + 10] {
+            clock.set(at);
+            assert_eq!(point_tcp_get(address, key, ttl_doc).await.0, StatusCode::NOT_FOUND);
+            assert!(sdk.get("tenant", "c", "ttl").await.unwrap().is_none());
+        }
+
+        let pause = root.join(".test-lexical-consumer-pause");
+        let consumer = root.join(".test-lexical-consumer-started");
+        let failure = root.join(".test-lexical-consumer-fail");
+        for (id, fail) in [("published", false), ("recoverable", true)] {
+            std::fs::write(&pause, b"pause").unwrap();
+            let app_writer = app.clone();
+            let writer_key = key.to_owned();
+            let value = write(id, id, json!("Absent"), Some("durable"));
+            let writer = tokio::spawn(async move {
+                tenant_api(&app_writer, "POST", batch, &writer_key, Some(value)).await
+            });
+            wait_marker(consumer.clone()).await;
+            let endpoint = format!("/api/v1/index/c/doc/{id}");
+            let mut http = std::pin::pin!(point_tcp_get(address, key, &endpoint));
+            let mut local = std::pin::pin!(sdk.get("tenant", "c", id));
+            let wait = Duration::from_millis(30);
+            let (http_pending, sdk_pending) = tokio::join!(
+                tokio::time::timeout(wait, &mut http),
+                tokio::time::timeout(wait, &mut local),
+            );
+            assert!(http_pending.is_err() && sdk_pending.is_err());
+            assert!(!writer.is_finished());
+            if fail {
+                std::fs::write(&failure, b"fail").unwrap();
+            }
+            std::fs::remove_file(&consumer).unwrap();
+            std::fs::remove_file(&pause).unwrap();
+            let (status, response) = tokio::time::timeout(Duration::from_secs(5), writer).await.unwrap().unwrap();
+            assert_eq!(status, StatusCode::OK);
+            let ((status, row), local) = tokio::time::timeout(Duration::from_secs(5), async {
+                tokio::join!(http, local)
+            }).await.unwrap();
+            if fail {
+                assert_eq!(response["results"][0]["code"], "durable_pending");
+                assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+                assert_eq!(row["code"], "recovery_required");
+                assert!(row.get("document").is_none());
+                assert_eq!(local.unwrap_err().code(), "recovery_required");
+                std::fs::remove_file(&failure).unwrap();
+            } else {
+                assert_eq!(response["results"][0]["receipt"]["version"], 1);
+                assert_eq!(status, StatusCode::OK);
+                assert_eq!(row["document"]["body"], "durable");
+                assert_eq!(local.unwrap().unwrap().version, 1);
+            }
+        }
+
+        stop.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), transport).await.unwrap().unwrap();
+        drop(record);
+        drop(app);
+        drop(service);
+        tokio::time::timeout(Duration::from_secs(5), sdk.shutdown()).await.unwrap().unwrap();
+        let sdk = local::LocalEngine::open(&path, false).await.unwrap();
+        assert!(sdk.get("tenant", "c", "r").await.unwrap().is_none());
+        assert_eq!(sdk.get("tenant", "c", "recoverable").await.unwrap().unwrap().version, 1);
+        tokio::time::timeout(Duration::from_secs(5), sdk.shutdown()).await.unwrap().unwrap();
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
     #[tokio::test]
     async fn group_http_replaces_replays_clears_and_preserves_independent_routes() {
         let (service,path,headers)=setup().await;
@@ -2625,8 +2806,14 @@ mod tests {
         let (status,replay)=tenant_api(&app,"POST","/api/v1/index/c/group/replace",key,Some(first)).await;
         assert_eq!(status,StatusCode::OK);assert_eq!(replay,receipt);
         let partition=service.record("tenant","c").await.unwrap();
-        assert!(partition.get("b").await.unwrap().is_none());assert!(partition.get("c").await.unwrap().is_none());
-        assert!(partition.get("a").await.unwrap().is_some());assert!(partition.get("d").await.unwrap().is_some());
+        let sdk = local::LocalEngine::from_test_service(service.clone());
+        for (member, visible) in [("a", true), ("b", false), ("c", false), ("d", true)] {
+            let point = format!("/api/v1/index/c/doc/{member}");
+            assert_eq!(tenant_api(&app, "GET", &point, key, None).await.0,
+                if visible { StatusCode::OK } else { StatusCode::NOT_FOUND });
+            assert_eq!(sdk.get("tenant", "c", member).await.unwrap().is_some(), visible);
+        }
+        drop(sdk);
         let (status,current)=tenant_api(&app,"GET",uri,key,None).await;
         assert_eq!(status,StatusCode::OK);assert_eq!(current,json!({"group_id":id,"group_version":2}));
         for (route,array) in [("batch","writes"),("ingest","records")] {
@@ -3104,6 +3291,9 @@ mod tests {
         let value: Value = serde_json::from_slice(&axum::body::to_bytes(response.into_body(), MAX_RESPONSE).await.unwrap()).unwrap();
         assert_eq!(value["code"], "recovery_required");
         assert!(value.get("document").is_none());
+        let sdk = local::LocalEngine::from_test_service(service.clone());
+        assert_eq!(sdk.get("tenant", "c", "existing").await.unwrap_err().code(), "recovery_required");
+        drop(sdk);
         assert!(protected_data(Ok(json!({"body":"must not escape"})),Some(data.clone())).is_err());
         assert!(protected_data::<Value>(Err(bad("ordinary error")),Some(data.clone())).is_err());
         for mut body in prepared_bodies {

@@ -3,6 +3,7 @@
 use super::state_memory::Shared;
 use super::*;
 use crate::storage::build_budget::reserve_memory;
+use std::{borrow::Cow, sync::{RwLock, RwLockReadGuard, Weak}};
 
 mod ttl;
 pub(super) use ttl::PreparedTtl;
@@ -325,11 +326,33 @@ impl PreviousRow {
         }
     }
 }
+type RecentRows = BTreeMap<String, Shared<Record>>;
+
+/// O(1) pin of the committed directory. Readers select a single source under
+/// the publication fence, then keep only that row or the sealed package.
+pub(super) struct RecordLookup {
+    base: Option<Weak<state_rows::Base>>,
+    recent: Weak<RwLock<RecentRows>>,
+}
+
+impl RecordLookup {
+    pub(super) fn source(&self, id: &str) -> Result<Option<RecordSource>, RecordError> {
+        let recent = self.recent.upgrade().ok_or(RecordError::RecoveryRequired)?;
+        let recent = recent.read().map_err(|_| RecordError::RecoveryRequired)?;
+        if let Some(row) = recent.get(id) {
+            return Ok(Some(RecordSource::Recent(row.clone())));
+        }
+        self.base.as_ref().map(|base| {
+            base.upgrade().map(RecordSource::Sealed).ok_or(RecordError::RecoveryRequired)
+        }).transpose()
+    }
+}
+
 #[derive(Debug, Default)]
 pub(super) struct Records {
     deadlines: ttl::Deadlines,
     base: Option<Arc<state_rows::Base>>,
-    values: BTreeMap<String, Shared<Record>>,
+    values: Arc<RwLock<RecentRows>>,
     bytes: usize,
     keys_bytes: usize,
     sealed_keys_bytes: usize,
@@ -337,7 +360,7 @@ pub(super) struct Records {
 }
 
 pub(super) enum CurrentRow<'a> {
-    Recent(&'a Shared<Record>),
+    Recent(Cow<'a, Shared<Record>>),
     Sealed(crate::storage::disk_records::Located<'a>),
 }
 
@@ -350,7 +373,7 @@ pub(super) enum RecordSource {
 impl RecordSource {
     pub(super) fn find(&self, id: &str) -> Result<Option<CurrentRow<'_>>, RecordError> {
         match self {
-            Self::Recent(row) => Ok(Some(CurrentRow::Recent(row))),
+            Self::Recent(row) => Ok(Some(CurrentRow::Recent(Cow::Borrowed(row)))),
             Self::Sealed(base) => base
                 .checkpoint
                 .find_sealed(id)
@@ -358,19 +381,15 @@ impl RecordSource {
                 .map_err(state_rows::read_error),
         }
     }
-    pub(super) fn still_selected(&self, records: &Records, id: &str) -> bool {
-        match self {
-            Self::Recent(row) => records
-                .values
-                .get(id)
-                .is_some_and(|selected| row.ptr_eq(selected)),
-            Self::Sealed(base) => {
-                !records.values.contains_key(id)
-                    && records
-                        .base
-                        .as_ref()
-                        .is_some_and(|selected| Arc::ptr_eq(base, selected))
-            }
+    pub(super) fn still_selected(&self, records: &Records, id: &str) -> Result<bool, RecordError> {
+        Ok(records.source(id)?.is_some_and(|source| self.same_source(&source)))
+    }
+
+    pub(super) fn same_source(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Recent(a), Self::Recent(b)) => a.ptr_eq(b),
+            (Self::Sealed(a), Self::Sealed(b)) => Arc::ptr_eq(a, b),
+            _ => false,
         }
     }
 }
@@ -446,7 +465,7 @@ impl CurrentRow<'_> {
     }
     pub(super) fn load(self, id: &str) -> Result<Shared<Record>, RecordError> {
         match self {
-            Self::Recent(row) => Ok(row.clone()),
+            Self::Recent(row) => Ok(row.into_owned()),
             Self::Sealed(row) => state_rows::decode(id, row, Shared::admit),
         }
     }
@@ -465,7 +484,7 @@ impl Records {
         Ok(Self {
             deadlines,
             base: self.base.clone(),
-            values: self.values.clone(),
+            values: Arc::new(RwLock::new(self.recent_rows()?.clone())),
             bytes: self.bytes,
             keys_bytes: self.keys_bytes,
             sealed_keys_bytes: self.sealed_keys_bytes,
@@ -485,12 +504,17 @@ impl Records {
     // Every changed identity since the sealed base, including tombstones,
     // is present exactly once. The validated manifest replay, WAL recovery
     // and live commits all use the same replacement path.
-    pub(super) fn recent_records(&self) -> impl ExactSizeIterator<Item = &Shared<Record>> {
-        self.values.values()
+    pub(super) fn recent_rows(&self) -> Result<RwLockReadGuard<'_, RecentRows>, RecordError> {
+        self.values.read().map_err(|_| RecordError::RecoveryRequired)
     }
+
+    pub(super) fn lookup(&self) -> RecordLookup {
+        RecordLookup { base: self.base.as_ref().map(Arc::downgrade), recent: Arc::downgrade(&self.values) }
+    }
+
     #[cfg(test)]
     pub(super) fn recent_count(&self) -> usize {
-        self.values.len()
+        self.recent_rows().unwrap().len()
     }
     pub(super) fn from_base(base: state_rows::Base) -> Result<Self, RecordError> {
         let mut result = Self::default();
@@ -524,8 +548,8 @@ impl Records {
             .ok_or(RecordError::Busy)
     }
     pub(super) fn find(&self, id: &str) -> Result<Option<CurrentRow<'_>>, RecordError> {
-        if let Some(record) = self.values.get(id) {
-            return Ok(Some(CurrentRow::Recent(record)));
+        if let Some(record) = self.recent_rows()?.get(id) {
+            return Ok(Some(CurrentRow::Recent(Cow::Owned(record.clone()))));
         }
         match &self.base {
             Some(base) => Ok(base
@@ -539,17 +563,11 @@ impl Records {
     pub(super) fn load(&self, id: &str) -> Result<Option<Shared<Record>>, RecordError> {
         self.find(id)?.map(|record| record.load(id)).transpose()
     }
-    pub(super) fn sealed_source(&self, id: &str) -> Option<Arc<state_rows::Base>> {
-        self.base
-            .as_ref()
-            .filter(|_| !self.values.contains_key(id))
-            .cloned()
-    }
-    pub(super) fn source(&self, id: &str) -> Option<RecordSource> {
-        match self.values.get(id) {
+    pub(super) fn source(&self, id: &str) -> Result<Option<RecordSource>, RecordError> {
+        Ok(match self.recent_rows()?.get(id) {
             Some(row) => Some(RecordSource::Recent(row.clone())),
             None => self.base.clone().map(RecordSource::Sealed),
-        }
+        })
     }
 
     /// Visit the effective ordered table one row at a time while sharing its
@@ -560,8 +578,8 @@ impl Records {
         mut visit: impl FnMut(&str, CurrentRow<'_>) -> Result<bool, RecordError>,
     ) -> Result<(), RecordError> {
         use std::ops::Bound::{Excluded, Unbounded};
-        let mut recent = self
-            .values
+        let recent_rows = self.recent_rows()?;
+        let mut recent = recent_rows
             .range::<str, _>((after.map_or(Unbounded, Excluded), Unbounded))
             .peekable();
         if let Some(base) = &self.base {
@@ -573,13 +591,13 @@ impl Records {
                 let key = id.as_str();
                 while recent.peek().is_some_and(|(id, _)| id.as_str() < key) {
                     let (id, row) = recent.next().unwrap();
-                    if !visit(id, CurrentRow::Recent(row))? {
+                    if !visit(id, CurrentRow::Recent(Cow::Borrowed(row)))? {
                         return Ok(());
                     }
                 }
                 if recent.peek().is_some_and(|(id, _)| id.as_str() == key) {
                     let (_, row) = recent.next().unwrap();
-                    if !visit(key, CurrentRow::Recent(row))? {
+                    if !visit(key, CurrentRow::Recent(Cow::Borrowed(row)))? {
                         return Ok(());
                     }
                 } else if !visit(key, CurrentRow::Sealed(row))? {
@@ -588,7 +606,7 @@ impl Records {
             }
         }
         for (id, row) in recent {
-            if !visit(id, CurrentRow::Recent(row))? {
+            if !visit(id, CurrentRow::Recent(Cow::Borrowed(row)))? {
                 break;
             }
         }
@@ -661,13 +679,20 @@ impl Records {
             (Some(base), Some(other_base)) => Arc::ptr_eq(base, other_base),
             _ => false,
         };
-        if same_base && self.values.keys().eq(other.values.keys()) {
-            for ((ka, a), (kb, b)) in self.values.iter().zip(&other.values) {
-                if ka != kb || !a.same_value(b)? {
-                    return Ok(false);
-                }
+        if same_base {
+            if Arc::ptr_eq(&self.values, &other.values) {
+                return Ok(true);
             }
-            return Ok(true);
+            let values = self.recent_rows()?;
+            let other_values = other.recent_rows()?;
+            if values.keys().eq(other_values.keys()) {
+                for (a, b) in values.values().zip(other_values.values()) {
+                    if !a.same_value(b)? {
+                        return Ok(false);
+                    }
+                }
+                return Ok(true);
+            }
         }
         let mut equal = true;
         self.scan(None, |id, row| {
@@ -689,12 +714,8 @@ impl Records {
         self.bytes
     }
     #[cfg(test)]
-    pub(super) fn get(&self, id: &str) -> Option<&Record> {
-        self.values.get(id).map(|v| &**v)
-    }
-    #[cfg(test)]
-    pub(super) fn values(&self) -> impl DoubleEndedIterator<Item = &Record> + ExactSizeIterator {
-        self.values.values().map(|v| &**v)
+    pub(super) fn get(&self, id: &str) -> Option<Shared<Record>> {
+        self.recent_rows().unwrap().get(id).cloned()
     }
     pub(super) fn insert(
         &mut self,
@@ -751,7 +772,8 @@ impl Records {
                 .ok_or(RecordError::Busy)?;
             self.count = self.count.checked_add(1).ok_or(RecordError::Busy)?;
         }
-        let previous = self.values.insert(id, value);
+        let previous = self.values.write().map_err(|_| RecordError::RecoveryRequired)?
+            .insert(id, value);
         self.bytes = bytes;
         if let Some(prepared) = prepared_ttl {
             self.deadlines.insert(prepared);
@@ -768,12 +790,12 @@ impl Records {
         let old = self
             .get(id)
             .ok_or_else(|| storage("missing editable record"))?;
-        let bytes = checkpoint_codec::json_length(old)?
+        let bytes = checkpoint_codec::json_length(&old)?
             .checked_add(growth)
             .and_then(|n| (n as u64).checked_mul(32))
             .ok_or_else(|| storage("record copy growth overflow"))?;
         let mut lease = reserve_memory(bytes).map_err(memory_error)?;
-        let mut value = old.clone();
+        let mut value = (*old).clone();
         change(&mut value)?;
         self.insert_shared(id.to_owned(), Shared::from_admitted(value, &mut lease)?)?;
         Ok(())
@@ -783,7 +805,7 @@ impl Serialize for Records {
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeMap;
         if self.base.is_none() {
-            return self.values.serialize(s);
+            return self.recent_rows().map_err(serde::ser::Error::custom)?.serialize(s);
         }
         let mut map = s.serialize_map(Some(self.len()))?;
         self.scan(None, |id, row| {
@@ -813,7 +835,7 @@ mod admission_count_tests {
         records.validate_counts().unwrap();
         assert_eq!(
             records.live_ttl_count(),
-            records.values().filter(|r| temporal::live_ttl(r)).count()
+            records.recent_rows().unwrap().values().filter(|r| temporal::live_ttl(r)).count()
         );
     }
 

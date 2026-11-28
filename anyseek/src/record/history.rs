@@ -138,10 +138,7 @@ impl Inner {
         self.state.history.floor = floor;
         self.state.time_watermark_ms = at;
         self.snapshot_bytes = snapshot_bytes;
-        self.output
-            .write()
-            .map_err(|_| RecordError::DurablePending(self.state.seq))?
-            .fenced = false;
+        self.publish_point_view(Some(false)).map_err(|_| RecordError::DurablePending(self.state.seq))?;
         self.healthy = true;
         Ok(())
     }

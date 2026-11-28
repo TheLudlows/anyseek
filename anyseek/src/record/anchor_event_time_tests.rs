@@ -617,7 +617,7 @@ async fn event_time_checkpoint_reopens_legacy_and_pins_the_selected_base() {
         .await
         .unwrap();
     let old = p.inner.lock().await.state.records.clone();
-    let old_source = old.source("item").unwrap();
+    let old_source = old.source("item").unwrap().unwrap();
     let old_row = old_source.find("item").unwrap().unwrap();
     let state_values::CurrentRow::Sealed(old_row) = old_row else {
         panic!("expected certified row")
@@ -779,7 +779,7 @@ async fn event_time_window_joins_all_manifest_deltas_and_wal_tail_then_reopens()
         .unwrap();
     let now = p.inner.lock().await.observe_time().unwrap();
     let clock = Arc::new(EventClock(AtomicU64::new(now)));
-    p.inner.lock().await.clock = clock.clone();
+    p.inner.lock().await.set_clock(clock.clone());
     for (id, time) in [("base", 100), ("move", 180), ("gone", 170), ("tie-z", 120)] {
         p.write(dated(id, id, time, ExpectedVersion::Absent))
             .await
@@ -885,7 +885,7 @@ async fn event_time_window_joins_all_manifest_deltas_and_wal_tail_then_reopens()
     let p = RecordPartition::open(&root, settings.max_journal_bytes)
         .await
         .unwrap();
-    p.inner.lock().await.clock = clock;
+    p.inner.lock().await.set_clock(clock);
     let replayed = read_window(&p, 0..200, 10).await.unwrap();
     assert_eq!(replayed.cut, 11);
     assert_eq!(hit_ids(&replayed), expected);
@@ -1946,7 +1946,7 @@ async fn event_time_vector_cut_rejects_expiry_outside_the_time_window_and_versio
     let p = RecordPartition::create(&root, config()).await.unwrap();
     let now = p.inner.lock().await.observe_time().unwrap();
     let clock = Arc::new(EventClock(AtomicU64::new(now)));
-    p.inner.lock().await.clock = clock.clone();
+    p.inner.lock().await.set_clock(clock.clone());
     p.write(dated("base", "base", 25, ExpectedVersion::Absent))
         .await
         .unwrap();
@@ -2121,7 +2121,7 @@ async fn four_channel_read_budget_and_both_watermarks_share_the_certified_cut() 
         row.document.as_mut().unwrap().shift_remove("vector");
         p.write(row).await.unwrap();
     }
-    assert_eq!(p.inner.lock().await.state.records.recent_records().len(), 3);
+    assert_eq!(p.inner.lock().await.state.records.recent_count(), 3);
     let request = |entity| TimeMixedQuery {
         window: TimeRange {
             from_ms: Some(25),

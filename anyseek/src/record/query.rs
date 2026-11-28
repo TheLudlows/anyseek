@@ -27,7 +27,7 @@ impl Candidate {
         if !self.is_current(inner).await? {
             return Ok(None);
         }
-        let source = inner.state.records.source(&self.identity.id)
+        let source = inner.state.records.source(&self.identity.id)?
             .ok_or_else(|| storage("published candidate missing from current records"))?;
         Ok(Some(PinnedCandidate { rank, candidate: self, source }))
     }
@@ -284,7 +284,7 @@ impl RecordPartition {
         let mut hits = Vec::with_capacity(records.len());
         for (PinnedCandidate { rank, candidate, source }, record) in records {
             if !temporal::visible(&record, inner.evaluation_time_ms)
-                || (inner.state.seq != cut && !source.still_selected(&inner.state.records, &candidate.identity.id))
+                || (inner.state.seq != cut && !source.still_selected(&inner.state.records, &candidate.identity.id)?)
                 || !candidate.is_current(&inner).await?
             {
                 continue;
@@ -629,7 +629,7 @@ mod tests {
         let temporary=tempfile::tempdir().unwrap();let root=temporary.path().join("records");
         let p=RecordPartition::create(&root,config()).await.unwrap();
         let clock=Arc::new(Clock(std::sync::atomic::AtomicU64::new(1000)));
-        p.inner.lock().await.clock=clock.clone();
+        p.inner.lock().await.set_clock(clock.clone());
         let mut request=write("a","a","alpha",ExpectedVersion::Absent);
         request.temporal=Some(TemporalMetadata{expire_at_ms:Some(1100),..Default::default()});
         p.write(request).await.unwrap();

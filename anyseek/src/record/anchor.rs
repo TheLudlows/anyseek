@@ -984,7 +984,7 @@ impl Inner {
         // partition guard excludes readers until the complete view is installed.
         self.index=index;self.ordinals=ordinals;self.locations=locations;
         self.anchor=Some(reference);self.payloads=loaded.payloads;if let Some(candidate)=loaded.rebased.or(candidate) {self.state=candidate;}self.snapshot_bytes=snapshot_bytes;
-        self.healthy=true;self.output.write().map_err(|_|RecordError::RecoveryRequired)?.fenced=fenced;
+        self.healthy=true;self.publish_point_view(Some(fenced))?;
         #[cfg(test)]
         if root.join(".test-anchor-post-certificate-gc").exists() {
             std::fs::write(root.join(".test-anchor-gc-failure"), b"injected retirement failure").map_err(storage)?;
@@ -1207,7 +1207,7 @@ mod tests {
             let mut inner=p.inner.lock().await;
             let seq=inner.state.seq;
             let future=inner.state.time_watermark_ms+inner.config.history.retention_ms+1;
-            inner.clock=Arc::new(FixedClock(future));
+            inner.set_clock(Arc::new(FixedClock(future)));
             inner.trim_history(future).await.unwrap();
             inner.maintain_index_tail().await.unwrap();
             assert_eq!(inner.state.seq,seq);
