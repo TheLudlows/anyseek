@@ -28,6 +28,7 @@ pub(crate) struct FacetReader<'a> {
     pub(crate) segment: &'a VectorSegment,
     previous_block: Option<usize>,
     cached: Option<FacetBlock>,
+    prefix_bytes: Option<usize>,
 }
 
 struct FacetBlock {
@@ -39,12 +40,22 @@ struct FacetBlock {
 
 impl<'a> FacetReader<'a> {
     pub(crate) fn new(segment: &'a VectorSegment) -> Self {
-        Self { segment, previous_block: None, cached: None }
+        Self { segment, previous_block: None, cached: None, prefix_bytes: None }
+    }
+
+    pub(crate) fn for_prefix(segment: &'a VectorSegment, rows: usize) -> Result<Self, RecordError> {
+        let prefix_bytes = rows.checked_mul(segment.facets_size_sum)
+            .filter(|_| rows <= segment.indexed_doc_count)
+            .ok_or_else(|| RecordError::Storage("invalid selected metadata prefix".into()))?;
+        Ok(Self { prefix_bytes: Some(prefix_bytes), ..Self::new(segment) })
     }
 
     pub(crate) fn read(&mut self, ordinal: usize, field: &FacetField) -> Result<[u8; 9], RecordError> {
         let segment = self.segment;
         segment.read_facet_with(ordinal, field, |range, dst| {
+            if self.prefix_bytes.is_some_and(|length| range.end > length) {
+                return Err(RecordError::Storage("metadata field outside selected prefix".into()));
+            }
             let start = range.start / FACET_BLOCK_BYTES * FACET_BLOCK_BYTES;
             let end = range.end - start;
             if end > FACET_BLOCK_BYTES {
@@ -56,7 +67,10 @@ impl<'a> FacetReader<'a> {
                 if self.previous_block.replace(start) != Some(start) {
                     return segment.facets_file.read_exact_at(range.start as u64, dst).map_err(read_error);
                 }
-                let length = segment.metadata_length()?;
+                let length = match self.prefix_bytes {
+                    Some(length) => length,
+                    None => segment.metadata_length()?,
+                };
                 let capacity = length.min(FACET_BLOCK_BYTES);
                 if self.cached.is_none() {
                     let memory = admit_memory(capacity as u64, Scope::current().as_ref())?;

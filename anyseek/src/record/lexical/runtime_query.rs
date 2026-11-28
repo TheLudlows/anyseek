@@ -18,6 +18,13 @@ pub(in crate::record) struct PinnedCorpus {
     index: VectorIndexArc,
     cut: Cut,
     snapshots: Vec<Arc<Snapshot>>,
+    pairing: Option<PairedMetadata>,
+    _memory: crate::resources::MemoryReservation,
+}
+
+struct PairedMetadata {
+    live: Vec<LiveSelection>,
+    dictionary_limits: Vec<Vec<usize>>,
     _memory: crate::resources::MemoryReservation,
 }
 
@@ -25,6 +32,7 @@ impl PinnedCorpus {
     pub(in crate::record) async fn capture(
         index: &VectorIndexArc,
         cut: Cut,
+        fixed: Option<&QueryWork>,
     ) -> Result<Self, RecordError> {
         let root = index.read().await;
         let bytes = size_of::<Arc<Snapshot>>() * root.segments.len();
@@ -36,11 +44,37 @@ impl PinnedCorpus {
         for segment in &root.segments {
             snapshots.push(segment.lexical.snapshot().await?);
         }
-        Ok(Self { index: index.clone(), cut, snapshots, _memory: memory })
+        let pairing = if let Some(work) = fixed {
+            let shards = futures::future::join_all(root.segments.iter().map(|segment| segment.vector.read())).await;
+            let active = active_statistics(&shards)?;
+            if active.iter().any(|active| active.fingerprints.len() != active.keys.len()) {
+                return Err(storage("vector fingerprints do not match selected ordinals"));
+            }
+            work.charge(shards.len())?;
+            let scope = crate::resources::Scope::current();
+            // Membership is shared for published components. Pairing an
+            // unpublished prefix may own at most MUTABLE_TAIL_UPDATES rows.
+            let dictionary_bytes: usize = shards.iter()
+                .map(|shard| shard.facets.len() * size_of::<usize>())
+                .sum();
+            let pairing_memory = crate::record::build_budget::admit_memory(
+                (dictionary_bytes + shards.len() * 256 + runtime::MUTABLE_TAIL_UPDATES * 256) as u64,
+                scope.as_ref(),
+            )?;
+            let live = capture_aligned(&root.segments, &snapshots, &active, Some(work))?
+                .ok_or(RecordError::Busy)?;
+            let dictionary_limits = shards.iter()
+                .map(|shard| shard.facets.iter().map(|field| field.values.len()).collect())
+                .collect();
+            Some(PairedMetadata { live, dictionary_limits, _memory: pairing_memory })
+        } else {
+            None
+        };
+        Ok(Self { index: index.clone(), cut, snapshots, pairing, _memory: memory })
     }
 
     pub(in crate::record) async fn search(
-        &self,
+        &mut self,
         text: String,
         length: usize,
         filters: Vec<FacetFilter>,
@@ -48,8 +82,14 @@ impl PinnedCorpus {
         search_corpus(
             &self.index, text, None, SearchMode::Lexical, QueryType::Union,
             0, length, ResultType::TopkCount, vec![], filters, vec![],
-            self.cut, Some(&self.snapshots),
+            self.cut, Some(&self.snapshots), self.pairing.take(),
         ).await
+    }
+
+    pub(in crate::record) fn identity(&self, address: usize) -> Option<&Identity> {
+        let n = self.snapshots.len();
+        let snapshot = self.snapshots.get(address.checked_rem(n)?)?;
+        snapshot.identities.0.get(address / n).map(Arc::as_ref)
     }
 }
 
@@ -69,7 +109,7 @@ pub(crate) async fn search(
 ) -> Result<ResultObject, RecordError> {
     search_corpus(
         index, text, vector, mode, query_type, offset, length, result_type,
-        fields, filters, sort, cut, None,
+        fields, filters, sort, cut, None, None,
     ).await
 }
 
@@ -87,6 +127,7 @@ async fn search_corpus(
     sort: Vec<ResultSort>,
     cut: Cut,
     pinned: Option<&[Arc<Snapshot>]>,
+    pairing: Option<PairedMetadata>,
 ) -> Result<ResultObject, RecordError> {
     let work = QueryWork::current();
     if let Some(work) = &work {
@@ -229,17 +270,14 @@ async fn search_corpus(
     };
 
     let shards = futures::future::join_all(root.segments.iter().map(|segment| segment.vector.read())).await;
-    if shards.iter().any(|shard| shard.failed) {
-        return Err(RecordError::RecoveryRequired);
-    }
-    let mut active_shards = Vec::with_capacity(shards.len());
-    for shard in &shards {
-        let active = shard.active.as_ref().ok_or_else(|| storage("native metadata statistics absent"))?;
-        if active.revisions.len() != active.keys.len() {
-            return Err(storage("vector revision identities missing"));
+    let active_shards = if pairing.is_some() {
+        if shards.iter().any(|shard| shard.failed) {
+            return Err(RecordError::RecoveryRequired);
         }
-        active_shards.push(active);
-    }
+        Vec::new()
+    } else {
+        active_statistics(&shards)?
+    };
     let current;
     let snapshots = if let Some(snapshots) = pinned {
         // A fixed reader does not suppress a newly reported runtime failure.
@@ -257,14 +295,16 @@ async fn search_corpus(
     };
     let views = snapshots.iter().map(Arc::as_ref).collect::<Vec<_>>();
     scoring::validate_bounds(&plan.scores, &boosts, native_fields.len())?;
-    let strict = if let Some(work) = &work {
+    let (strict, dictionary_limits, _paired_memory) = if let Some(pairing) = pairing {
+        (Some(pairing.live), Some(pairing.dictionary_limits), Some(pairing._memory))
+    } else if let Some(work) = &work {
         work.charge(snapshots.len())?;
         // An exact-cut consumer may use a published pair or an aligned bounded
         // tail, but cannot scan the whole corpus to rejoin mismatched identities.
-        Some(capture_aligned(&root.segments, snapshots, &active_shards, Some(work))?
-            .ok_or(RecordError::Busy)?)
+        (Some(capture_aligned(&root.segments, snapshots, &active_shards, Some(work))?
+            .ok_or(RecordError::Busy)?), None, None)
     } else {
-        None
+        (None, None, None)
     };
     if !hybrid && !browse && !has_positive_terms(&views, &plan.scores, work.as_deref())? {
         scoring::CorpusView::validate_snapshots(&views, cut)?;
@@ -366,14 +406,24 @@ async fn search_corpus(
         // Inspect metadata only for posting matches while the component is guarded,
         // then release component guards before native scoring.
         let mut accepted = FilteredMatches::default();
-        let mut facets = shards.iter().map(|shard| FacetReader::new(shard)).collect::<Vec<_>>();
+        let mut facets = if dictionary_limits.is_some() {
+            shards.iter().zip(&views).map(|(shard, view)| {
+                FacetReader::for_prefix(shard, view.identities.len())
+            }).collect::<Result<Vec<_>, _>>()?
+        } else {
+            shards.iter().map(|shard| FacetReader::new(shard)).collect()
+        };
         let checks = work.as_ref().map(|_| compiled.iter().map(|filters|
             crate::metadata_filter::filter_work(filters)).collect::<Vec<_>>());
         corpus.as_ref().expect("aligned corpus").visit(plan.predicate.as_ref(), |slot, ordinal, _| {
             if let (Some(work), Some(checks)) = (&work, &checks) {
                 work.charge(checks[slot])?;
             }
-            if !crate::metadata_filter::is_facet_filter(&mut facets[slot], &compiled[slot], ordinal)? {
+            // Rows and dictionary IDs in the selected prefix are immutable.
+            // A newer dictionary can add accepted IDs, but none can match a
+            // valid row from S. Use S's boundary to detect corrupt IDs.
+            let limits = dictionary_limits.as_ref().map(|limits| limits[slot].as_slice());
+            if !crate::metadata_filter::is_facet_filter_at(&mut facets[slot], &compiled[slot], ordinal, limits)? {
                 accepted.insert(ordinal * n + slot, scope.as_ref())?;
             }
             Ok(())
@@ -536,6 +586,21 @@ async fn search_corpus(
     }
     result.result_count = result.results.len();
     Ok(result)
+}
+
+fn active_statistics<'a>(
+    shards: &'a [tokio::sync::RwLockReadGuard<'_, crate::index::VectorSegment>],
+) -> Result<Vec<&'a crate::active::ActiveStatistics>, RecordError> {
+    shards.iter().map(|shard| {
+        if shard.failed {
+            return Err(RecordError::RecoveryRequired);
+        }
+        let active = shard.active.as_ref().ok_or_else(|| storage("native metadata statistics absent"))?;
+        if active.revisions.len() != active.keys.len() {
+            return Err(storage("vector revision identities missing"));
+        }
+        Ok(active)
+    }).collect()
 }
 
 struct VectorRow {

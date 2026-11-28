@@ -15,6 +15,15 @@ pub(super) struct Candidate {
     hit: crate::min_heap::Result,
 }
 impl Candidate {
+    pub(super) fn pin_source(
+        self,
+        rank: usize,
+        source: impl FnOnce(&str) -> Result<state_values::RecordSource, RecordError>,
+    ) -> Result<PinnedCandidate, RecordError> {
+        let source = source(&self.identity.id)?;
+        Ok(PinnedCandidate { rank, candidate: self, source })
+    }
+
     async fn is_current(&self, inner: &Inner) -> Result<bool, RecordError> {
         match inner.locations.get(&self.identity.id) {
             Some(&ordinal) => inner.index
@@ -123,6 +132,14 @@ impl Handle {
         &self,
         hits: Vec<crate::min_heap::Result>,
     ) -> Result<Vec<Candidate>, RecordError> {
+        self.candidates_from(hits, None).await
+    }
+
+    pub(super) async fn candidates_from(
+        &self,
+        hits: Vec<crate::min_heap::Result>,
+        lexical: Option<&lexical::runtime_query::PinnedCorpus>,
+    ) -> Result<Vec<Candidate>, RecordError> {
         let root = self.index.read().await;
         let shards =
             futures::future::join_all(root.segments.iter().map(|segment| segment.vector.read())).await;
@@ -142,15 +159,17 @@ impl Handle {
                 .keys
                 .get(local)
                 .ok_or_else(|| storage("candidate ordinal outside captured topology"))?;
-            candidates.push(Candidate {
-                identity: lexical::Identity {
-                    id: key.clone(),
-                    version: active.revisions.get(local).ok_or_else(|| storage("candidate revision missing"))?.0,
-                    revision: active.revisions[local].1,
-                },
-                fingerprint: active.fingerprints[local],
-                hit,
-            });
+            let &(version, revision) = active.revisions.get(local)
+                .ok_or_else(|| storage("candidate revision missing"))?;
+            let identity = lexical::Identity { id: key.clone(), version, revision };
+            if let Some(lexical) = lexical
+                && lexical.identity(hit.doc_id) != Some(&identity)
+            {
+                return Err(storage("candidate identity does not match the selected native ordinal"));
+            }
+            let fingerprint = *active.fingerprints.get(local)
+                .ok_or_else(|| storage("candidate fingerprint missing"))?;
+            candidates.push(Candidate { identity, fingerprint, hit });
         }
         Ok(candidates)
     }

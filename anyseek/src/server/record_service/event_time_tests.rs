@@ -623,9 +623,14 @@ async fn event_time_lexical_snapshot_stays_at_the_selected_cut() {
     let sdk = Arc::new(local::LocalEngine::from_test_service(service.clone()));
     create_mixed_collection(&app).await;
 
-    let request = json!({"recall":{"time":{"from_ms":0,"to_ms":1}},"query":"sentinel","length":4});
+    let request = json!({
+        "recall":{"time":{"from_ms":18,"to_ms":22}},
+        "query":"sentinel", "length":4,
+        "filter":[{"StringSet":{"field":"tags","filter":["selected"]}}]
+    });
     let mut row = mixed_row("original", "row", None);
     row["document"]["body"] = json!("sentinel original");
+    row["document"]["tags"] = json!(["selected"]);
     write_mixed(&app, vec![row]).await;
     assert_eq!(
         build(&app, master_headers(), "window").await,
@@ -637,66 +642,121 @@ async fn event_time_lexical_snapshot_stays_at_the_selected_cut() {
     let gate = record_dir.join(".test-event-time-lexical-worker-pause");
     let entered = record_dir.join(".test-event-time-lexical-worker-pause-entered");
 
-    for (use_sdk, version) in [(false, 2), (true, 3)] {
-        std::fs::write(&gate, b"pause").unwrap();
-        let request_copy = request.clone();
-        let pending = if use_sdk {
-            let reader = sdk.clone();
-            tokio::spawn(async move {
-                reader
-                    .query_time_text("tenant", "window", serde_json::from_value(request_copy).unwrap())
-                    .await
-                    .unwrap_err()
-                    .code()
-                    .to_owned()
-            })
-        } else {
-            let router = app.clone();
-            tokio::spawn(async move {
-                let (status, body) = request_mixed(&router, "window", "tenant", request_copy).await;
-                assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
-                assert!(body.get("hits").is_none(), "{body}");
-                body["code"].as_str().unwrap().to_owned()
-            })
-        };
-        wait_marker(&entered).await;
-        let mut update = mixed_row(&format!("patch-{version}"), "row", None);
-        update["expected"] = json!({"Match":version - 1});
-        update["document"]["body"] = json!(format!("sentinel version {version}"));
-        write_mixed(&app, vec![update]).await;
-        tokio::time::timeout(Duration::from_secs(3), async {
-            loop {
-                let progress = partition.committed_progress().await;
-                assert!(!progress.recovery_required);
-                if progress.committed_seq == Some(version) && progress.lexical_seq == version
-                    && progress.vector_seq == version
-                {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(1)).await;
+    let lookup = |use_sdk: bool| {
+        let (sdk, app, request) = (sdk.clone(), app.clone(), request.clone());
+        async move {
+            if use_sdk {
+                let output = sdk.query_time_text("tenant", "window", serde_json::from_value(request).unwrap())
+                    .await.unwrap();
+                serde_json::to_value(output).unwrap()
+            } else {
+                let (status, body) = request_mixed(&app, "window", "tenant", request).await;
+                assert_eq!(status, StatusCode::OK, "{body}");
+                body
             }
-        }).await.unwrap();
-        std::fs::remove_file(&gate).unwrap();
-        std::fs::remove_file(&entered).unwrap();
-        assert_eq!(pending.await.unwrap(), "busy", "sdk={use_sdk}, cut={version}");
+        }
+    };
+    let wait_published = |seq| {
+        let partition = partition.clone();
+        async move {
+            tokio::time::timeout(Duration::from_secs(3), async {
+                loop {
+                    let progress = partition.committed_progress().await;
+                    assert!(!progress.recovery_required);
+                    if progress.committed_seq == Some(seq) && progress.lexical_seq == seq
+                        && progress.vector_seq == seq
+                    {
+                        return;
+                    }
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+            }).await.unwrap();
+        }
+    };
 
-        let fresh = if use_sdk {
-            let output = sdk
-                .query_time_text("tenant", "window", serde_json::from_value(request.clone()).unwrap())
-                .await
-                .unwrap();
-            serde_json::to_value(output).unwrap()
-        } else {
-            let (status, body) = request_mixed(&app, "window", "tenant", request.clone()).await;
-            assert_eq!(status, StatusCode::OK, "{body}");
-            body
-        };
-        assert_eq!(fresh["visible_seq"], version);
-        assert_eq!(fresh["hits"].as_array().unwrap().len(), 1);
-        assert_eq!(fresh["hits"][0]["record"]["record_id"], "row");
-        assert_eq!(fresh["hits"][0]["record"]["version"], version);
-    }
-    assert_eq!(request_mixed(&app, "window", "outside", request).await.0, StatusCode::FORBIDDEN);
+    assert!(anyseek::record::tests::test_has_sealed_record_source(&partition, "row").await);
+    let original = lookup(false).await;
+    assert_eq!(original["visible_seq"], 1);
+    assert_eq!(original["hits"][0]["record"]["document"]["body"], "sentinel original");
+    std::fs::write(&gate, b"pause").unwrap();
+    let old_http = tokio::spawn(lookup(false));
+    wait_marker(&entered).await;
+    let mut unrelated = mixed_row("unrelated", "outside", None);
+    unrelated["temporal"]["event_time_ms"] = json!(100);
+    unrelated["document"]["tags"] = json!(["selected", "variant"]);
+    write_mixed(&app, vec![unrelated]).await;
+    wait_published(2).await;
+    // Retire the original certified base while the HTTP query still owns S.
+    assert_eq!(build(&app, master_headers(), "window").await.0, StatusCode::OK);
+    std::fs::remove_file(&gate).unwrap();
+    let old_http = old_http.await.unwrap();
+    assert_eq!(old_http["visible_seq"], 1);
+    assert_eq!(old_http["hits"], original["hits"]);
+    std::fs::remove_file(&entered).unwrap();
+
+    let before_delete = lookup(true).await;
+    assert_eq!(before_delete["visible_seq"], 2);
+    assert_eq!(before_delete["hits"].as_array().unwrap().len(), 1);
+    assert_eq!(before_delete["hits"][0]["record"], original["hits"][0]["record"]);
+    let lexical_score = |body: &Value| {
+        body["hits"][0]["channels"].as_array().unwrap().iter()
+            .find(|lane| lane["channel"] == "lexical").unwrap()["raw_score"].as_f64().unwrap()
+    };
+    assert_ne!(lexical_score(&before_delete), lexical_score(&original));
+
+    std::fs::write(&gate, b"pause").unwrap();
+    let old_sdk = tokio::spawn(lookup(true));
+    wait_marker(&entered).await;
+    let mut delete = mixed_row("delete", "row", None);
+    delete["expected"] = json!({"Match":1});
+    delete["document"] = Value::Null;
+    delete["temporal"] = Value::Null;
+    write_mixed(&app, vec![delete]).await;
+    wait_published(3).await;
+    std::fs::remove_file(&gate).unwrap();
+    let old_sdk = old_sdk.await.unwrap();
+    assert_eq!(old_sdk["visible_seq"], 2);
+    assert_eq!(old_sdk["hits"], before_delete["hits"]);
+
+    let new_http = lookup(false).await;
+    assert_eq!(new_http["visible_seq"], 3);
+    assert_eq!(new_http["hits"], json!([]));
+    let mut replacement = mixed_row("replacement", "row", None);
+    replacement["expected"] = json!({"Match":2});
+    replacement["document"]["body"] = json!("sentinel recreated");
+    replacement["document"]["tags"] = json!(["selected"]);
+    write_mixed(&app, vec![replacement]).await;
+    wait_published(4).await;
+    let new_sdk = lookup(true).await;
+    assert_eq!(new_sdk["visible_seq"], 4);
+    assert_eq!(new_sdk["hits"][0]["record"]["version"], 3);
+    assert_eq!(new_sdk["hits"][0]["record"]["document"]["body"], "sentinel recreated");
+
+    assert_eq!(request_mixed(&app, "window", "outside", request.clone()).await.0, StatusCode::FORBIDDEN);
+
+    std::fs::remove_file(&entered).unwrap();
+    std::fs::write(&gate, b"pause").unwrap();
+    let pending_http = tokio::spawn({
+        let app = app.clone();
+        let request = request.clone();
+        async move { request_mixed(&app, "window", "tenant", request).await }
+    });
+    wait_marker(&entered).await;
+    anyseek::record::tests::fail_next_write_after_durable(&partition).await;
+    let failure = mixed_row("failed-publication", "bad", None);
+    let (status, receipt) = namespace_api(
+        &app, "POST", BATCH, "tenant", Some(json!({"writes":[failure]})),
+    ).await;
+    assert_eq!(status, StatusCode::OK, "{receipt}");
+    assert_eq!(receipt["results"][0]["code"], "durable_pending", "{receipt}");
+    std::fs::remove_file(&gate).unwrap();
+    let (status, failed) = pending_http.await.unwrap();
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{failed}");
+    assert_eq!(failed["code"], "recovery_required");
+    assert!(failed.get("hits").is_none());
+    assert_eq!(sdk.query_time_text("tenant", "window", serde_json::from_value(request).unwrap())
+        .await.unwrap_err().code(), "recovery_required");
+
     drop(partition);
     drop(sdk);
     drop(app);
@@ -704,8 +764,42 @@ async fn event_time_lexical_snapshot_stays_at_the_selected_cut() {
 }
 
 #[tokio::test]
+async fn event_time_absent_lexical_term_does_not_expand_facets() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("catalog");
+    let service = open(&root).await;
+    let app = router(service.clone());
+    create_mixed_collection(&app).await;
+    let rows = (0..32).map(|n| {
+        let id = format!("variant-{n}");
+        let mut row = mixed_row(&id, &id, None);
+        row["document"]["body"] = json!("sentinel");
+        row["document"]["tags"] = json!(["selected", id]);
+        row
+    }).collect();
+    write_mixed(&app, rows).await;
+    assert_eq!(build(&app, master_headers(), "window").await.0, StatusCode::OK);
+
+    let mut request = json!({
+        "recall":{"time":{"from_ms":0,"to_ms":1}},"query":"neverindexedtoken",
+        "filter":[{"StringSet":{"field":"tags","filter":vec!["selected"; 128]}}]
+    });
+    let (status, absent) = request_mixed(&app, "window", "tenant", request.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{absent}");
+    assert_eq!(absent["visible_seq"], 32);
+    assert_eq!(absent["hits"], json!([]));
+
+    request["query"] = json!("sentinel");
+    let (status, large) = request_mixed(&app, "window", "tenant", request).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{large}");
+    assert!(large["message"].as_str().unwrap().contains("work budget"), "{large}");
+    drop(app);
+    service.shutdown().wait().await.unwrap();
+}
+
+#[tokio::test]
 async fn event_time_public_handoffs_keep_point_observed_expiry_after_rollback() {
-    for mixed in [true, false] {
+    for mode in ["vector", "lexical", "time"] {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().join("catalog");
         let service = open(&root).await;
@@ -720,13 +814,12 @@ async fn event_time_public_handoffs_keep_point_observed_expiry_after_rollback() 
             build(&app, master_headers(), "window").await,
             (StatusCode::OK, json!({"indexed_seq":1}))
         );
-        let (path, request) = if mixed {
-            (MIXED_QUERY, mixed_request())
-        } else {
-            (
-                QUERY,
-                json!({"temporal":{"event":{"from_ms":18,"to_ms":22}}}),
-            )
+        let (path, request) = match mode {
+            "vector" => (MIXED_QUERY, mixed_request()),
+            "lexical" => (MIXED_QUERY, json!({
+                "recall":{"time":{"from_ms":18,"to_ms":22}}, "query":"expires"
+            })),
+            _ => (QUERY, json!({"temporal":{"event":{"from_ms":18,"to_ms":22}}})),
         };
         let response =
             namespace_response(&app, "POST", path, "tenant", Some(request.clone())).await;
@@ -735,16 +828,19 @@ async fn event_time_public_handoffs_keep_point_observed_expiry_after_rollback() 
         std::fs::write(&gate, b"pause").unwrap();
         let reader = sdk.clone();
         let pending = tokio::spawn(async move {
-            if mixed {
-                reader
+            match mode {
+                "vector" => reader
                     .query_time_vector("tenant", "window", serde_json::from_value(request).unwrap())
                     .await
-                    .map(|_| ())
-            } else {
-                reader
+                    .map(|_| ()),
+                "lexical" => reader
+                    .query_time_text("tenant", "window", serde_json::from_value(request).unwrap())
+                    .await
+                    .map(|_| ()),
+                _ => reader
                     .query_event_time("tenant", "window", serde_json::from_value(request).unwrap())
                     .await
-                    .map(|_| ())
+                    .map(|_| ()),
             }
         });
         wait_marker(&root.join(".test-event-read-handoff-started")).await;
